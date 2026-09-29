@@ -6,9 +6,13 @@
   "scripts": {
     "dev": "wrangler dev",
     "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN:test-caller",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "agent": "node agent/local-agent.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.143.0"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
   }
 }

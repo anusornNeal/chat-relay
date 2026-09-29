@@ -22,3 +22,9 @@ The agent receives `{ "requestId": "...", "payload": ... }` and must reply with 
 ## Local integration test
 
 Install dependencies with `npm install`. In one terminal run `npm run dev:test`; in another run `python test/integration.py`. The integration test requires Python's `websockets` package (`python -m pip install websockets`) and checks authentication, validation, status, streaming size rejection, concurrent response matching, replacement, and the 30-second timeout. `npm run dev:test` uses fixed test-only tokens and must only be used locally.
+
+## Local agent
+
+Run the agent with `RELAY_URL` and `AGENT_TOKEN` in the environment, then `npm run agent`.
+It connects to `/agent`, reconnects automatically after disconnects, echoes normal payloads,
+and responds to `{ "action": "ping" }` with a `pong` payload.
