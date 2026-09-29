@@ -2,5 +2,12 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "chat-relay",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-29"
+  "compatibility_date": "2026-09-29",
+  "durable_objects": {
+    "bindings": [{ "name": "RELAY", "class_name": "Relay" }]
+  },
+  "secrets": { "required": ["AGENT_TOKEN", "CALLER_TOKEN"] },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Relay"] }
+  ]
 }

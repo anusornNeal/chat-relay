@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN:test-caller",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
