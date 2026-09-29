@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
+import { handleDeviceAuth } from "./device-auth";
 import { Registry, hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 
 export { Registry };
@@ -789,9 +790,16 @@ export default {
 
     if (path === "/health") {
       return request.method === "GET"
-        ? Response.json({ status: "ok", service: "chat-relay", version: "0.4.0" })
+        ? Response.json({ status: "ok", service: "chat-relay", version: "0.5.0" })
         : error(405, "method_not_allowed");
     }
+
+    const authResponse = await handleDeviceAuth(
+      request,
+      (registryPath, body) => registryCall(env, registryPath, body),
+      (authRequest) => authenticateUser(authRequest, env),
+    );
+    if (authResponse) return authResponse;
 
     if (path.startsWith("/admin/")) {
       return adminHandler(request, env);

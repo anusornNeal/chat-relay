@@ -23,57 +23,55 @@ Cloudflare Worker
 
 The relay is generic and has no Devflow-specific logic.
 
+## Zero-checkout CLI
+
+End users do not need this repository. After the npm package is published, the normal command is:
+
+```bash
+npx @anusornneal/chat-relay@latest remote
+```
+
+First run starts a device-login flow, opens the browser, and shows a short code. The browser page signs in with a Chat Relay login/password; if that login does not exist yet, it creates the account. After approval the CLI receives scoped user-session and agent credentials, stores them outside the project, and connects the local agent.
+
+Subsequent runs reuse the local credentials:
+
+```bash
+npx @anusornneal/chat-relay@latest remote
+```
+
+Other commands:
+
+```bash
+npx @anusornneal/chat-relay@latest login
+npx @anusornneal/chat-relay@latest status
+npx @anusornneal/chat-relay@latest logout
+```
+
+On Windows the config defaults to `%LOCALAPPDATA%\chat-relay\config.json`. On macOS/Linux it uses `$XDG_CONFIG_HOME/chat-relay/config.json` or `~/.config/chat-relay/config.json`. Set `CHAT_RELAY_HOME` to override the location.
+
+Useful options:
+
+```bash
+chat-relay remote --root "C:\Users\you\Projects"
+chat-relay login --name "Work PC"
+chat-relay login --no-open
+```
+
+The published package locates its bundled local agent relative to the package itself, so commands work from any working directory. Existing repository users can still run `npm start`; legacy `.dev.vars` credentials are migrated once into the user-level config.
+
 ## Authentication and multi-user model
 
-- Each user has an independent opaque user token.
-- Each local machine has an `agentId` and independent agent token.
-- User tokens and agent tokens are stored in Cloudflare only as SHA-256 hashes.
+- Browser/device login uses a short-lived device code. Raw user or admin tokens are not typed into the CLI.
+- New accounts use a unique login plus password. Passwords are stored only as salted PBKDF2-SHA256 hashes.
+- Login failures are throttled per login.
+- CLI user sessions are opaque random tokens stored server-side only as hashes and expire after 90 days.
+- Each local machine has an independent `agentId` and agent token; agent tokens are stored server-side only as hashes.
 - Grants map users to agents with scopes: `read`, `write`, `terminal`, `process`, or `*`.
-- A user with one permitted agent can omit `agentId`; with multiple permitted agents the tool call must select one.
-- `ADMIN_TOKEN` protects the administration API.
-- ChatGPT can authenticate with `/mcp?key=<USER_TOKEN>`. Bearer auth is also accepted by the server for non-ChatGPT clients.
+- Logging out revokes the local user session and the owning machine credential.
+- `ADMIN_TOKEN` remains separate and protects administration routes.
+- The existing legacy owner token remains supported so current ChatGPT MCP URLs continue to work during migration.
 
-The query-string user token is practical for the current ChatGPT custom MCP flow, but OAuth should be preferred if this is later exposed to a broad external audience.
-
-## One-command local UX
-
-After the first configuration, run only:
-
-```bash
-npm start
-```
-
-`npm run remote` is an alias. The launcher checks Worker health, loads `.dev.vars`, prints the active agent/filesystem configuration, starts the local agent, and restarts it automatically if the process exits unexpectedly.
-
-If `.dev.vars` is missing or incomplete, `npm start` opens a short interactive setup and writes the local configuration. To change it later:
-
-```bash
-npm start -- --setup
-```
-
-## Local agent configuration
-
-Copy `.dev.vars.example` to ignored `.dev.vars` and configure at least (or let `npm start` create it interactively):
-
-```
-RELAY_URL=https://<worker>.workers.dev
-AGENT_ID=default
-AGENT_NAME=Primary PC
-AGENT_TOKEN=<agent token>
-TERMINAL_ENABLED=1
-ALLOWED_ROOTS=C:\Users\you\Projects
-```
-
-Run:
-
-```
-npm install
-npm start
-```
-
-The agent reconnects automatically.
-
-`ALLOWED_ROOTS` is a semicolon-separated list used by filesystem tools. Terminal commands are a separate capability and are controlled by the `terminal` grant plus `TERMINAL_ENABLED`.
+ChatGPT can currently authenticate with `/mcp?key=<USER_TOKEN>`; Bearer auth is also accepted by the server. Browser/device login is for the zero-checkout local CLI and creates the same registry user/agent model.
 
 ## MCP tools
 
@@ -143,6 +141,12 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 | Route | Authentication | Purpose |
 | --- | --- | --- |
 | `GET /health` | none | Worker health |
+| `POST /auth/device/start` | none | Start CLI device authorization |
+| `GET /device?user_code=<code>` | none | Browser sign-in/approval page |
+| `POST /auth/device/approve` | login/password + device code | Approve or create a user account |
+| `POST /auth/device/token` | device code | Exchange approved device code for session/agent credentials |
+| `GET /auth/me` | user Bearer token | Current user and permitted agents |
+| `POST /auth/logout` | user Bearer token | Revoke local session and owning agent credential |
 | `POST /mcp?key=<user token>` | user token | Streamable HTTP MCP |
 | `GET /agent?agentId=<id>` | agent Bearer token | Local agent WebSocket |
 | `GET /status?agentId=<id>` | user token | Agent online status |
@@ -175,3 +179,17 @@ node test/multiuser-smoke.mjs
 ```
 
 It verifies the MCP tool surface, agent routing, filesystem operations, search sessions, process listing, persistent terminals, scope enforcement, multi-agent selection, and token rotation.
+
+Device/browser login is covered by:
+
+```bash
+TEST_RELAY_URL=http://127.0.0.1:8796 npm run test:device-auth
+```
+
+After `npm pack`, the zero-checkout package smoke test installs and runs the tarball from a temporary directory:
+
+```bash
+CHAT_RELAY_TARBALL=<path-to-tgz> TEST_RELAY_URL=http://127.0.0.1:8796 npm run test:zero-checkout
+```
+
+The npm package is configured as `@anusornneal/chat-relay`. Publishing requires an authenticated npm account with access to that scope.

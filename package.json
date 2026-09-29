@@ -1,26 +1,46 @@
 {
-  "name": "chat-relay",
-  "version": "0.4.1",
-  "private": true,
+  "name": "@anusornneal/chat-relay",
+  "version": "0.5.0",
+  "description": "Zero-checkout remote MCP agent for ChatGPT with terminal, filesystem, process, multi-user, and multi-agent support.",
   "type": "module",
+  "bin": {
+    "chat-relay": "./bin/chat-relay.js"
+  },
+  "files": [
+    "bin/",
+    "cli/",
+    "agent/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "start": "node bin/chat-relay.js remote",
+    "remote": "node bin/chat-relay.js remote",
+    "login": "node bin/chat-relay.js login",
+    "logout": "node bin/chat-relay.js logout",
+    "status": "node bin/chat-relay.js status",
     "dev": "wrangler dev",
-    "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN:test-caller",
+    "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN=test-caller",
     "deploy": "wrangler deploy",
     "agent": "node --env-file-if-exists=.dev.vars agent/local-agent.mjs",
-    "test:terminal": "node test/mcp-terminal-smoke.mjs",
     "admin": "node scripts/admin.mjs",
+    "test:terminal": "node test/mcp-terminal-smoke.mjs",
     "test:full": "node test/multiuser-smoke.mjs",
-    "start": "node scripts/start.mjs",
-    "remote": "node scripts/start.mjs"
-  },
-  "devDependencies": {
-    "wrangler": "^4.143.0"
+    "test:device-auth": "node test/device-auth-smoke.mjs",
+    "test:zero-checkout": "node test/zero-checkout-smoke.mjs"
   },
   "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
     "agents": "^0.24.0",
-    "ws": "^8.22.0",
+    "wrangler": "^4.143.0",
     "zod": "^4.6.5"
   }
 }

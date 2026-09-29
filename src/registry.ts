@@ -1,10 +1,20 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  PASSWORD_ITERATIONS,
+  derivePasswordHash,
+  randomSalt,
+  secureEqual,
+} from "./auth-crypto";
 
 export type Scope = "read" | "write" | "terminal" | "process" | "admin";
 export type UserRecord = {
   id: string;
   name: string;
-  tokenHash: string;
+  tokenHash?: string;
+  login?: string;
+  passwordSalt?: string;
+  passwordHash?: string;
+  passwordIterations?: number;
   enabled: boolean;
   createdAt: string;
 };
@@ -12,6 +22,7 @@ export type AgentRecord = {
   id: string;
   name: string;
   tokenHash: string;
+  ownerUserId?: string;
   enabled: boolean;
   createdAt: string;
   lastSeenAt?: string;
@@ -23,13 +34,48 @@ export type GrantRecord = {
   createdAt: string;
 };
 
+type UserSessionRecord = {
+  userId: string;
+  tokenHash: string;
+  createdAt: string;
+  expiresAt: string;
+};
+
+type DeviceAuthRecord = {
+  deviceCodeHash: string;
+  userCode: string;
+  agentId: string;
+  agentName: string;
+  status: "pending" | "approved" | "consumed";
+  userId?: string;
+  createdAt: string;
+  expiresAt: string;
+};
+
+type LoginAttemptRecord = {
+  count: number;
+  windowStartedAt: string;
+  blockedUntil?: string;
+};
+
+const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 5;
+const DEVICE_START_WINDOW_MS = 10 * 60 * 1000;
+const DEVICE_START_MAX = 30;
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 const key = {
   user: (id: string) => `user:${id}`,
+  userLogin: (login: string) => `ul:${login}`,
   userToken: (hash: string) => `ut:${hash}`,
+  userSession: (hash: string) => `us:${hash}`,
   agent: (id: string) => `agent:${id}`,
   agentToken: (hash: string) => `at:${hash}`,
   grant: (userId: string, agentId: string) => `grant:${userId}:${agentId}`,
+  device: (hash: string) => `device:${hash}`,
+  deviceUserCode: (userCode: string) => `device-code:${userCode}`,
+  loginAttempt: (login: string) => `login-attempt:${login}`,
+  deviceStartRate: (sourceHash: string) => `device-start-rate:${sourceHash}`,
 };
 
 export async function hashToken(token: string): Promise<string> {
@@ -56,6 +102,28 @@ function hasScope(grant: GrantRecord, scope: string): boolean {
   return grant.scopes.includes("*") || grant.scopes.includes(scope);
 }
 
+function normalizeLogin(value: string): string {
+  const login = value.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(login)) {
+    throw new Error("invalid_login");
+  }
+  return login;
+}
+
+function publicUser(user: UserRecord) {
+  return {
+    id: user.id,
+    name: user.name,
+    login: user.login ?? null,
+    enabled: user.enabled,
+    createdAt: user.createdAt,
+  };
+}
+
+function isExpired(iso: string): boolean {
+  return Date.parse(iso) <= Date.now();
+}
+
 export class Registry extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -72,6 +140,11 @@ export class Registry extends DurableObject {
       case "/agents/set-enabled": return this.setAgentEnabled(body);
       case "/users/rotate": return this.rotateUser(body);
       case "/agents/rotate": return this.rotateAgent(body);
+      case "/device/start": return this.startDevice(body);
+      case "/device/approve": return this.approveDevice(body);
+      case "/device/exchange": return this.exchangeDevice(body);
+      case "/session/revoke": return this.revokeSession(body);
+      case "/session/logout-agent": return this.logoutAgent(body);
       case "/auth/user": return this.authUser(body);
       case "/auth/agent": return this.authAgent(body);
       case "/resolve": return this.resolveAgent(body);
@@ -83,7 +156,17 @@ export class Registry extends DurableObject {
 
   private async bootstrap(body: any): Promise<Response> {
     const existing = await this.ctx.storage.get<UserRecord>(key.user("owner"));
-    if (existing) return json({ ok: true, alreadyBootstrapped: true });
+    if (existing) {
+      let migratedOwner = false;
+      const requestedAgentId = normalizeAgentId(String(body?.agentId || "default"));
+      const existingAgent = await this.ctx.storage.get<AgentRecord>(key.agent(requestedAgentId));
+      if (existingAgent && !existingAgent.ownerUserId) {
+        existingAgent.ownerUserId = existing.id;
+        await this.ctx.storage.put(key.agent(existingAgent.id), existingAgent);
+        migratedOwner = true;
+      }
+      return json({ ok: true, alreadyBootstrapped: true, migratedOwner });
+    }
 
     if (!body?.userTokenHash || !body?.agentTokenHash) {
       return json({ error: "bootstrap_tokens_required" }, 400);
@@ -101,6 +184,7 @@ export class Registry extends DurableObject {
       id: normalizeAgentId(body.agentId || "default"),
       name: body.agentName || "Default PC",
       tokenHash: body.agentTokenHash,
+      ownerUserId: user.id,
       enabled: true,
       createdAt: now,
     };
@@ -152,6 +236,7 @@ export class Registry extends DurableObject {
       id,
       name: String(body.name).slice(0, 120),
       tokenHash: String(body.tokenHash),
+      ownerUserId: body?.ownerUserId ? String(body.ownerUserId) : undefined,
       enabled: true,
       createdAt: new Date().toISOString(),
     };
@@ -238,13 +323,271 @@ export class Registry extends DurableObject {
     return json({ ok: true, agent: { id: agent.id, name: agent.name, enabled: agent.enabled } });
   }
 
+  private async startDevice(body: any): Promise<Response> {
+    const deviceCodeHash = String(body?.deviceCodeHash ?? "");
+    const userCode = String(body?.userCode ?? "").trim().toUpperCase();
+    const agentName = String(body?.agentName ?? "").trim().slice(0, 120);
+    const expiresAt = String(body?.expiresAt ?? "");
+    const sourceHash = String(body?.sourceHash ?? "unknown").slice(0, 128);
+    if (!deviceCodeHash || !userCode || !agentName || !expiresAt || isExpired(expiresAt)) {
+      return json({ error: "invalid_device_request" }, 400);
+    }
+
+    let agentId: string;
+    try { agentId = normalizeAgentId(String(body?.agentId ?? "")); }
+    catch { return json({ error: "invalid_agent_id" }, 400); }
+
+    const now = Date.now();
+    const rateKey = key.deviceStartRate(sourceHash);
+    const currentRate = await this.ctx.storage.get<LoginAttemptRecord>(rateKey);
+    const rate: LoginAttemptRecord = !currentRate ||
+      now - Date.parse(currentRate.windowStartedAt) > DEVICE_START_WINDOW_MS
+      ? { count: 1, windowStartedAt: new Date(now).toISOString() }
+      : { ...currentRate, count: currentRate.count + 1 };
+    if (rate.count > DEVICE_START_MAX) return json({ error: "rate_limited" }, 429);
+    await this.ctx.storage.put(rateKey, rate);
+
+    if (await this.ctx.storage.get(key.deviceUserCode(userCode))) {
+      return json({ error: "user_code_collision" }, 409);
+    }
+
+    const record: DeviceAuthRecord = {
+      deviceCodeHash,
+      userCode,
+      agentId,
+      agentName,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      expiresAt,
+    };
+
+    await this.ctx.storage.put({
+      [key.device(deviceCodeHash)]: record,
+      [key.deviceUserCode(userCode)]: deviceCodeHash,
+    });
+    return json({ ok: true });
+  }
+
+  private async loginBlocked(login: string): Promise<boolean> {
+    const attempt = await this.ctx.storage.get<LoginAttemptRecord>(key.loginAttempt(login));
+    if (!attempt) return false;
+    if (attempt.blockedUntil && Date.parse(attempt.blockedUntil) > Date.now()) return true;
+    if (Date.now() - Date.parse(attempt.windowStartedAt) > LOGIN_WINDOW_MS) {
+      await this.ctx.storage.delete(key.loginAttempt(login));
+      return false;
+    }
+    return false;
+  }
+
+  private async recordLoginFailure(login: string): Promise<void> {
+    const current = await this.ctx.storage.get<LoginAttemptRecord>(key.loginAttempt(login));
+    const now = Date.now();
+    const record: LoginAttemptRecord = !current || now - Date.parse(current.windowStartedAt) > LOGIN_WINDOW_MS
+      ? { count: 1, windowStartedAt: new Date(now).toISOString() }
+      : { ...current, count: current.count + 1 };
+    if (record.count >= LOGIN_MAX_FAILURES) {
+      record.blockedUntil = new Date(now + LOGIN_WINDOW_MS).toISOString();
+    }
+    await this.ctx.storage.put(key.loginAttempt(login), record);
+  }
+
+  private async approveDevice(body: any): Promise<Response> {
+    const userCode = String(body?.userCode ?? "").trim().toUpperCase();
+    const loginRaw = String(body?.login ?? "");
+    const password = String(body?.password ?? "");
+    const name = String(body?.name ?? "").trim();
+
+    if (!userCode || password.length < 8 || password.length > 128) {
+      return json({ error: "invalid_credentials" }, 400);
+    }
+
+    let login: string;
+    try { login = normalizeLogin(loginRaw); }
+    catch { return json({ error: "invalid_login" }, 400); }
+
+    const deviceCodeHash = await this.ctx.storage.get<string>(key.deviceUserCode(userCode));
+    if (!deviceCodeHash) return json({ error: "device_code_not_found" }, 404);
+
+    const device = await this.ctx.storage.get<DeviceAuthRecord>(key.device(deviceCodeHash));
+    if (!device || isExpired(device.expiresAt)) {
+      await this.ctx.storage.delete([key.device(deviceCodeHash), key.deviceUserCode(userCode)]);
+      return json({ error: "device_code_expired" }, 410);
+    }
+    if (device.status !== "pending") return json({ error: "device_code_already_used" }, 409);
+
+    let userId = await this.ctx.storage.get<string>(key.userLogin(login));
+    let user: UserRecord | undefined;
+
+    if (userId) {
+      if (await this.loginBlocked(login)) return json({ error: "too_many_attempts" }, 429);
+      user = await this.ctx.storage.get<UserRecord>(key.user(userId));
+      if (!user?.enabled || !user.passwordSalt || !user.passwordHash) {
+        return json({ error: "account_unavailable" }, 403);
+      }
+      const derived = await derivePasswordHash(
+        password,
+        user.passwordSalt,
+        user.passwordIterations ?? PASSWORD_ITERATIONS,
+      );
+      if (!secureEqual(derived, user.passwordHash)) {
+        await this.recordLoginFailure(login);
+        return json({ error: "invalid_credentials" }, 401);
+      }
+      await this.ctx.storage.delete(key.loginAttempt(login));
+    } else {
+      const userName = (name || login).slice(0, 120);
+      const salt = randomSalt();
+      userId = `user-${crypto.randomUUID().slice(0, 12)}`;
+      user = {
+        id: userId,
+        name: userName,
+        login,
+        passwordSalt: salt,
+        passwordHash: await derivePasswordHash(password, salt, PASSWORD_ITERATIONS),
+        passwordIterations: PASSWORD_ITERATIONS,
+        enabled: true,
+        createdAt: new Date().toISOString(),
+      };
+      await this.ctx.storage.put({
+        [key.user(user.id)]: user,
+        [key.userLogin(login)]: user.id,
+      });
+    }
+
+    if (!user) return json({ error: "account_unavailable" }, 403);
+
+    device.status = "approved";
+    device.userId = user.id;
+    await this.ctx.storage.put(key.device(device.deviceCodeHash), device);
+    return json({ ok: true, user: publicUser(user), agent: { id: device.agentId, name: device.agentName } });
+  }
+
+  private async exchangeDevice(body: any): Promise<Response> {
+    const deviceCodeHash = String(body?.deviceCodeHash ?? "");
+    if (!deviceCodeHash) return json({ error: "device_code_required" }, 400);
+
+    const device = await this.ctx.storage.get<DeviceAuthRecord>(key.device(deviceCodeHash));
+    if (!device) return json({ error: "invalid_device_code" }, 400);
+    if (isExpired(device.expiresAt)) {
+      await this.ctx.storage.delete([key.device(deviceCodeHash), key.deviceUserCode(device.userCode)]);
+      return json({ error: "expired_token" }, 400);
+    }
+    if (device.status === "pending") return json({ error: "authorization_pending" }, 428);
+    if (device.status === "consumed" || !device.userId) return json({ error: "invalid_grant" }, 400);
+
+    const user = await this.ctx.storage.get<UserRecord>(key.user(device.userId));
+    if (!user?.enabled) return json({ error: "account_unavailable" }, 403);
+
+    let agentId = device.agentId;
+    let agent = await this.ctx.storage.get<AgentRecord>(key.agent(agentId));
+    let grant = await this.ctx.storage.get<GrantRecord>(key.grant(user.id, agentId));
+
+    if (agent && !grant) {
+      agentId = `${agentId.slice(0, 54)}-${crypto.randomUUID().slice(0, 8)}`;
+      agent = undefined;
+    }
+
+    const agentToken = newToken("agt");
+    const agentTokenHash = await hashToken(agentToken);
+    const now = new Date().toISOString();
+
+    if (agent) {
+      await this.ctx.storage.delete(key.agentToken(agent.tokenHash));
+      agent.name = device.agentName;
+      agent.tokenHash = agentTokenHash;
+      agent.enabled = true;
+      await this.ctx.storage.put({
+        [key.agent(agent.id)]: agent,
+        [key.agentToken(agent.tokenHash)]: agent.id,
+      });
+    } else {
+      agent = {
+        id: agentId,
+        name: device.agentName,
+        tokenHash: agentTokenHash,
+        ownerUserId: user.id,
+        enabled: true,
+        createdAt: now,
+      };
+      await this.ctx.storage.put({
+        [key.agent(agent.id)]: agent,
+        [key.agentToken(agent.tokenHash)]: agent.id,
+      });
+    }
+
+    if (!grant || grant.agentId !== agent.id) {
+      grant = { userId: user.id, agentId: agent.id, scopes: ["*"], createdAt: now };
+      await this.ctx.storage.put(key.grant(user.id, agent.id), grant);
+    }
+
+    const userToken = newToken("usr");
+    const userTokenHash = await hashToken(userToken);
+    const session: UserSessionRecord = {
+      userId: user.id,
+      tokenHash: userTokenHash,
+      createdAt: now,
+      expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+    };
+    await this.ctx.storage.put(key.userSession(userTokenHash), session);
+
+    device.status = "consumed";
+    await this.ctx.storage.put(key.device(device.deviceCodeHash), device);
+    await this.ctx.storage.delete(key.deviceUserCode(device.userCode));
+
+    return json({
+      ok: true,
+      user: publicUser(user),
+      userToken,
+      userTokenExpiresAt: session.expiresAt,
+      agent: { id: agent.id, name: agent.name },
+      agentToken,
+    });
+  }
+
+  private async revokeSession(body: any): Promise<Response> {
+    const tokenHash = String(body?.tokenHash ?? "");
+    if (!tokenHash) return json({ error: "token_required" }, 400);
+    await this.ctx.storage.delete(key.userSession(tokenHash));
+    return json({ ok: true });
+  }
+
+  private async logoutAgent(body: any): Promise<Response> {
+    const userId = String(body?.userId ?? "");
+    const agentId = String(body?.agentId ?? "");
+    const tokenHash = String(body?.tokenHash ?? "");
+    if (!userId || !agentId || !tokenHash) return json({ error: "invalid_logout" }, 400);
+
+    const grant = await this.ctx.storage.get<GrantRecord>(key.grant(userId, agentId));
+    const agent = await this.ctx.storage.get<AgentRecord>(key.agent(agentId));
+    if (!grant || !agent || agent.ownerUserId !== userId) {
+      return json({ error: "permission_denied" }, 403);
+    }
+
+    await this.ctx.storage.delete(key.userSession(tokenHash));
+    await this.ctx.storage.delete(key.agentToken(agent.tokenHash));
+    agent.tokenHash = await hashToken(newToken("revoked"));
+    agent.enabled = false;
+    await this.ctx.storage.put(key.agent(agent.id), agent);
+    return json({ ok: true });
+  }
+
   private async authUser(body: any): Promise<Response> {
     const tokenHash = String(body?.tokenHash ?? "");
-    const userId = await this.ctx.storage.get<string>(key.userToken(tokenHash));
-    if (!userId) return json({ error: "unauthorized" }, 401);
+    if (!tokenHash) return json({ error: "unauthorized" }, 401);
+
+    let userId = await this.ctx.storage.get<string>(key.userToken(tokenHash));
+    if (!userId) {
+      const session = await this.ctx.storage.get<UserSessionRecord>(key.userSession(tokenHash));
+      if (!session || isExpired(session.expiresAt)) {
+        if (session) await this.ctx.storage.delete(key.userSession(tokenHash));
+        return json({ error: "unauthorized" }, 401);
+      }
+      userId = session.userId;
+    }
+
     const user = await this.ctx.storage.get<UserRecord>(key.user(userId));
     if (!user?.enabled) return json({ error: "unauthorized" }, 401);
-    return json({ ok: true, user: { id: user.id, name: user.name } });
+    return json({ ok: true, user: publicUser(user) });
   }
 
   private async authAgent(body: any): Promise<Response> {
@@ -316,7 +659,7 @@ export class Registry extends DurableObject {
     ]);
     return json({
       ok: true,
-      users: [...users.values()].map(({ tokenHash: _tokenHash, ...user }) => user),
+      users: [...users.values()].map((user) => publicUser(user)),
       agents: [...agents.values()].map(({ tokenHash: _tokenHash, ...agent }) => agent),
       grants: [...grants.values()],
     });
