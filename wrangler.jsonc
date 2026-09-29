@@ -4,10 +4,16 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-29",
   "durable_objects": {
-    "bindings": [{ "name": "RELAY", "class_name": "Relay" }]
+    "bindings": [
+      { "name": "RELAY", "class_name": "Relay" },
+      { "name": "REGISTRY", "class_name": "Registry" }
+    ]
   },
-  "secrets": { "required": ["AGENT_TOKEN", "CALLER_TOKEN"] },
+  "secrets": {
+    "required": ["ADMIN_TOKEN", "AGENT_TOKEN", "CALLER_TOKEN"]
+  },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Relay"] }
+    { "tag": "v1", "new_sqlite_classes": ["Relay"] },
+    { "tag": "v2", "new_sqlite_classes": ["Registry"] }
   ]
 }
