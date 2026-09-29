@@ -63,6 +63,8 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 5;
 const DEVICE_START_WINDOW_MS = 10 * 60 * 1000;
 const DEVICE_START_MAX = 30;
+const DEVICE_APPROVE_WINDOW_MS = 15 * 60 * 1000;
+const DEVICE_APPROVE_MAX = 60;
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 const key = {
   user: (id: string) => `user:${id}`,
@@ -76,6 +78,7 @@ const key = {
   deviceUserCode: (userCode: string) => `device-code:${userCode}`,
   loginAttempt: (login: string) => `login-attempt:${login}`,
   deviceStartRate: (sourceHash: string) => `device-start-rate:${sourceHash}`,
+  deviceApproveRate: (sourceHash: string) => `device-approve-rate:${sourceHash}`,
 };
 
 export async function hashToken(token: string): Promise<string> {
@@ -323,6 +326,45 @@ export class Registry extends DurableObject {
     return json({ ok: true, agent: { id: agent.id, name: agent.name, enabled: agent.enabled } });
   }
 
+  private async consumeRateLimit(
+    storageKey: string,
+    limit: number,
+    windowMs: number,
+  ): Promise<boolean> {
+    const now = Date.now();
+    const current = await this.ctx.storage.get<LoginAttemptRecord>(storageKey);
+    const record: LoginAttemptRecord = !current ||
+      now - Date.parse(current.windowStartedAt) > windowMs
+      ? { count: 1, windowStartedAt: new Date(now).toISOString() }
+      : { ...current, count: current.count + 1 };
+
+    if (record.count > limit) return false;
+    await this.ctx.storage.put(storageKey, record);
+    return true;
+  }
+
+  private async cleanupExpiredAuthArtifacts(): Promise<void> {
+    const now = Date.now();
+    const [devices, sessions] = await Promise.all([
+      this.ctx.storage.list<DeviceAuthRecord>({ prefix: "device:" }),
+      this.ctx.storage.list<UserSessionRecord>({ prefix: "us:" }),
+    ]);
+
+    const keys: string[] = [];
+    for (const [storageKey, device] of devices) {
+      if (Date.parse(device.expiresAt) <= now) {
+        keys.push(storageKey, key.deviceUserCode(device.userCode));
+      }
+    }
+    for (const [storageKey, session] of sessions) {
+      if (Date.parse(session.expiresAt) <= now) keys.push(storageKey);
+    }
+
+    for (let index = 0; index < keys.length; index += 128) {
+      await this.ctx.storage.delete(keys.slice(index, index + 128));
+    }
+  }
+
   private async startDevice(body: any): Promise<Response> {
     const deviceCodeHash = String(body?.deviceCodeHash ?? "");
     const userCode = String(body?.userCode ?? "").trim().toUpperCase();
@@ -337,15 +379,15 @@ export class Registry extends DurableObject {
     try { agentId = normalizeAgentId(String(body?.agentId ?? "")); }
     catch { return json({ error: "invalid_agent_id" }, 400); }
 
-    const now = Date.now();
-    const rateKey = key.deviceStartRate(sourceHash);
-    const currentRate = await this.ctx.storage.get<LoginAttemptRecord>(rateKey);
-    const rate: LoginAttemptRecord = !currentRate ||
-      now - Date.parse(currentRate.windowStartedAt) > DEVICE_START_WINDOW_MS
-      ? { count: 1, windowStartedAt: new Date(now).toISOString() }
-      : { ...currentRate, count: currentRate.count + 1 };
-    if (rate.count > DEVICE_START_MAX) return json({ error: "rate_limited" }, 429);
-    await this.ctx.storage.put(rateKey, rate);
+    await this.cleanupExpiredAuthArtifacts();
+
+    if (!(await this.consumeRateLimit(
+      key.deviceStartRate(sourceHash),
+      DEVICE_START_MAX,
+      DEVICE_START_WINDOW_MS,
+    ))) {
+      return json({ error: "rate_limited" }, 429);
+    }
 
     if (await this.ctx.storage.get(key.deviceUserCode(userCode))) {
       return json({ error: "user_code_collision" }, 409);
@@ -396,6 +438,15 @@ export class Registry extends DurableObject {
     const loginRaw = String(body?.login ?? "");
     const password = String(body?.password ?? "");
     const name = String(body?.name ?? "").trim();
+    const sourceHash = String(body?.sourceHash ?? "unknown").slice(0, 128);
+
+    if (!(await this.consumeRateLimit(
+      key.deviceApproveRate(sourceHash),
+      DEVICE_APPROVE_MAX,
+      DEVICE_APPROVE_WINDOW_MS,
+    ))) {
+      return json({ error: "rate_limited" }, 429);
+    }
 
     if (!userCode || password.length < 8 || password.length > 128) {
       return json({ error: "invalid_credentials" }, 400);
@@ -482,9 +533,10 @@ export class Registry extends DurableObject {
     let agent = await this.ctx.storage.get<AgentRecord>(key.agent(agentId));
     let grant = await this.ctx.storage.get<GrantRecord>(key.grant(user.id, agentId));
 
-    if (agent && !grant) {
+    if (agent && agent.ownerUserId !== user.id) {
       agentId = `${agentId.slice(0, 54)}-${crypto.randomUUID().slice(0, 8)}`;
       agent = undefined;
+      grant = undefined;
     }
 
     const agentToken = newToken("agt");
@@ -530,9 +582,10 @@ export class Registry extends DurableObject {
     };
     await this.ctx.storage.put(key.userSession(userTokenHash), session);
 
-    device.status = "consumed";
-    await this.ctx.storage.put(key.device(device.deviceCodeHash), device);
-    await this.ctx.storage.delete(key.deviceUserCode(device.userCode));
+    await this.ctx.storage.delete([
+      key.device(device.deviceCodeHash),
+      key.deviceUserCode(device.userCode),
+    ]);
 
     return json({
       ok: true,

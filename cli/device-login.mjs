@@ -1,7 +1,13 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import os from "node:os";
-import { defaultAllowedRoot, loadConfig, saveConfig } from "./config.mjs";
+import {
+  defaultAllowedRoot,
+  loadConfig,
+  loadIdentity,
+  saveConfig,
+  saveIdentity,
+} from "./config.mjs";
 
 const DEFAULT_RELAY_URL = "https://chat-relay.anusorn-hank.workers.dev";
 
@@ -14,11 +20,7 @@ function sanitizeAgentId(value) {
 }
 
 function createAgentId(hostname) {
-  const fingerprint = createHash("sha256")
-    .update([process.platform, hostname, os.userInfo().username, os.homedir()].join("|"))
-    .digest("hex")
-    .slice(0, 8);
-  return `${sanitizeAgentId(hostname)}-${fingerprint}`;
+  return `${sanitizeAgentId(hostname)}-${randomBytes(4).toString("hex")}`;
 }
 
 async function requestJson(url, options = {}, timeoutMs = 10_000) {
@@ -73,9 +75,19 @@ export async function login(options = {}) {
   const existing = loadConfig() || {};
   const relayUrl = String(options.relayUrl || existing.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, "");
   const hostname = os.hostname();
-  const requestedAgentId = options.agentId || existing.agentId || createAgentId(hostname);
+  const identity = loadIdentity() || {};
+  const requestedAgentId = options.agentId ||
+    existing.agentId ||
+    identity.agentId ||
+    createAgentId(hostname);
   const agentName = options.agentName || existing.agentName || hostname;
   const allowedRoots = options.allowedRoot || existing.allowedRoots || defaultAllowedRoot();
+
+  saveIdentity({
+    agentId: requestedAgentId,
+    createdAt: identity.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
 
   const { response, data } = await requestJson(`${relayUrl}/auth/device/start`, {
     method: "POST",
@@ -113,6 +125,23 @@ export async function login(options = {}) {
     }
 
     const result = tokenResult.data;
+
+    if (existing.userToken && existing.relayUrl) {
+      const revoke = await requestJson(`${String(existing.relayUrl).replace(/\/$/, "")}/auth/session/revoke`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${existing.userToken}` },
+      }).catch(() => null);
+      if (revoke && !revoke.response.ok && revoke.response.status !== 401) {
+        console.warn("Warning: previous Chat Relay session could not be revoked.");
+      }
+    }
+
+    saveIdentity({
+      agentId: result.agent.id,
+      createdAt: identity.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
     const config = {
       relayUrl,
       user: result.user,

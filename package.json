@@ -25,14 +25,16 @@
     "logout": "node bin/chat-relay.js logout",
     "status": "node bin/chat-relay.js status",
     "dev": "wrangler dev",
-    "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN=test-caller",
+    "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN=test-caller --var ADMIN_TOKEN=test-admin",
     "deploy": "wrangler deploy",
     "agent": "node --env-file-if-exists=.dev.vars agent/local-agent.mjs",
     "admin": "node scripts/admin.mjs",
     "test:terminal": "node test/mcp-terminal-smoke.mjs",
     "test:full": "node test/multiuser-smoke.mjs",
     "test:device-auth": "node test/device-auth-smoke.mjs",
-    "test:zero-checkout": "node test/zero-checkout-smoke.mjs"
+    "test:zero-checkout": "node test/zero-checkout-smoke.mjs",
+    "verify:publish": "node scripts/verify-publish.mjs && npx wrangler deploy --dry-run && npm audit --omit=dev",
+    "prepublishOnly": "npm run verify:publish"
   },
   "dependencies": {
     "ws": "^8.22.0"
@@ -42,5 +44,21 @@
     "agents": "^0.24.0",
     "wrangler": "^4.143.0",
     "zod": "^4.6.5"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anusornNeal/chat-relay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/anusornNeal/chat-relay/issues"
+  },
+  "homepage": "https://github.com/anusornNeal/chat-relay#readme",
+  "keywords": [
+    "chatgpt",
+    "mcp",
+    "remote-agent",
+    "terminal",
+    "cloudflare",
+    "cli"
+  ]
 }

@@ -42,6 +42,13 @@ button{width:100%;margin-top:18px;border:0;border-radius:10px;padding:12px 14px;
   );
 }
 
+async function sourceHash(request: Request): Promise<string> {
+  const source = request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-forwarded-for") ||
+    "local";
+  return hashToken(source);
+}
+
 function loginPage(userCode: string, errorMessage = ""): Response {
   const code = htmlEscape(userCode);
   return page(
@@ -89,16 +96,13 @@ export async function handleDeviceAuth(
       const deviceCode = newToken("dev");
       const userCode = formatUserCode(randomCode(8));
       const expiresAt = new Date(Date.now() + DEVICE_TTL_MS).toISOString();
-      const source = request.headers.get("cf-connecting-ip") ||
-        request.headers.get("x-forwarded-for") ||
-        "local";
       const response = await registryCall("/device/start", {
         deviceCodeHash: await hashToken(deviceCode),
         userCode,
         agentId,
         agentName,
         expiresAt,
-        sourceHash: await hashToken(source),
+        sourceHash: await sourceHash(request),
       });
 
       if (response.status === 409) continue;
@@ -127,7 +131,13 @@ export async function handleDeviceAuth(
     const password = String(form.get("password") ?? "");
     const name = String(form.get("name") ?? "");
 
-    const response = await registryCall("/device/approve", { userCode, login, password, name });
+    const response = await registryCall("/device/approve", {
+      userCode,
+      login,
+      password,
+      name,
+      sourceHash: await sourceHash(request),
+    });
     const data = await response.json<any>().catch(() => ({}));
     if (!response.ok) {
       const messageByCode: Record<string, string> = {
@@ -138,6 +148,7 @@ export async function handleDeviceAuth(
         device_code_already_used: "This device code has already been used.",
         account_unavailable: "This account cannot sign in with a password.",
         too_many_attempts: "Too many failed attempts. Try again later.",
+        rate_limited: "Too many authorization attempts from this network. Try again later.",
       };
       return loginPage(userCode, messageByCode[data.error] ?? "Unable to authorize this device.");
     }
@@ -169,6 +180,20 @@ export async function handleDeviceAuth(
     const response = await registryCall("/list-agents", { userId: user.id });
     const data = await response.json<any>().catch(() => ({ agents: [] }));
     return Response.json({ user, agents: data.agents ?? [] });
+  }
+
+  if (path === "/auth/session/revoke" && request.method === "POST") {
+    const user = await authenticateUser(request);
+    if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
+
+    const auth = request.headers.get("authorization") ?? "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (!token) return Response.json({ error: "token_required" }, { status: 400 });
+
+    const response = await registryCall("/session/revoke", {
+      tokenHash: await hashToken(token),
+    });
+    return new Response(response.body, { status: response.status, headers: response.headers });
   }
 
   if (path === "/auth/logout" && request.method === "POST") {

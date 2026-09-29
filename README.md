@@ -63,9 +63,11 @@ The published package locates its bundled local agent relative to the package it
 
 - Browser/device login uses a short-lived device code. Raw user or admin tokens are not typed into the CLI.
 - New accounts use a unique login plus password. Passwords are stored only as salted PBKDF2-SHA256 hashes.
-- Login failures are throttled per login.
+- Device start/approval requests and failed password attempts are rate-limited.
 - CLI user sessions are opaque random tokens stored server-side only as hashes and expire after 90 days.
+- Re-authentication revokes the previous CLI session when possible.
 - Each local machine has an independent `agentId` and agent token; agent tokens are stored server-side only as hashes.
+- Agent ownership is enforced before an existing machine identity can be reused, preventing shared users from rotating another owner's agent credential.
 - Grants map users to agents with scopes: `read`, `write`, `terminal`, `process`, or `*`.
 - Logging out revokes the local user session and the owning machine credential.
 - `ADMIN_TOKEN` remains separate and protects administration routes.
@@ -146,6 +148,7 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 | `POST /auth/device/approve` | login/password + device code | Approve or create a user account |
 | `POST /auth/device/token` | device code | Exchange approved device code for session/agent credentials |
 | `GET /auth/me` | user Bearer token | Current user and permitted agents |
+| `POST /auth/session/revoke` | user Bearer token | Revoke only the current user session |
 | `POST /auth/logout` | user Bearer token | Revoke local session and owning agent credential |
 | `POST /mcp?key=<user token>` | user token | Streamable HTTP MCP |
 | `GET /agent?agentId=<id>` | agent Bearer token | Local agent WebSocket |
@@ -193,3 +196,24 @@ CHAT_RELAY_TARBALL=<path-to-tgz> TEST_RELAY_URL=http://127.0.0.1:8796 npm run te
 ```
 
 The npm package is configured as `@anusornneal/chat-relay`. Publishing requires an authenticated npm account with access to that scope.
+
+## CI and npm publishing
+
+GitHub Actions runs package verification on Node 20 and Node 24. A separate integration job starts a local Worker and verifies device auth plus the zero-checkout tarball flow.
+
+Before publishing locally:
+
+```bash
+npm run verify:publish
+```
+
+This checks the npm file set, CLI entrypoint, Worker dry-run build, and production dependency audit. The package whitelist excludes .dev.vars, Worker source, tests, and repository-only files.
+
+The repository also includes a Publish npm workflow for version tags or manual dispatch. It supports npm trusted publishing through GitHub OIDC and can also use an NPM_TOKEN repository secret when configured.
+
+The first registry publish still requires npm authorization for the @anusornneal scope. After publishing, verify the exact public UX from a clean directory:
+
+```bash
+npx @anusornneal/chat-relay@latest status
+npx @anusornneal/chat-relay@latest remote
+```

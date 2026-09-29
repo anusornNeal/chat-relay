@@ -16,6 +16,32 @@ export function configPath() {
   return path.join(configDir(), "config.json");
 }
 
+export function identityPath() {
+  return path.join(configDir(), "identity.json");
+}
+
+export function loadIdentity() {
+  const file = identityPath();
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function saveIdentity(identity) {
+  const dir = configDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const file = identityPath();
+  fs.writeFileSync(file, JSON.stringify(identity, null, 2) + os.EOL, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  try { fs.chmodSync(file, 0o600); } catch {}
+  return file;
+}
+
 function parseEnvFile(file) {
   const result = {};
   for (const raw of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
@@ -45,6 +71,11 @@ function migrateLegacyConfig() {
     migratedAt: new Date().toISOString(),
   };
   saveConfig(config);
+  saveIdentity({
+    agentId: config.agentId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
   return config;
 }
 

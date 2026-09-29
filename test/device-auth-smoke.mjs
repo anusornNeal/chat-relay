@@ -56,6 +56,47 @@ if (!me.response.ok || me.data.user?.login !== login) {
 }
 console.log("session auth ok");
 
+const secondStarted = await jsonFetch("/auth/device/start", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ agentId, agentName: "Collision Smoke" }),
+});
+if (!secondStarted.response.ok) throw new Error("second device start failed");
+
+const secondApproved = await fetch(base + "/auth/device/approve", {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({
+    userCode: secondStarted.data.userCode,
+    login: `${login}-other`,
+    password: `${password}-other`,
+    name: "Collision User",
+  }),
+});
+if (!secondApproved.ok) throw new Error("second device approve failed");
+
+const secondExchange = await jsonFetch("/auth/device/token", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ deviceCode: secondStarted.data.deviceCode }),
+});
+if (!secondExchange.response.ok) throw new Error("second device exchange failed");
+if (secondExchange.data.agent.id === exchanged.data.agent.id) {
+  throw new Error("agent ownership collision was not isolated");
+}
+console.log("agent ownership isolation ok");
+
+const secondRevoke = await jsonFetch("/auth/session/revoke", {
+  method: "POST",
+  headers: { authorization: `Bearer ${secondExchange.data.userToken}` },
+});
+if (!secondRevoke.response.ok) throw new Error("session revoke failed");
+const secondAfterRevoke = await jsonFetch("/auth/me", {
+  headers: { authorization: `Bearer ${secondExchange.data.userToken}` },
+});
+if (secondAfterRevoke.response.status !== 401) throw new Error("revoked session was accepted");
+console.log("session-only revocation ok");
+
 const agent = spawn(process.execPath, ["agent/local-agent.mjs"], {
   cwd: process.cwd(),
   env: {
