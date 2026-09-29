@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
 
 interface Env {
   RELAY: DurableObjectNamespace;
@@ -139,9 +141,42 @@ export class Relay extends DurableObject {
   }
 }
 
+function createMcpServer(env: Env) {
+  const server = new McpServer({ name: "chat-relay", version: "0.1.0" });
+
+  server.registerTool(
+    "ping_agent",
+    {
+      description: "Check that the connected local chat-relay agent is reachable and return its pong response.",
+      inputSchema: {},
+    },
+    async () => {
+      const stub = env.RELAY.get(env.RELAY.idFromName("default"));
+      const response = await stub.fetch(new Request("https://relay.internal/relay", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ payload: { action: "ping" } }),
+      }));
+      const body = await response.text();
+      return {
+        ...(response.ok ? {} : { isError: true }),
+        content: [{ type: "text" as const, text: body }],
+      };
+    },
+  );
+
+  return server;
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path === "/mcp") {
+      return createMcpHandler(() => createMcpServer(env), {
+        route: "/mcp",
+        responseMode: "json",
+      })(request, env, ctx);
+    }
     if (path === "/health") return request.method === "GET"
       ? Response.json({ status: "ok", service: "chat-relay" })
       : error(405, "method_not_allowed");

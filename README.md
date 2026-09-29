@@ -28,3 +28,9 @@ Install dependencies with `npm install`. In one terminal run `npm run dev:test`;
 Run the agent with `RELAY_URL` and `AGENT_TOKEN` in the environment, then `npm run agent`.
 It connects to `/agent`, reconnects automatically after disconnects, echoes normal payloads,
 and responds to `{ "action": "ping" }` with a `pong` payload.
+
+## MCP
+
+`POST /mcp` exposes a stateless Streamable HTTP MCP server for ChatGPT and other MCP clients.
+The first POC tool is `ping_agent`, which routes a ping through the existing Durable Object to the connected local agent and returns its pong response.
+For this POC the MCP endpoint is intentionally unauthenticated; only the harmless `ping_agent` tool is exposed. Add MCP authentication before exposing privileged agent actions.

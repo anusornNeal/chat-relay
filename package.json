@@ -13,6 +13,9 @@
     "wrangler": "^4.143.0"
   },
   "dependencies": {
-    "ws": "^8.22.0"
+    "@modelcontextprotocol/server": "^2.0.0",
+    "agents": "^0.24.0",
+    "ws": "^8.22.0",
+    "zod": "^4.6.5"
   }
 }
