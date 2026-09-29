@@ -1,0 +1,15 @@
+# Cloudflare Worker URL
+RELAY_URL=https://chat-relay.example.workers.dev
+
+# Local agent identity
+AGENT_ID=default
+AGENT_NAME=Primary PC
+AGENT_TOKEN=replace-with-agent-token
+
+# Local capabilities
+TERMINAL_ENABLED=1
+ALLOWED_ROOTS=C:\Users\you\Projects
+
+# Owner/admin values are only needed on the machine used to administer the relay
+CALLER_TOKEN=replace-with-owner-user-token
+ADMIN_TOKEN=replace-with-admin-token
