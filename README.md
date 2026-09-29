@@ -35,9 +35,25 @@ The relay is generic and has no Devflow-specific logic.
 
 The query-string user token is practical for the current ChatGPT custom MCP flow, but OAuth should be preferred if this is later exposed to a broad external audience.
 
+## One-command local UX
+
+After the first configuration, run only:
+
+```bash
+npm start
+```
+
+`npm run remote` is an alias. The launcher checks Worker health, loads `.dev.vars`, prints the active agent/filesystem configuration, starts the local agent, and restarts it automatically if the process exits unexpectedly.
+
+If `.dev.vars` is missing or incomplete, `npm start` opens a short interactive setup and writes the local configuration. To change it later:
+
+```bash
+npm start -- --setup
+```
+
 ## Local agent configuration
 
-Copy `.dev.vars.example` to ignored `.dev.vars` and configure at least:
+Copy `.dev.vars.example` to ignored `.dev.vars` and configure at least (or let `npm start` create it interactively):
 
 ```
 RELAY_URL=https://<worker>.workers.dev
@@ -52,7 +68,7 @@ Run:
 
 ```
 npm install
-npm run agent
+npm start
 ```
 
 The agent reconnects automatically.

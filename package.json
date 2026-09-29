@@ -1,6 +1,6 @@
 {
   "name": "chat-relay",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,9 @@
     "agent": "node --env-file-if-exists=.dev.vars agent/local-agent.mjs",
     "test:terminal": "node test/mcp-terminal-smoke.mjs",
     "admin": "node scripts/admin.mjs",
-    "test:full": "node test/multiuser-smoke.mjs"
+    "test:full": "node test/multiuser-smoke.mjs",
+    "start": "node scripts/start.mjs",
+    "remote": "node scripts/start.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.143.0"
