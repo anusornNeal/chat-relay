@@ -26,11 +26,14 @@ Install dependencies with `npm install`. In one terminal run `npm run dev:test`;
 ## Local agent
 
 Run the agent with `RELAY_URL` and `AGENT_TOKEN` in the environment, then `npm run agent`.
-It connects to `/agent`, reconnects automatically after disconnects, echoes normal payloads,
-and responds to `{ "action": "ping" }` with a `pong` payload.
+The npm script also loads local values from the ignored `.dev.vars` file when present.
+Set `TERMINAL_ENABLED=1` to enable terminal execution. The agent reconnects automatically.
 
 ## MCP
 
-`POST /mcp` exposes a stateless Streamable HTTP MCP server for ChatGPT and other MCP clients.
-The first POC tool is `ping_agent`, which routes a ping through the existing Durable Object to the connected local agent and returns its pong response.
-For this POC the MCP endpoint is intentionally unauthenticated; only the harmless `ping_agent` tool is exposed. Add MCP authentication before exposing privileged agent actions.
+`POST /mcp?key=<CALLER_TOKEN>` exposes a stateless Streamable HTTP MCP server for ChatGPT and other MCP clients.
+The query key is a temporary POC gate; replace it with proper per-user authentication before wider use.
+
+Tools:
+- `ping_agent` checks the local agent connection.
+- `terminal_exec` runs one PowerShell command through the connected local agent and returns stdout, stderr, and exit status. Commands time out after at most 20 seconds and output is capped to fit the relay message limit.

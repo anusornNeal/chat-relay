@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
+import { z } from "zod";
 
 interface Env {
   RELAY: DurableObjectNamespace;
@@ -141,8 +142,22 @@ export class Relay extends DurableObject {
   }
 }
 
+async function callAgent(env: Env, payload: unknown) {
+  const stub = env.RELAY.get(env.RELAY.idFromName("default"));
+  const response = await stub.fetch(new Request("https://relay.internal/relay", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ payload }),
+  }));
+  const body = await response.text();
+  return {
+    ok: response.ok,
+    body,
+  };
+}
+
 function createMcpServer(env: Env) {
-  const server = new McpServer({ name: "chat-relay", version: "0.1.0" });
+  const server = new McpServer({ name: "chat-relay", version: "0.2.0" });
 
   server.registerTool(
     "ping_agent",
@@ -151,16 +166,34 @@ function createMcpServer(env: Env) {
       inputSchema: {},
     },
     async () => {
-      const stub = env.RELAY.get(env.RELAY.idFromName("default"));
-      const response = await stub.fetch(new Request("https://relay.internal/relay", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ payload: { action: "ping" } }),
-      }));
-      const body = await response.text();
+      const result = await callAgent(env, { action: "ping" });
       return {
-        ...(response.ok ? {} : { isError: true }),
-        content: [{ type: "text" as const, text: body }],
+        ...(result.ok ? {} : { isError: true }),
+        content: [{ type: "text" as const, text: result.body }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "terminal_exec",
+    {
+      description: "Run one PowerShell command on the connected local agent and return stdout, stderr, and exit status.",
+      inputSchema: {
+        command: z.string().min(1).max(4000),
+        cwd: z.string().min(1).max(1024).optional(),
+        timeoutMs: z.number().int().min(1000).max(20000).optional(),
+      },
+    },
+    async ({ command, cwd, timeoutMs }) => {
+      const result = await callAgent(env, {
+        action: "terminal.exec",
+        command,
+        cwd,
+        timeoutMs,
+      });
+      return {
+        ...(result.ok ? {} : { isError: true }),
+        content: [{ type: "text" as const, text: result.body }],
       };
     },
   );
@@ -170,8 +203,12 @@ function createMcpServer(env: Env) {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const path = new URL(request.url).pathname;
+    const url = new URL(request.url);
+    const path = url.pathname;
     if (path === "/mcp") {
+      if (!env.CALLER_TOKEN || url.searchParams.get("key") !== env.CALLER_TOKEN) {
+        return error(401, "unauthorized");
+      }
       return createMcpHandler(() => createMcpServer(env), {
         route: "/mcp",
         responseMode: "json",

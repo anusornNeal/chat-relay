@@ -1,13 +1,13 @@
 {
   "name": "chat-relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN:test-caller",
     "deploy": "wrangler deploy",
-    "agent": "node agent/local-agent.mjs"
+    "agent": "node --env-file-if-exists=.dev.vars agent/local-agent.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.143.0"
