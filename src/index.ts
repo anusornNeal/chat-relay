@@ -150,14 +150,23 @@ async function callAgent(env: Env, payload: unknown) {
     body: JSON.stringify({ payload }),
   }));
   const body = await response.text();
+  let agentOk = response.ok;
+  try {
+    const parsed = JSON.parse(body) as { payload?: { ok?: boolean } };
+    if (parsed.payload?.ok === false) agentOk = false;
+  } catch {}
+  return { ok: agentOk, body };
+}
+
+function toolResult(result: { ok: boolean; body: string }) {
   return {
-    ok: response.ok,
-    body,
+    ...(result.ok ? {} : { isError: true }),
+    content: [{ type: "text" as const, text: result.body }],
   };
 }
 
 function createMcpServer(env: Env) {
-  const server = new McpServer({ name: "chat-relay", version: "0.2.0" });
+  const server = new McpServer({ name: "chat-relay", version: "0.3.0" });
 
   server.registerTool(
     "ping_agent",
@@ -165,37 +174,101 @@ function createMcpServer(env: Env) {
       description: "Check that the connected local chat-relay agent is reachable and return its pong response.",
       inputSchema: {},
     },
-    async () => {
-      const result = await callAgent(env, { action: "ping" });
-      return {
-        ...(result.ok ? {} : { isError: true }),
-        content: [{ type: "text" as const, text: result.body }],
-      };
-    },
+    async () => toolResult(await callAgent(env, { action: "ping" })),
   );
 
   server.registerTool(
     "terminal_exec",
     {
-      description: "Run one PowerShell command on the connected local agent and return stdout, stderr, and exit status.",
+      description: "Run one PowerShell command and wait for completion. Use for short commands that finish within 20 seconds.",
       inputSchema: {
         command: z.string().min(1).max(4000),
         cwd: z.string().min(1).max(1024).optional(),
         timeoutMs: z.number().int().min(1000).max(20000).optional(),
       },
     },
-    async ({ command, cwd, timeoutMs }) => {
-      const result = await callAgent(env, {
-        action: "terminal.exec",
-        command,
-        cwd,
-        timeoutMs,
-      });
-      return {
-        ...(result.ok ? {} : { isError: true }),
-        content: [{ type: "text" as const, text: result.body }],
-      };
+    async ({ command, cwd, timeoutMs }) => toolResult(await callAgent(env, {
+      action: "terminal.exec", command, cwd, timeoutMs,
+    })),
+  );
+
+  server.registerTool(
+    "terminal_start",
+    {
+      description: "Start a long-running PowerShell command and return a session ID immediately. Read output later with terminal_read.",
+      inputSchema: {
+        command: z.string().min(1).max(4000),
+        cwd: z.string().min(1).max(1024).optional(),
+      },
     },
+    async ({ command, cwd }) => toolResult(await callAgent(env, {
+      action: "terminal.start", command, cwd,
+    })),
+  );
+
+  server.registerTool(
+    "terminal_start_shell",
+    {
+      description: "Start a persistent interactive PowerShell session. Use terminal_write to send input and terminal_read to read output.",
+      inputSchema: {
+        cwd: z.string().min(1).max(1024).optional(),
+      },
+    },
+    async ({ cwd }) => toolResult(await callAgent(env, {
+      action: "terminal.shell.start", cwd,
+    })),
+  );
+
+  server.registerTool(
+    "terminal_read",
+    {
+      description: "Read buffered stdout/stderr from a running or completed terminal session. Pass the last nextSeq value as afterSeq to fetch only new output.",
+      inputSchema: {
+        sessionId: z.string().uuid(),
+        afterSeq: z.number().int().min(0).optional(),
+        maxChars: z.number().int().min(1024).max(24576).optional(),
+      },
+    },
+    async ({ sessionId, afterSeq, maxChars }) => toolResult(await callAgent(env, {
+      action: "terminal.read", sessionId, afterSeq, maxChars,
+    })),
+  );
+
+  server.registerTool(
+    "terminal_write",
+    {
+      description: "Send input to a running terminal session. By default a newline is appended so the command is submitted.",
+      inputSchema: {
+        sessionId: z.string().uuid(),
+        input: z.string().min(1).max(8192),
+        appendNewline: z.boolean().optional(),
+      },
+    },
+    async ({ sessionId, input, appendNewline }) => toolResult(await callAgent(env, {
+      action: "terminal.write", sessionId, input, appendNewline,
+    })),
+  );
+
+  server.registerTool(
+    "terminal_kill",
+    {
+      description: "Terminate a terminal session and its child process tree.",
+      inputSchema: {
+        sessionId: z.string().uuid(),
+      },
+    },
+    async ({ sessionId }) => toolResult(await callAgent(env, {
+      action: "terminal.kill", sessionId,
+    })),
+  );
+
+  server.registerTool(
+    "terminal_list",
+    {
+      description: "List active and recently completed terminal sessions on the connected local agent.",
+      inputSchema: {},
+    },
+    async () => toolResult(await callAgent(env, { action: "terminal.list" })),
   );
 
   return server;

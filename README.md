@@ -36,4 +36,12 @@ The query key is a temporary POC gate; replace it with proper per-user authentic
 
 Tools:
 - `ping_agent` checks the local agent connection.
-- `terminal_exec` runs one PowerShell command through the connected local agent and returns stdout, stderr, and exit status. Commands time out after at most 20 seconds and output is capped to fit the relay message limit.
+- `terminal_exec` runs a short PowerShell command and waits for completion (max 20 seconds).
+- `terminal_start` starts a long-running command and returns a session ID.
+- `terminal_start_shell` starts a persistent interactive PowerShell session.
+- `terminal_read` reads buffered stdout/stderr and supports incremental reads with `afterSeq`.
+- `terminal_write` sends input to a running command or interactive shell.
+- `terminal_list` lists running and recently completed sessions.
+- `terminal_kill` terminates a session and its child process tree.
+
+The local agent keeps up to eight concurrent running sessions. Session output is buffered with a bounded in-memory history, and completed sessions are retained for 30 minutes. A small blocklist mirrors the high-risk system commands blocked by Desktop Commander. This is still a POC control layer rather than a security sandbox.
