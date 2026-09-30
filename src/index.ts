@@ -621,12 +621,13 @@ const READ_ONLY_TOOLS = new Set([
   "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls",
   "stat_path", "list_directory", "read_file", "read_multiple_files",
   "start_search", "get_more_search_results", "list_processes", "screenshot",
-  "terminal_read", "terminal_list", "read_process_output", "list_sessions",
+  "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
 ]);
 
 const OPEN_WORLD_TOOLS = new Set([
   "mouse_click", "keyboard_input",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write",
+  "terminal_batch_start", "terminal_batch_cancel",
   "start_process", "interact_with_process",
 ]);
 
@@ -634,6 +635,7 @@ const DESTRUCTIVE_TOOLS = new Set([
   "write_file", "edit_block", "move_path", "delete_path", "kill_process",
   "mouse_click", "keyboard_input",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write", "terminal_kill",
+  "terminal_batch_start", "terminal_batch_cancel",
   "start_process", "interact_with_process", "force_terminate",
 ]);
 
@@ -950,6 +952,48 @@ function createMcpServer(env: Env, user: AuthUser) {
       timeoutMs: z.number().int().min(1000).max(20000).optional(),
     },
     ({ command, cwd, timeoutMs }) => ({ action: "terminal.exec", command, cwd, timeoutMs }),
+    { destructiveHint: true },
+  );
+
+  register(
+    "terminal_batch_start",
+    "Start 2-20 PowerShell jobs in one MCP call with bounded per-agent concurrency and queue backpressure.",
+    "terminal",
+    {
+      jobs: z.array(z.union([
+        z.string().min(1).max(4000),
+        z.object({ command: z.string().min(1).max(4000), cwd: z.string().min(1).max(2048).optional(), timeoutMs: z.number().int().min(1000).max(20000).optional() }),
+      ])).min(2).max(20),
+      cwd: z.string().min(1).max(2048).optional(),
+      timeoutMs: z.number().int().min(1000).max(20000).optional(),
+      concurrency: z.number().int().min(1).max(8).optional(),
+    },
+    ({ jobs, cwd, timeoutMs, concurrency }) => ({ action: "terminal.batch.start", jobs, cwd, timeoutMs, concurrency }),
+    { destructiveHint: true },
+  );
+
+  register(
+    "terminal_batch_status",
+    "Read bounded status for a terminal batch without command output.",
+    "terminal",
+    { batchId: z.string().uuid() },
+    ({ batchId }) => ({ action: "terminal.batch.status", batchId }),
+  );
+
+  register(
+    "terminal_batch_read",
+    "Read bounded stdout/stderr and status for a terminal batch.",
+    "terminal",
+    { batchId: z.string().uuid(), maxChars: z.number().int().min(1024).max(24576).optional() },
+    ({ batchId, maxChars }) => ({ action: "terminal.batch.read", batchId, maxChars }),
+  );
+
+  register(
+    "terminal_batch_cancel",
+    "Cancel queued and running jobs in a terminal batch.",
+    "terminal",
+    { batchId: z.string().uuid() },
+    ({ batchId }) => ({ action: "terminal.batch.cancel", batchId }),
     { destructiveHint: true },
   );
 

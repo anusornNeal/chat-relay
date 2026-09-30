@@ -27,8 +27,8 @@ const listed = await rpc(1, "tools/list");
 const names = listed.result.tools.map((item) => item.name);
 console.log("tools", names.join(", "));
 
-const execResult = await tool(2, "terminal_exec", { command: "Get-Location" });
-if (!execResult.ok || !execResult.stdout.includes("chat-relay")) {
+const execResult = await tool(2, "terminal_exec", { command: "Write-Output terminal-exec-ok" });
+if (!execResult.ok || !execResult.stdout.includes("terminal-exec-ok")) {
   throw new Error(`terminal_exec failed: ${JSON.stringify(execResult)}`);
 }
 console.log("exec ok");
@@ -43,6 +43,31 @@ if (!joined.includes("tick 1") || !joined.includes("tick 3")) {
   throw new Error(`terminal_start/read failed: ${JSON.stringify(output)}`);
 }
 console.log("long-running session ok");
+
+const batchStartedAt = Date.now();
+const batch = await tool(20, "terminal_batch_start", {
+  concurrency: 4,
+  jobs: Array.from({ length: 5 }, (_, index) => ({
+    command: `Start-Sleep -Milliseconds 400; Write-Output batch-${index}`,
+  })),
+});
+if (!batch.ok || batch.jobs.length !== 5 || Date.now() - batchStartedAt > 2500) {
+  throw new Error(`terminal_batch_start failed: ${JSON.stringify(batch)}`);
+}
+let batchStatus = batch;
+for (let attempt = 0; attempt < 30 && !batchStatus.endedAt; attempt++) {
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  batchStatus = await tool(21 + attempt, "terminal_batch_status", { batchId: batch.batchId });
+}
+if (!batchStatus.endedAt || batchStatus.counts.completed !== 5) {
+  throw new Error(`terminal_batch_status failed: ${JSON.stringify(batchStatus)}`);
+}
+const batchRead = await tool(60, "terminal_batch_read", { batchId: batch.batchId });
+const batchText = batchRead.jobs.map((job) => job.stdout).join("\n");
+if (!batchText.includes("batch-0") || !batchText.includes("batch-4")) {
+  throw new Error(`terminal_batch_read failed: ${JSON.stringify(batchRead)}`);
+}
+console.log("batch terminal ok");
 
 const shell = await tool(5, "terminal_start_shell");
 await new Promise((resolve) => setTimeout(resolve, 300));
@@ -66,4 +91,17 @@ console.log("list ok");
 
 await tool(9, "terminal_kill", { sessionId: shell.sessionId });
 console.log("kill ok");
+
+const cancelled = await tool(61, "terminal_batch_start", {
+  concurrency: 1,
+  jobs: [
+    "Start-Sleep -Seconds 5; Write-Output should-not-finish",
+    "Start-Sleep -Seconds 5; Write-Output should-not-start",
+  ],
+});
+const cancelResult = await tool(62, "terminal_batch_cancel", { batchId: cancelled.batchId });
+if (!cancelResult.cancelled) {
+  throw new Error(`terminal_batch_cancel failed: ${JSON.stringify(cancelResult)}`);
+}
+console.log("batch cancel ok");
 console.log("terminal MCP smoke test passed");

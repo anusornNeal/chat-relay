@@ -12,7 +12,10 @@ const reconnectMs = Number(process.env.RECONNECT_MS ?? 2000);
 const terminalEnabled = process.env.TERMINAL_ENABLED === "1";
 const desktopEnabled = process.env.DESKTOP_ENABLED === "1";
 const MAX_RESPONSE_BYTES = 60 * 1024;
-const terminals = new TerminalManager();
+const terminals = new TerminalManager({
+  batchConcurrency: process.env.TERMINAL_BATCH_CONCURRENCY,
+  maxQueuedJobs: process.env.TERMINAL_BATCH_MAX_QUEUED,
+});
 const files = new FileManager(process.env.ALLOWED_ROOTS);
 const processes = new ProcessManager();
 const desktop = new DesktopManager({ enabled: desktopEnabled });
@@ -52,6 +55,7 @@ async function handlePayload(payload) {
         agentId,
         agentName,
         terminalEnabled,
+        terminalBatch: terminals.getBatchConfig(),
         desktop: desktop.getConfig(),
         allowedRoots: files.getRoots(),
         reconnectMs,
@@ -97,6 +101,18 @@ async function handlePayload(payload) {
     case "terminal.exec":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.exec(payload.command, payload.cwd, payload.timeoutMs);
+    case "terminal.batch.start":
+      if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
+      return terminals.batchStart(payload.jobs, { cwd: payload.cwd, timeoutMs: payload.timeoutMs, concurrency: payload.concurrency });
+    case "terminal.batch.status":
+      if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
+      return terminals.batchStatus(payload.batchId);
+    case "terminal.batch.read":
+      if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
+      return terminals.batchRead(payload.batchId, payload.maxChars);
+    case "terminal.batch.cancel":
+      if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
+      return terminals.batchCancel(payload.batchId);
     case "terminal.start":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.start(payload.command, payload.cwd);

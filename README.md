@@ -131,6 +131,10 @@ Processes:
 
 Terminal:
 - `terminal_exec`
+- `terminal_batch_start`
+- `terminal_batch_status`
+- `terminal_batch_read`
+- `terminal_batch_cancel`
 - `terminal_start`
 - `terminal_start_shell`
 - `terminal_read`
@@ -225,6 +229,11 @@ The OpenAI domain verification token is served at `/.well-known/openai-apps-chal
 - `read_file` defaults to a 32 KiB content budget (max 48 KiB) and exposes deterministic `nextOffset` continuation.
 - `read_multiple_files` defaults to a 48 KiB aggregate budget (max 48 KiB). If not all requested files fit, use `nextIndex`; if an individual file is truncated, continue it with that entry's `nextOffset`.
 - One-shot terminal command: max 20 seconds.
+- `terminal_batch_start` accepts 2-20 jobs in one MCP call to avoid N-call E2E dispatch overhead. Each agent owns an independent FIFO queue and bounded execution pool.
+- Batch concurrency defaults to 4 and is capped at 8 per agent. Override with `TERMINAL_BATCH_CONCURRENCY`; queued jobs default to 64 and are capped at 256 via `TERMINAL_BATCH_MAX_QUEUED`.
+- Queue overflow fails fast with `queue_full` instead of spawning unbounded processes. Use `terminal_batch_status`, `terminal_batch_read`, and `terminal_batch_cancel` for lifecycle control.
+- Batch output retained in memory is capped at 8 KiB per job; completed batches are capped at 64 per agent and also expire after 30 minutes.
+- Scaling is horizontal by agent: each connected machine has its own queue/concurrency budget, so additional agents add execution capacity without sharing one local hot queue.
 - Persistent terminal sessions: up to 8 running sessions per local agent.
 - Terminal output buffer: bounded in memory; completed sessions retained for 30 minutes.
 - Filesystem reads/writes are bounded and restricted to configured `ALLOWED_ROOTS`.
