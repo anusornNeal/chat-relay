@@ -48,6 +48,7 @@ const usage = () => {
     "  node scripts/admin.mjs create-user <name> [id]",
     "  node scripts/admin.mjs create-agent <name> [id]",
     "  node scripts/admin.mjs grant <userId> <agentId> [scopesCsv]",
+    "    scopesCsv may include desktop_read and desktop_control; default grants do not include them.",
     "  node scripts/admin.mjs revoke <userId> <agentId>",
     "  node scripts/admin.mjs enable-user <userId> <true|false>",
     "  CHAT_RELAY_PASSWORD=... node scripts/admin.mjs set-login <userId> <login>",

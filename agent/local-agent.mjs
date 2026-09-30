@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { DesktopManager } from "./desktop-manager.mjs";
 import { FileManager } from "./file-manager.mjs";
 import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
@@ -9,10 +10,12 @@ const agentId = process.env.AGENT_ID || "default";
 const agentName = process.env.AGENT_NAME || agentId;
 const reconnectMs = Number(process.env.RECONNECT_MS ?? 2000);
 const terminalEnabled = process.env.TERMINAL_ENABLED === "1";
+const desktopEnabled = process.env.DESKTOP_ENABLED === "1";
 const MAX_RESPONSE_BYTES = 60 * 1024;
 const terminals = new TerminalManager();
 const files = new FileManager(process.env.ALLOWED_ROOTS);
 const processes = new ProcessManager();
+const desktop = new DesktopManager({ enabled: desktopEnabled });
 const recentCalls = [];
 
 if (!relayUrl || !agentToken) {
@@ -48,6 +51,7 @@ async function handlePayload(payload) {
         agentId,
         agentName,
         terminalEnabled,
+        desktop: desktop.getConfig(),
         allowedRoots: files.getRoots(),
         reconnectMs,
       });
@@ -82,6 +86,13 @@ async function handlePayload(payload) {
     case "process.kill":
       return processes.kill(payload.pid);
 
+    case "desktop.screenshot":
+      return desktop.screenshot();
+    case "desktop.mouse.click":
+      return desktop.mouseClick(payload);
+    case "desktop.keyboard.input":
+      return desktop.keyboardInput(payload);
+
     case "terminal.exec":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.exec(payload.command, payload.cwd, payload.timeoutMs);
@@ -112,6 +123,7 @@ async function handlePayload(payload) {
 function connect() {
   console.log(`Connecting to ${wsUrl}`);
   console.log(`Terminal access: ${terminalEnabled ? "enabled" : "disabled"}`);
+  console.log("Desktop access: " + (desktopEnabled ? "enabled" : "disabled"));
   const socket = new WebSocket(wsUrl, {
     headers: { Authorization: `Bearer ${agentToken}` },
   });

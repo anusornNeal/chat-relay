@@ -399,6 +399,8 @@ function scopeForAction(action: string): Scope {
       action.startsWith("fs.delete")) return "write";
   if (action.startsWith("terminal.")) return "terminal";
   if (action === "process.kill" || action === "process.list") return "process";
+  if (action === "desktop.screenshot") return "desktop_read";
+  if (action === "desktop.mouse.click" || action === "desktop.keyboard.input") return "desktop_control";
   return "read";
 }
 
@@ -436,6 +438,36 @@ function toolResult(result: { ok: boolean; body: string }) {
     ...(result.ok ? {} : { isError: true }),
     content: [{ type: "text" as const, text: result.body }],
   };
+}
+
+function screenshotToolResult(result: { ok: boolean; body: string }) {
+  if (!result.ok) return toolResult(result);
+  try {
+    const envelope = JSON.parse(result.body) as { payload?: any };
+    const payload = envelope?.payload;
+    if (!payload?.ok || payload.mimeType !== "image/jpeg" || typeof payload.data !== "string") {
+      return toolResult({ ok: false, body: JSON.stringify({ error: payload?.error || "invalid_screenshot_result" }) });
+    }
+    const metadata = {
+      width: payload.width,
+      height: payload.height,
+      desktopOriginX: payload.desktopOriginX,
+      desktopOriginY: payload.desktopOriginY,
+      desktopWidth: payload.desktopWidth,
+      desktopHeight: payload.desktopHeight,
+      scaleX: payload.scaleX,
+      scaleY: payload.scaleY,
+      byteLength: payload.byteLength,
+    };
+    return {
+      content: [
+        { type: "image" as const, data: payload.data, mimeType: payload.mimeType },
+        { type: "text" as const, text: JSON.stringify(metadata) },
+      ],
+    };
+  } catch {
+    return toolResult({ ok: false, body: JSON.stringify({ error: "invalid_screenshot_result" }) });
+  }
 }
 
 async function listUserAgents(env: Env, user: AuthUser) {
@@ -682,6 +714,62 @@ function createMcpServer(env: Env, user: AuthUser) {
     "process",
     { pid: z.number().int().min(101) },
     ({ pid }) => ({ action: "process.kill", pid }),
+    { destructiveHint: true },
+  );
+
+  server.registerTool(
+    "screenshot",
+    {
+      description: "Capture the primary Windows desktop as a bounded JPEG image. Requires local desktop opt-in and desktop_read permission.",
+      inputSchema: { agentId: agentIdSchema },
+      annotations: { readOnlyHint: true },
+    } as any,
+    async ({ agentId }: any) => instrumentTool(env, user, "screenshot", { agentId }, async () => {
+      const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot" });
+      return {
+        value: screenshotToolResult(call),
+        ok: call.ok,
+        agentId: call.agentId,
+        ...(call.ok ? {} : { errorClass: "tool_error" }),
+      };
+    }),
+  );
+
+  register(
+    "mouse_click",
+    "Click a primary-desktop coordinate on the connected Windows PC. Coordinates use the desktop space described by screenshot metadata.",
+    "desktop_control",
+    {
+      x: z.number().int().min(-32768).max(32767),
+      y: z.number().int().min(-32768).max(32767),
+      button: z.enum(["left", "right", "middle"]).optional(),
+      clicks: z.union([z.literal(1), z.literal(2)]).optional(),
+    },
+    ({ x, y, button, clicks }) => ({ action: "desktop.mouse.click", x, y, button, clicks }),
+    { destructiveHint: true },
+  );
+
+  register(
+    "keyboard_input",
+    "Type Unicode text or send one named key/modifier chord to the active Windows desktop. Supply text or key, not both.",
+    "desktop_control",
+    {
+      text: z.string().min(1).max(8192).optional(),
+      key: z.enum([
+        "Enter", "Tab", "Escape", "Backspace", "Delete",
+        "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown",
+        "Home", "End", "PageUp", "PageDown", "Space",
+        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+        "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+      ]).optional(),
+      ctrl: z.boolean().optional(),
+      alt: z.boolean().optional(),
+      shift: z.boolean().optional(),
+      win: z.boolean().optional(),
+    },
+    ({ text, key, ctrl, alt, shift, win }) => ({ action: "desktop.keyboard.input", text, key, ctrl, alt, shift, win }),
     { destructiveHint: true },
   );
 

@@ -41,7 +41,8 @@
     "test:admin-auth": "node test/admin-auth-smoke.mjs",
     "test:dashboard": "node test/dashboard-smoke.mjs",
     "test:quota": "node test/quota-smoke.mjs",
-    "test:ops": "node test/ops-smoke.mjs"
+    "test:ops": "node test/ops-smoke.mjs",
+    "test:desktop": "node test/mcp-desktop-smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0"

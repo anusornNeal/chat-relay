@@ -24,6 +24,7 @@ function printSummary(config) {
   console.log(`Agent:      ${config.agentName} (${config.agentId})`);
   console.log(`Files:      ${config.allowedRoots}`);
   console.log(`Terminal:   ${config.terminalEnabled === false ? "disabled" : "enabled"}`);
+  console.log("Desktop:    " + (config.desktopEnabled === true ? "enabled" : "disabled"));
   console.log("");
 }
 
@@ -39,6 +40,7 @@ function spawnAgent(config) {
       AGENT_NAME: config.agentName,
       AGENT_TOKEN: config.agentToken,
       TERMINAL_ENABLED: config.terminalEnabled === false ? "0" : "1",
+      DESKTOP_ENABLED: config.desktopEnabled === true ? "1" : "0",
       ALLOWED_ROOTS: config.allowedRoots,
     },
     stdio: "inherit",
@@ -55,6 +57,10 @@ export async function remote(options = {}) {
 
   if (options.allowedRoot && options.allowedRoot !== config.allowedRoots) {
     config = { ...config, allowedRoots: options.allowedRoot };
+    saveConfig(config);
+  }
+  if (options.desktopEnabled !== undefined && Boolean(options.desktopEnabled) !== Boolean(config.desktopEnabled)) {
+    config = { ...config, desktopEnabled: Boolean(options.desktopEnabled) };
     saveConfig(config);
   }
 

@@ -75,6 +75,7 @@ for (const required of [
   "start_search", "get_more_search_results", "list_processes", "kill_process",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_read",
   "terminal_write", "terminal_list", "terminal_kill",
+  "screenshot", "mouse_click", "keyboard_input",
 ]) {
   if (!names.has(required)) throw new Error(`missing tool: ${required}`);
 }
@@ -89,6 +90,21 @@ console.log("agent routing ok");
 const config = await tool(ownerToken, 3, "get_config");
 const configPayload = config.payload;
 if (!configPayload?.allowedRoots?.length) throw new Error("missing allowed roots");
+if (configPayload?.desktop?.enabled !== false) throw new Error("desktop should be disabled by default");
+
+const disabledShot = await tool(ownerToken, 30, "screenshot", {}, true);
+if (disabledShot.payload?.error !== "desktop_disabled") throw new Error("screenshot did not honor desktop opt-in gate");
+const disabledClick = await tool(ownerToken, 31, "mouse_click", { x: 23456, y: 12345 }, true);
+if (disabledClick.payload?.error !== "desktop_disabled") throw new Error("mouse_click did not honor desktop opt-in gate");
+const secretMarker = "desktop-secret-marker-9f2d";
+const disabledKeyboard = await tool(ownerToken, 32, "keyboard_input", { text: secretMarker }, true);
+if (disabledKeyboard.payload?.error !== "desktop_disabled") throw new Error("keyboard_input did not honor desktop opt-in gate");
+const privacyCalls = await tool(ownerToken, 33, "get_recent_tool_calls", { limit: 20 });
+const privacyText = JSON.stringify(privacyCalls);
+if (privacyText.includes(secretMarker) || privacyText.includes("23456") || privacyText.includes("12345")) {
+  throw new Error("desktop payload leaked into recentCalls");
+}
+console.log("desktop opt-in/privacy gate ok");
 console.log("config ok");
 
 const root = path.join(process.cwd(), ".relay-test");

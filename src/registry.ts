@@ -6,7 +6,7 @@ import {
   secureEqual,
 } from "./auth-crypto";
 
-export type Scope = "read" | "write" | "terminal" | "process" | "admin";
+export type Scope = "read" | "write" | "terminal" | "process" | "desktop_read" | "desktop_control" | "admin";
 export type UserRecord = {
   id: string;
   name: string;
@@ -329,7 +329,7 @@ export class Registry extends DurableObject {
     const agent = await this.ctx.storage.get<AgentRecord>(key.agent(String(body.agentId)));
     if (!user || !agent) return json({ error: "principal_not_found" }, 404);
 
-    const allowed = new Set(["*", "read", "write", "terminal", "process", "admin"]);
+    const allowed = new Set(["*", "read", "write", "terminal", "process", "desktop_read", "desktop_control", "admin"]);
     const scopes = [...new Set(body.scopes.map(String))].filter((scope) => allowed.has(scope));
     if (scopes.length === 0) return json({ error: "scopes_required" }, 400);
 

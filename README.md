@@ -48,6 +48,7 @@ Chat Relay Remote
 -----------------
 Agent:      Primary PC (default)
 Terminal:   enabled
+Desktop:    disabled
 Agent connected
 ```
 
@@ -69,6 +70,8 @@ Useful options:
 chat-relay remote --root "C:\Users\you\Projects"
 chat-relay login --name "Work PC"
 chat-relay login --no-open
+chat-relay remote --desktop
+chat-relay remote --no-desktop
 ```
 
 The published package locates its bundled local agent relative to the package itself, so commands work from any working directory. Existing repository users can still run `npm start`; legacy `.dev.vars` credentials are migrated once into the user-level config.
@@ -85,7 +88,7 @@ Browser dashboard access uses the same Chat Relay username/password accounts but
 - Re-authentication revokes the previous CLI session when possible.
 - Each local machine has an independent `agentId` and agent token; agent tokens are stored server-side only as hashes.
 - Agent ownership is enforced before an existing machine identity can be reused, preventing shared users from rotating another owner's agent credential.
-- Grants map users to agents with scopes: `read`, `write`, `terminal`, `process`, or `*`.
+- Grants map users to agents with scopes: `read`, `write`, `terminal`, `process`, `desktop_read`, `desktop_control`, or `*`. Explicit legacy grants do not gain desktop access automatically.
 - Logging out revokes the local user session and the owning machine credential.
 - `ADMIN_TOKEN` remains separate and protects administration routes.
 - The existing legacy owner token remains supported only as transitional compatibility while OAuth becomes the normal ChatGPT MCP path.
@@ -127,6 +130,11 @@ Terminal:
 - `terminal_list`
 - `terminal_kill`
 
+Desktop (Windows, opt-in):
+- `screenshot` - returns a bounded MCP image content block plus coordinate metadata
+- `mouse_click` - left/right/middle single or double click in desktop coordinates
+- `keyboard_input` - Unicode text or named key/modifier chord
+
 Desktop-Commander-compatible aliases:
 - `start_process`
 - `read_process_output`
@@ -144,6 +152,8 @@ npm run admin -- bootstrap default "Primary PC"
 npm run admin -- create-user "Alice"
 npm run admin -- create-agent "Work Laptop" work-laptop
 npm run admin -- grant <userId> <agentId> read,write,terminal,process
+npm run admin -- grant <userId> <agentId> desktop_read
+npm run admin -- grant <userId> <agentId> desktop_read,desktop_control
 npm run admin -- revoke <userId> <agentId>
 npm run admin -- enable-user <userId> false
 $env:CHAT_RELAY_PASSWORD="choose-a-password"; npm run admin -- set-login <userId> <login>
@@ -179,6 +189,20 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 | `GET /status?agentId=<id>` | user token | Agent online status |
 | `POST /relay?agentId=<id>` | user token | Direct JSON relay with scope checks |
 | `/admin/*` | admin Bearer token | User/agent/grant administration |
+
+## Windows desktop access (opt-in)
+
+Desktop interaction is disabled by default and requires two independent gates:
+
+1. Enable the local agent with `chat-relay remote --desktop` or `DESKTOP_ENABLED=1`. The CLI persists this setting locally. Use `--no-desktop` to disable it again.
+2. Grant `desktop_read` for screenshots and/or `desktop_control` for mouse/keyboard input. Generic read/write/terminal/process scopes do not imply desktop access.
+
+- `screenshot` captures the primary interactive Windows display, scales/compresses it to a bounded JPEG, and returns it as an MCP image block. The accompanying metadata contains image size, desktop origin/size, and scale factors for converting screenshot pixels to desktop coordinates.
+- `mouse_click` accepts integer desktop x/y coordinates, button `left|right|middle`, and click count 1 or 2. Invalid/out-of-bounds input is rejected rather than coerced.
+- `keyboard_input` accepts either Unicode `text` or one named `key` with optional Ctrl/Alt/Shift/Win modifiers. Text and key cannot be supplied together.
+- Windows interactive sessions are the v1 target. Non-Windows agents return `unsupported_platform`; unavailable/locked/non-interactive desktops return a controlled session/capture/input error and do not crash the reconnect loop.
+- Screenshot bytes, typed text, key chords, and click coordinates are not stored in recentCalls. Only action/timing/success metadata is retained there.
+- This card does not add streaming video, OCR, remote-desktop viewer UI, clipboard sync, drag-and-drop, app-specific automation, or Session 0/service automation.
 
 ## Runtime limits and controls
 
@@ -236,6 +260,12 @@ Per-user rate/quota enforcement, isolation, reset-window behavior, disabled poli
 
 ```bash
 TEST_RELAY_URL=http://127.0.0.1:8804 npm run test:quota
+```
+
+Desktop tool contracts, scope separation, disabled/unsupported gates, controlled image mapping, and input validation are covered by:
+
+```bash
+TEST_RELAY_URL=http://127.0.0.1:8807 npm run test:desktop
 ```
 
 After `npm pack`, the zero-checkout package smoke test installs and runs the tarball from a temporary directory:

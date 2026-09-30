@@ -68,6 +68,7 @@ function migrateLegacyConfig() {
     agentToken: legacy.AGENT_TOKEN,
     allowedRoots: legacy.ALLOWED_ROOTS || defaultAllowedRoot(),
     terminalEnabled: legacy.TERMINAL_ENABLED !== "0",
+    desktopEnabled: legacy.DESKTOP_ENABLED === "1",
     migratedAt: new Date().toISOString(),
   };
   saveConfig(config);

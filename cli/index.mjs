@@ -9,6 +9,8 @@ function parseOptions(args) {
     const arg = args[index];
     if (arg === "--no-open") options.noOpen = true;
     else if (arg === "--force") options.force = true;
+    else if (arg === "--desktop") options.desktopEnabled = true;
+    else if (arg === "--no-desktop") options.desktopEnabled = false;
     else if (arg === "--relay") options.relayUrl = args[++index];
     else if (arg.startsWith("--relay=")) options.relayUrl = arg.slice(8);
     else if (arg === "--root") options.allowedRoot = args[++index];
@@ -37,6 +39,8 @@ Options:
   --root <path>                 Allowed filesystem root (semicolon-separated for multiple)
   --name <name>                 Computer display name
   --agent-id <id>               Stable agent identifier
+  --desktop                     Enable Windows desktop screenshot/input access
+  --no-desktop                  Disable desktop access (default)
   --no-open                     Do not open the browser automatically
   --force                       Force a new login
 
@@ -79,6 +83,7 @@ async function status() {
   console.log(`Agent:   ${config.agentName} (${config.agentId})`);
   console.log(`Remote:  ${agentStatus.response.ok && agentStatus.data.online ? "connected" : "offline"}`);
   console.log(`Files:   ${config.allowedRoots}`);
+  console.log("Desktop: " + (config.desktopEnabled === true ? "enabled" : "disabled"));
   console.log(`Config:  ${configPath()}`);
   return 0;
 }

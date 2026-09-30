@@ -8,6 +8,7 @@ AGENT_TOKEN=replace-with-agent-token
 
 # Local capabilities
 TERMINAL_ENABLED=1
+DESKTOP_ENABLED=0
 ALLOWED_ROOTS=C:\Users\you\Projects
 
 # Owner/admin values are only needed on the machine used to administer the relay

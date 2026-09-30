@@ -64,17 +64,18 @@ fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({
   agentToken: credentials.agentToken,
   allowedRoots: tempDir,
   terminalEnabled: true,
+  desktopEnabled: false,
 }, null, 2));
 
 const tarballPath = path.resolve(tarball);
 const command = process.platform === "win32"
   ? {
       file: "cmd.exe",
-      args: ["/d", "/s", "/c", `npm exec --yes --package=${tarballPath} -- chat-relay remote`],
+      args: ["/d", "/s", "/c", `npm exec --yes --package=${tarballPath} -- chat-relay remote --desktop`],
     }
   : {
       file: "npm",
-      args: ["exec", "--yes", `--package=${tarballPath}`, "--", "chat-relay", "remote"],
+      args: ["exec", "--yes", `--package=${tarballPath}`, "--", "chat-relay", "remote", "--desktop"],
     };
 const child = spawn(command.file, command.args, {
   cwd: tempDir,
@@ -106,6 +107,21 @@ try {
     throw new Error(`npx agent not online: ${JSON.stringify(status.data)}`);
   }
 
+  const agentConfig = await jsonFetch(`/relay?agentId=${encodeURIComponent(credentials.agent.id)}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${credentials.userToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ payload: { action: "agent.config" } }),
+  });
+  if (!agentConfig.response.ok || agentConfig.data.payload?.desktop?.enabled !== true) {
+    throw new Error(`desktop opt-in was not passed to packaged agent: ${JSON.stringify(agentConfig.data)}`);
+  }
+  const savedConfig = JSON.parse(fs.readFileSync(path.join(configDir, "config.json"), "utf8"));
+  if (savedConfig.desktopEnabled !== true || !output.includes("Desktop:    enabled")) {
+    throw new Error(`desktop opt-in was not persisted/reported:\n${output}`);
+  }
   console.log("zero-checkout npx remote connected");
 } finally {
   if (child.exitCode === null) {

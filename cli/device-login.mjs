@@ -82,6 +82,7 @@ export async function login(options = {}) {
     createAgentId(hostname);
   const agentName = options.agentName || existing.agentName || hostname;
   const allowedRoots = options.allowedRoot || existing.allowedRoots || defaultAllowedRoot();
+  const desktopEnabled = options.desktopEnabled ?? existing.desktopEnabled ?? false;
 
   saveIdentity({
     agentId: requestedAgentId,
@@ -152,6 +153,7 @@ export async function login(options = {}) {
       agentToken: result.agentToken,
       allowedRoots,
       terminalEnabled: true,
+      desktopEnabled: Boolean(desktopEnabled),
       loggedInAt: new Date().toISOString(),
     };
     const file = saveConfig(config);
