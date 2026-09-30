@@ -14,6 +14,7 @@ interface Env {
   RELAY: DurableObjectNamespace;
   REGISTRY: DurableObjectNamespace;
   USAGE: DurableObjectNamespace;
+  ASSETS?: Fetcher;
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
   CALLER_TOKEN?: string;
@@ -770,6 +771,15 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    if (path === "/dashboard" && env.ASSETS) {
+      return Response.redirect(url.origin + "/dashboard/", 302);
+    }
+    if (path.startsWith("/dashboard/") && env.ASSETS) {
+      const assetPath = path.slice("/dashboard".length) || "/index.html";
+      const resolvedPath = assetPath === "/" ? "/" : assetPath;
+      return env.ASSETS.fetch(new Request(url.origin + resolvedPath, request));
+    }
 
     if (path === "/health") {
       return request.method === "GET"
