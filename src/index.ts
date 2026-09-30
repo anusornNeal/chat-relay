@@ -6,7 +6,7 @@ import { handleDeviceAuth } from "./device-auth";
 import { handleOAuth, oauthChallenge, oauthResource } from "./oauth";
 import { handleAdmin } from "./admin";
 import { Registry, hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
-import { Usage, type UsageEvent } from "./usage";
+import { DEFAULT_QUOTA_POLICY, Usage, normalizeQuotaPolicy, type QuotaPolicy, type UsageEvent } from "./usage";
 
 export { Registry, Usage };
 
@@ -18,6 +18,9 @@ interface Env {
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
   CALLER_TOKEN?: string;
+  USER_RATE_LIMIT_PER_WINDOW?: string;
+  USER_RATE_WINDOW_SECONDS?: string;
+  USER_DAILY_CALL_QUOTA?: string;
 }
 
 type Pending = {
@@ -217,6 +220,85 @@ async function recordUsage(env: Env, event: UsageEvent): Promise<void> {
       body: JSON.stringify(event),
     }));
   } catch {}
+}
+
+type QuotaDecision = {
+  allowed: boolean;
+  code?: string;
+  retryAt?: string;
+  resetAt?: string;
+  remaining?: number;
+  policy?: QuotaPolicy;
+};
+
+function quotaDefaults(env: Env): QuotaPolicy {
+  return normalizeQuotaPolicy({
+    rateLimit: Number(env.USER_RATE_LIMIT_PER_WINDOW),
+    rateWindowSeconds: Number(env.USER_RATE_WINDOW_SECONDS),
+    dailyCallQuota: Number(env.USER_DAILY_CALL_QUOTA),
+  }, DEFAULT_QUOTA_POLICY);
+}
+
+async function inspectMcpToolCall(request: Request) {
+  if (request.method !== "POST") return null;
+  const body = await request.clone().json<any>().catch(() => null);
+  if (!body || Array.isArray(body) || body.method !== "tools/call") return null;
+  const tool = typeof body.params?.name === "string" ? body.params.name : "";
+  if (!tool) return null;
+  const args = body.params?.arguments ?? {};
+  return {
+    tool: tool.slice(0, 160),
+    args,
+    ...(typeof args?.agentId === "string" ? { agentId: args.agentId.slice(0, 128) } : {}),
+  };
+}
+
+async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Promise<Response | null> {
+  const call = await inspectMcpToolCall(request);
+  if (!call) return null;
+  let response: Response;
+  try {
+    response = await usageStub(env).fetch(new Request("https://usage.internal/quota/check", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: user.id, defaultPolicy: quotaDefaults(env) }),
+    }));
+  } catch {
+    return error(503, "quota_unavailable");
+  }
+  if (!response.ok) return error(503, "quota_unavailable");
+  const decision = await response.json<QuotaDecision>();
+  if (decision.allowed) return null;
+
+  const code = decision.code === "quota_exceeded" ? "quota_exceeded" : "rate_limited";
+  await recordUsage(env, {
+    userId: user.id,
+    tool: call.tool,
+    ...(call.agentId ? { agentId: call.agentId } : {}),
+    timestamp: new Date().toISOString(),
+    durationMs: 0,
+    ok: false,
+    errorClass: code,
+    requestBytes: byteSize(call.args),
+    responseBytes: 0,
+  });
+  const retryAt = decision.retryAt || decision.resetAt;
+  const retryAtMs = retryAt ? Date.parse(retryAt) : NaN;
+  const retryAfter = Number.isFinite(retryAtMs)
+    ? Math.max(1, Math.ceil((retryAtMs - Date.now()) / 1000))
+    : 1;
+  return Response.json({
+    error: code,
+    ...(decision.retryAt ? { retryAt: decision.retryAt } : {}),
+    ...(decision.resetAt ? { resetAt: decision.resetAt } : {}),
+    remaining: decision.remaining ?? 0,
+  }, {
+    status: 429,
+    headers: {
+      "retry-after": String(retryAfter),
+      "cache-control": "no-store",
+    },
+  });
 }
 
 async function instrumentTool<T>(
@@ -828,6 +910,9 @@ export default {
           },
         );
       }
+
+      const quotaResponse = await enforceMcpQuota(request, env, user);
+      if (quotaResponse) return quotaResponse;
 
       return createMcpHandler(() => createMcpServer(env, user), {
         route: "/mcp",

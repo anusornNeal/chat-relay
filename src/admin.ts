@@ -1,4 +1,5 @@
 import { hashToken, newToken, normalizeAgentId } from "./registry";
+import { DEFAULT_QUOTA_POLICY, normalizeQuotaPolicy, type QuotaPolicy } from "./usage";
 
 type AdminEnv = {
   REGISTRY: DurableObjectNamespace;
@@ -7,6 +8,9 @@ type AdminEnv = {
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
   CALLER_TOKEN?: string;
+  USER_RATE_LIMIT_PER_WINDOW?: string;
+  USER_RATE_WINDOW_SECONDS?: string;
+  USER_DAILY_CALL_QUOTA?: string;
 };
 
 const error = (status: number, code: string, details?: unknown) =>
@@ -64,6 +68,24 @@ async function registryCall(env: AdminEnv, path: string, body?: unknown) {
 
 function usageStub(env: AdminEnv) {
   return env.USAGE.get(env.USAGE.idFromName("global"));
+}
+
+function quotaDefaults(env: AdminEnv): QuotaPolicy {
+  return normalizeQuotaPolicy({
+    rateLimit: Number(env.USER_RATE_LIMIT_PER_WINDOW),
+    rateWindowSeconds: Number(env.USER_RATE_WINDOW_SECONDS),
+    dailyCallQuota: Number(env.USER_DAILY_CALL_QUOTA),
+  }, DEFAULT_QUOTA_POLICY);
+}
+
+async function quotaPolicy(env: AdminEnv) {
+  const response = await usageStub(env).fetch("https://usage.internal/quota/policy");
+  const data = await response.json<any>();
+  const override = data.policy ? normalizeQuotaPolicy(data.policy, quotaDefaults(env)) : null;
+  return {
+    policy: override ?? quotaDefaults(env),
+    source: override ? "admin" : "environment",
+  };
 }
 
 function generatedId(name: string, fallback: string) {
@@ -139,6 +161,39 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   if (path === "/admin/session/logout" && request.method === "POST") {
     if (browserAuth?.ok) await registryCall(env, "/admin-session/revoke", { tokenHash: browserAuth.tokenHash });
     return Response.json({ ok: true }, { headers: { "set-cookie": adminCookie("", 0), "cache-control": "no-store" } });
+  }
+
+  if (path === "/admin/api/limits" && request.method === "GET") {
+    const current = await quotaPolicy(env);
+    const recentResponse = await usageStub(env).fetch("https://usage.internal/query?recentLimit=100");
+    const recentData = await recentResponse.json<any>();
+    const recentRejections = (Array.isArray(recentData.recent) ? recentData.recent : [])
+      .filter((event: any) => event?.errorClass === "rate_limited" || event?.errorClass === "quota_exceeded")
+      .slice(0, 20);
+    return Response.json({ ...current, recentRejections });
+  }
+
+  if (path === "/admin/api/limits" && request.method === "POST") {
+    if (body?.resetToDefaults === true) {
+      const response = await usageStub(env).fetch(new Request("https://usage.internal/quota/policy", { method: "DELETE" }));
+      if (!response.ok) return error(502, "quota_policy_update_failed");
+      const current = await quotaPolicy(env);
+      return Response.json({ ok: true, ...current });
+    }
+    const rateLimit = Number(body?.rateLimit);
+    const rateWindowSeconds = Number(body?.rateWindowSeconds);
+    const dailyCallQuota = Number(body?.dailyCallQuota);
+    if (!Number.isFinite(rateLimit) || !Number.isFinite(rateWindowSeconds) || !Number.isFinite(dailyCallQuota)) {
+      return error(400, "invalid_quota_policy");
+    }
+    const policy = normalizeQuotaPolicy({ rateLimit, rateWindowSeconds, dailyCallQuota }, quotaDefaults(env));
+    const response = await usageStub(env).fetch(new Request("https://usage.internal/quota/policy", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(policy),
+    }));
+    const data = await response.json<any>();
+    return Response.json(response.ok ? { ...data, source: "admin" } : data, { status: response.status });
   }
 
   if (path === "/admin/api/overview" && request.method === "GET") {

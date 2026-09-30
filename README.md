@@ -182,6 +182,8 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 
 ## Runtime limits and controls
 
+- MCP tool calls are protected by per-user durable limits before local-agent dispatch. Defaults are 120 calls per 60-second window and 10,000 calls per UTC day. Set `USER_RATE_LIMIT_PER_WINDOW=0` or `USER_DAILY_CALL_QUOTA=0` to disable that limit; `USER_RATE_WINDOW_SECONDS` controls the rate window (1-3600 seconds).
+- Admins can inspect or override the effective policy with `GET/POST /admin/api/limits`; POST `{ "resetToDefaults": true }` returns to environment defaults. Rejections return HTTP 429 with `rate_limited` or `quota_exceeded`, `Retry-After`, and reset metadata, and are recorded as bounded usage events without dispatching agent work.
 - Relay request/response message: 64 KiB. The local agent caps serialized responses below that transport ceiling and returns `response_too_large` instead of allowing a silent timeout.
 - `read_file` defaults to a 32 KiB content budget (max 48 KiB) and exposes deterministic `nextOffset` continuation.
 - `read_multiple_files` defaults to a 48 KiB aggregate budget (max 48 KiB). If not all requested files fit, use `nextIndex`; if an individual file is truncated, continue it with that entry's `nextOffset`.
@@ -219,6 +221,12 @@ OAuth discovery, DCR, PKCE, token exchange, refresh rotation, audience binding, 
 
 ```bash
 TEST_RELAY_URL=http://127.0.0.1:8796 npm run test:oauth
+```
+
+Per-user rate/quota enforcement, isolation, reset-window behavior, disabled policy, rejection observability, and pre-dispatch blocking are covered by:
+
+```bash
+TEST_RELAY_URL=http://127.0.0.1:8804 npm run test:quota
 ```
 
 After `npm pack`, the zero-checkout package smoke test installs and runs the tarball from a temporary directory:
