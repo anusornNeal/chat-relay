@@ -97,6 +97,8 @@ async function handlePayload(payload) {
       return desktop.mouseClick(payload);
     case "desktop.keyboard.input":
       return desktop.keyboardInput(payload);
+    case "desktop.step":
+      return desktop.step(payload);
 
     case "terminal.exec":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
@@ -143,6 +145,7 @@ async function handlePayload(payload) {
 function requireReauthorization() {
   if (reauthorizationRequired) return;
   reauthorizationRequired = true;
+  desktop.close();
   process.exitCode = 2;
   console.error("Agent credential was revoked or rejected.");
   console.error('Recovery: run "chat-relay login --force", then "chat-relay remote".');
@@ -227,5 +230,13 @@ function connect() {
     if (!reauthorizationRequired) console.error("WebSocket error:", error.message);
   });
 }
+
+function shutdown() {
+  desktop.close();
+}
+
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
+process.once("exit", shutdown);
 
 connect();

@@ -25,7 +25,7 @@ async function managerTests() {
   let runnerCalls = [];
   const runner = async (operation, args) => {
     runnerCalls.push({ operation, args });
-    if (operation === "screenshot") {
+    if (operation === "screenshot" || (operation === "step" && args.captureAfter !== false)) {
       return {
         ok: true,
         mimeType: "image/jpeg",
@@ -66,6 +66,21 @@ async function managerTests() {
   assert((await manager.keyboardInput({ key: "A", ctrl: true })).ok, "key chord path failed");
   assert(runnerCalls.some((item) => item.operation === "keyboard_input" && item.args.text === "สวัสดี"), "unicode text was not forwarded");
   assert(runnerCalls.some((item) => item.operation === "keyboard_input" && item.args.keyCode === 0x41 && item.args.ctrl), "key mapping failed");
+
+  const step = await manager.step({
+    actions: [
+      { type: "click", x: 10, y: 20 },
+      { type: "text", text: "hello" },
+      { type: "key", key: "Enter" },
+      { type: "wait", ms: 10 },
+    ],
+    captureAfter: true,
+    monitor: "secondary",
+  });
+  assert(step.ok, "desktop step failed");
+  const stepCall = runnerCalls.find((item) => item.operation === "step");
+  assert(stepCall?.args.actions.length === 4, "desktop step actions were not batched");
+  assert(stepCall?.args.monitor === "secondary", "desktop step monitor was not forwarded");
 }
 
 async function request(path, options = {}) {
@@ -156,6 +171,27 @@ async function mcpTests() {
         scaleY: 1080,
         byteLength: Buffer.from(tinyJpeg, "base64").byteLength,
       };
+    } else if (action === "desktop.step") {
+      if (message.payload?.captureAfter === false) {
+        payload = { ok: true, action, actionsCompleted: message.payload?.actions?.length || 0 };
+      } else {
+        payload = {
+          ok: true,
+          action,
+          actionsCompleted: message.payload?.actions?.length || 0,
+          mimeType: "image/jpeg",
+          data: tinyJpeg,
+          width: 1,
+          height: 1,
+          desktopOriginX: 0,
+          desktopOriginY: 0,
+          desktopWidth: 1920,
+          desktopHeight: 1080,
+          scaleX: 1920,
+          scaleY: 1080,
+          byteLength: Buffer.from(tinyJpeg, "base64").byteLength,
+        };
+      }
     } else if (action === "desktop.mouse.click" || action === "desktop.keyboard.input") {
       payload = { ok: true, action };
     } else {
@@ -166,12 +202,13 @@ async function mcpTests() {
 
   const reader = await createUser("reader-" + suffix, ["desktop_read"], agentId);
   const controller = await createUser("controller-" + suffix, ["desktop_control"], agentId);
+  const operator = await createUser("operator-" + suffix, ["desktop_read", "desktop_control"], agentId);
   const legacy = await createUser("legacy-" + suffix, ["read", "write", "terminal", "process"], agentId);
   const wildcard = await createUser("wildcard-" + suffix, ["*"], agentId);
 
   const listed = await rpc(reader.token, 1, "tools/list");
   const byName = new Map((listed.result?.tools || []).map((tool) => [tool.name, tool]));
-  for (const name of ["screenshot", "mouse_click", "keyboard_input"]) {
+  for (const name of ["screenshot", "mouse_click", "keyboard_input", "desktop_step"]) {
     assert(byName.has(name), "missing desktop tool " + name);
   }
   assert(byName.get("screenshot")?.annotations?.readOnlyHint === true, "screenshot readOnlyHint missing");
@@ -183,14 +220,19 @@ async function mcpTests() {
     arguments: { agentId },
   });
   assert(!shot.result?.isError, "desktop_read screenshot failed");
-  assert(shot.result?.content?.[0]?.type === "text", "screenshot did not return temporary URL metadata");
-  const metadata = JSON.parse(shot.result?.content?.[0]?.text || "{}");
+  const imageBlock = shot.result?.content?.find((item) => item.type === "image");
+  const textBlock = shot.result?.content?.find((item) => item.type === "text");
+  assert(imageBlock?.data === tinyJpeg && imageBlock?.mimeType === "image/jpeg", "screenshot did not return direct image content");
+  assert(textBlock?.type === "text", "screenshot did not return temporary URL metadata");
+  const metadata = JSON.parse(textBlock?.text || "{}");
   assert(metadata.desktopWidth === 1920 && metadata.scaleX === 1920, "screenshot metadata missing");
   assert(typeof metadata.tempUrl === "string" && metadata.tempUrl.includes("/tmp-shot/"), "temporary screenshot URL missing");
   assert(metadata.expiresInSeconds === 300, "temporary screenshot TTL invalid");
 
-  const tempUrl = metadata.tempUrl.startsWith("http") ? metadata.tempUrl : base + metadata.tempUrl;
-  const tempShot = await fetch(tempUrl);
+  const tempPath = metadata.tempUrl.startsWith("http")
+    ? new URL(metadata.tempUrl).pathname
+    : metadata.tempUrl;
+  const tempShot = await fetch(base + tempPath);
   assert(tempShot.ok, "temporary screenshot URL was not readable");
   assert(tempShot.headers.get("content-type") === "image/jpeg", "temporary screenshot mime type invalid");
   const tempBytes = Buffer.from(await tempShot.arrayBuffer());
@@ -220,14 +262,51 @@ async function mcpTests() {
   });
   assert(!controllerKey.result?.isError, "desktop_control keyboard failed");
 
-  for (const name of ["screenshot", "mouse_click", "keyboard_input"]) {
+  const controllerStepNoCapture = await rpc(controller.token, 7, "tools/call", {
+    name: "desktop_step",
+    arguments: {
+      agentId,
+      actions: [{ type: "click", x: 10, y: 10 }],
+      captureAfter: false,
+    },
+  });
+  assert(!controllerStepNoCapture.result?.isError, "desktop_control step without capture failed");
+
+  const controllerStepWithCapture = await rpc(controller.token, 8, "tools/call", {
+    name: "desktop_step",
+    arguments: {
+      agentId,
+      actions: [{ type: "click", x: 10, y: 10 }],
+      captureAfter: true,
+    },
+  });
+  assert(controllerStepWithCapture.result?.isError === true, "desktop_control gained screenshot through desktop_step");
+
+  const operatorStep = await rpc(operator.token, 9, "tools/call", {
+    name: "desktop_step",
+    arguments: {
+      agentId,
+      actions: [
+        { type: "click", x: 10, y: 10 },
+        { type: "text", text: "hello" },
+        { type: "key", key: "Enter" },
+      ],
+      captureAfter: true,
+    },
+  });
+  assert(!operatorStep.result?.isError, "combined desktop_step failed");
+  assert(operatorStep.result?.content?.some((item) => item.type === "image"), "desktop_step did not return image content");
+
+  for (const name of ["screenshot", "mouse_click", "keyboard_input", "desktop_step"]) {
     const denied = await rpc(legacy.token, 10 + name.length, "tools/call", {
       name,
       arguments: name === "screenshot"
         ? { agentId }
         : name === "mouse_click"
           ? { agentId, x: 10, y: 10 }
-          : { agentId, text: "x" },
+          : name === "keyboard_input"
+            ? { agentId, text: "x" }
+            : { agentId, actions: [{ type: "click", x: 10, y: 10 }], captureAfter: false },
     });
     assert(denied.result?.isError === true, "legacy scopes unexpectedly authorized " + name);
   }

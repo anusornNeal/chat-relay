@@ -1,11 +1,13 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import readline from "node:readline";
+import { randomUUID } from "node:crypto";
 
 const MAX_SCREENSHOT_BINARY_BYTES = 32 * 1024;
 const POWERSHELL_TIMEOUT_MS = 15_000;
 const MAX_TEXT_LENGTH = 8192;
-const helperPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "windows-desktop.ps1");
+const helperPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "windows-desktop-worker.ps1");
 
 const KEY_CODES = new Map([
   ["enter", 0x0D],
@@ -31,53 +33,142 @@ function normalizedKey(value) {
   return String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
 
-function encodeArgs(args) {
-  return Buffer.from(JSON.stringify(args || {}), "utf8").toString("base64");
+function normalizeKeyboardInput(input = {}) {
+  const hasText = typeof input.text === "string" && input.text.length > 0;
+  const hasKey = typeof input.key === "string" && input.key.trim().length > 0;
+
+  if (hasText === hasKey) return { ok: false, error: "invalid_keyboard_input" };
+
+  if (hasText) {
+    if (input.text.length > MAX_TEXT_LENGTH) return { ok: false, error: "text_too_large" };
+    if (input.ctrl || input.alt || input.shift || input.win) {
+      return { ok: false, error: "invalid_keyboard_input" };
+    }
+    return { ok: true, payload: { text: input.text } };
+  }
+
+  const key = normalizedKey(input.key);
+  const keyCode = KEY_CODES.get(key);
+  if (!keyCode) return { ok: false, error: "unsupported_key" };
+
+  return {
+    ok: true,
+    payload: {
+      keyCode,
+      ctrl: input.ctrl === true,
+      alt: input.alt === true,
+      shift: input.shift === true,
+      win: input.win === true,
+    },
+  };
 }
 
-async function defaultRunner(operation, args) {
-  return new Promise((resolve) => {
-    execFile(
-      "powershell.exe",
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        helperPath,
-        "-Operation",
-        operation,
-        "-InputBase64",
-        encodeArgs(args),
-      ],
-      {
-        windowsHide: true,
-        timeout: POWERSHELL_TIMEOUT_MS,
-        maxBuffer: 512 * 1024,
-      },
-      (error, stdout) => {
-        const line = String(stdout || "").trim().split(/\r?\n/).filter(Boolean).at(-1);
-        if (!line) {
-          resolve({ ok: false, error: operation === "screenshot" ? "capture_failed" : "input_failed" });
-          return;
-        }
-        try {
-          resolve(JSON.parse(line));
-        } catch {
-          resolve({ ok: false, error: operation === "screenshot" ? "capture_failed" : "input_failed" });
-        }
-      },
-    );
-  });
+class PersistentDesktopRunner {
+  constructor(options = {}) {
+    this.platform = options.platform ?? process.platform;
+    this.timeoutMs = Number(options.timeoutMs ?? POWERSHELL_TIMEOUT_MS);
+    this.process = null;
+    this.stdout = null;
+    this.pending = new Map();
+    this.stderr = "";
+  }
+
+  ensureStarted() {
+    if (this.platform !== "win32") return false;
+    if (this.process && !this.process.killed) return true;
+
+    const child = spawn("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      helperPath,
+    ], {
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    this.process = child;
+    this.stderr = "";
+    this.stdout = readline.createInterface({ input: child.stdout });
+
+    this.stdout.on("line", (line) => {
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        return;
+      }
+      const pending = this.pending.get(message?.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.pending.delete(message.id);
+      pending.resolve(message.result ?? { ok: false, error: "desktop_worker_error" });
+    });
+
+    child.stderr.on("data", (chunk) => {
+      this.stderr = (this.stderr + String(chunk)).slice(-8192);
+    });
+
+    child.on("exit", () => {
+      const error = { ok: false, error: "desktop_worker_exited" };
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.resolve(error);
+      }
+      this.pending.clear();
+      this.stdout?.close();
+      this.stdout = null;
+      this.process = null;
+    });
+
+    child.on("error", () => {
+      // exit handler settles pending work.
+    });
+
+    return true;
+  }
+
+  async run(operation, args) {
+    if (!this.ensureStarted() || !this.process?.stdin?.writable) {
+      return { ok: false, error: operation === "screenshot" ? "capture_failed" : "input_failed" };
+    }
+
+    const id = randomUUID();
+    const request = JSON.stringify({ id, operation, args: args || {} }) + "\n";
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve({ ok: false, error: operation === "screenshot" ? "capture_timeout" : "input_timeout" });
+      }, this.timeoutMs);
+
+      this.pending.set(id, { resolve, timer });
+      this.process.stdin.write(request, (error) => {
+        if (!error) return;
+        clearTimeout(timer);
+        this.pending.delete(id);
+        resolve({ ok: false, error: operation === "screenshot" ? "capture_failed" : "input_failed" });
+      });
+    });
+  }
+
+  close() {
+    try { this.stdout?.close(); } catch {}
+    try { this.process?.kill(); } catch {}
+    this.stdout = null;
+    this.process = null;
+  }
 }
 
 export class DesktopManager {
   constructor(options = {}) {
     this.enabled = options.enabled ?? process.env.DESKTOP_ENABLED === "1";
     this.platform = options.platform ?? process.platform;
-    this.runner = options.runner ?? defaultRunner;
+    this.persistentRunner = options.persistentRunner ?? new PersistentDesktopRunner({ platform: this.platform });
+    this.runner = options.runner ?? ((operation, args) => this.persistentRunner.run(operation, args));
   }
 
   getConfig() {
@@ -85,6 +176,7 @@ export class DesktopManager {
       enabled: this.enabled,
       supported: this.platform === "win32",
       platform: this.platform,
+      transport: this.platform === "win32" ? "persistent-worker" : "unsupported",
     };
   }
 
@@ -104,6 +196,10 @@ export class DesktopManager {
     }
 
     const result = await this.runner("screenshot", { monitor });
+    return this.normalizeScreenshotResult(result);
+  }
+
+  normalizeScreenshotResult(result) {
     if (!result?.ok) return result || { ok: false, error: "capture_failed" };
     if (result.mimeType !== "image/jpeg" || typeof result.data !== "string") {
       return { ok: false, error: "capture_failed" };
@@ -115,9 +211,8 @@ export class DesktopManager {
     }
 
     return {
+      ...result,
       ok: true,
-      mimeType: result.mimeType,
-      data: result.data,
       width: Number(result.width),
       height: Number(result.height),
       desktopOriginX: Number(result.desktopOriginX),
@@ -153,31 +248,72 @@ export class DesktopManager {
     const gate = this.gate();
     if (gate) return gate;
 
-    const hasText = typeof input.text === "string" && input.text.length > 0;
-    const hasKey = typeof input.key === "string" && input.key.trim().length > 0;
+    const normalized = normalizeKeyboardInput(input);
+    if (!normalized.ok) return normalized;
+    return this.runner("keyboard_input", normalized.payload);
+  }
 
-    if (hasText === hasKey) return { ok: false, error: "invalid_keyboard_input" };
+  async step(input = {}) {
+    const gate = this.gate();
+    if (gate) return gate;
 
-    if (hasText) {
-      if (input.text.length > MAX_TEXT_LENGTH) return { ok: false, error: "text_too_large" };
-      if (input.ctrl || input.alt || input.shift || input.win) {
-        return { ok: false, error: "invalid_keyboard_input" };
+    const actions = Array.isArray(input.actions) ? input.actions : [];
+    if (actions.length < 1 || actions.length > 20) return { ok: false, error: "invalid_step_actions" };
+
+    const normalizedActions = [];
+    for (const action of actions) {
+      if (!action || typeof action !== "object") return { ok: false, error: "invalid_step_action" };
+      if (action.type === "click") {
+        const x = Number(action.x);
+        const y = Number(action.y);
+        const button = String(action.button || "left").toLowerCase();
+        const clicks = Number(action.clicks ?? 1);
+        if (!Number.isInteger(x) || !Number.isInteger(y)) return { ok: false, error: "invalid_coordinates" };
+        if (!["left", "right", "middle"].includes(button)) return { ok: false, error: "invalid_button" };
+        if (clicks !== 1 && clicks !== 2) return { ok: false, error: "invalid_click_count" };
+        normalizedActions.push({ type: "click", x, y, button, clicks });
+        continue;
       }
-      return this.runner("keyboard_input", { text: input.text });
+
+      if (action.type === "text" || action.type === "key") {
+        const normalized = normalizeKeyboardInput(action);
+        if (!normalized.ok) return normalized;
+        normalizedActions.push({ type: action.type, ...normalized.payload });
+        continue;
+      }
+
+      if (action.type === "wait") {
+        const ms = Number(action.ms);
+        if (!Number.isInteger(ms) || ms < 0 || ms > 5000) return { ok: false, error: "invalid_wait" };
+        normalizedActions.push({ type: "wait", ms });
+        continue;
+      }
+
+      return { ok: false, error: "invalid_step_action" };
     }
 
-    const key = normalizedKey(input.key);
-    const keyCode = KEY_CODES.get(key);
-    if (!keyCode) return { ok: false, error: "unsupported_key" };
+    const monitor = input.monitor ?? "primary";
+    if (!(monitor === "primary" || monitor === "secondary" || (Number.isInteger(monitor) && monitor >= 0 && monitor <= 15))) {
+      return { ok: false, error: "invalid_monitor" };
+    }
 
-    return this.runner("keyboard_input", {
-      keyCode,
-      ctrl: input.ctrl === true,
-      alt: input.alt === true,
-      shift: input.shift === true,
-      win: input.win === true,
+    const settleMs = input.settleMs === undefined ? 120 : Number(input.settleMs);
+    if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 5000) return { ok: false, error: "invalid_settle_ms" };
+
+    const result = await this.runner("step", {
+      actions: normalizedActions,
+      captureAfter: input.captureAfter !== false,
+      settleMs,
+      monitor,
     });
+
+    if (input.captureAfter === false) return result;
+    return this.normalizeScreenshotResult(result);
+  }
+
+  close() {
+    this.persistentRunner?.close?.();
   }
 }
 
-export { KEY_CODES, MAX_SCREENSHOT_BINARY_BYTES };
+export { KEY_CODES, MAX_SCREENSHOT_BINARY_BYTES, PersistentDesktopRunner };

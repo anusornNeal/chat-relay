@@ -584,18 +584,34 @@ function scopeForAction(action: string): Scope {
   if (action.startsWith("terminal.")) return "terminal";
   if (action === "process.kill" || action === "process.list") return "process";
   if (action === "desktop.screenshot") return "desktop_read";
-  if (action === "desktop.mouse.click" || action === "desktop.keyboard.input") return "desktop_control";
+  if (action === "desktop.mouse.click" || action === "desktop.keyboard.input" || action === "desktop.step") return "desktop_control";
   return "read";
+}
+
+async function resolveAgentForScopes(
+  env: Env,
+  userId: string,
+  scopes: Scope[],
+  requestedAgentId?: string,
+): Promise<{ ok: true; agentId: string } | { ok: false; response: Response }> {
+  let agentId = requestedAgentId;
+  for (const scope of scopes) {
+    const resolved = await resolveAgent(env, userId, scope, agentId);
+    if (!resolved.ok) return resolved;
+    agentId = resolved.agentId;
+  }
+  return { ok: true, agentId: agentId! };
 }
 
 async function callAgent(
   env: Env,
   user: AuthUser,
-  scope: Scope,
+  scope: Scope | Scope[],
   requestedAgentId: string | undefined,
   payload: unknown,
 ) {
-  const resolved = await resolveAgent(env, user.id, scope, requestedAgentId);
+  const scopes = Array.isArray(scope) ? scope : [scope];
+  const resolved = await resolveAgentForScopes(env, user.id, scopes, requestedAgentId);
   if (!resolved.ok) {
     return { ok: false, body: await resolved.response.text(), agentId: requestedAgentId, statusCode: resolved.response.status };
   }
@@ -669,7 +685,10 @@ async function screenshotToolResult(env: Env, agentId: string | undefined, resul
 
     return {
       structuredContent: metadata,
-      content: [{ type: "text" as const, text: JSON.stringify(metadata) }],
+      content: [
+        { type: "image" as const, data: payload.data, mimeType: payload.mimeType },
+        { type: "text" as const, text: JSON.stringify(metadata) },
+      ],
     };
   } catch {
     return toolResult({ ok: false, body: JSON.stringify({ error: "invalid_screenshot_result" }) });
@@ -697,9 +716,8 @@ const READ_ONLY_TOOLS = new Set([
   "start_search", "get_more_search_results", "list_processes", "screenshot",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
 ]);
-
 const OPEN_WORLD_TOOLS = new Set([
-  "mouse_click", "keyboard_input",
+  "mouse_click", "keyboard_input", "desktop_step",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write",
   "terminal_batch_start", "terminal_batch_cancel",
   "start_process", "interact_with_process",
@@ -707,7 +725,7 @@ const OPEN_WORLD_TOOLS = new Set([
 
 const DESTRUCTIVE_TOOLS = new Set([
   "write_file", "edit_block", "move_path", "delete_path", "kill_process",
-  "mouse_click", "keyboard_input",
+  "mouse_click", "keyboard_input", "desktop_step",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write", "terminal_kill",
   "terminal_batch_start", "terminal_batch_cancel",
   "start_process", "interact_with_process", "force_terminate",
@@ -1027,6 +1045,75 @@ function createMcpServer(env: Env, user: AuthUser) {
     { destructiveHint: true },
   );
 
+  server.registerTool(
+    "desktop_step",
+    {
+      description: "Run 1-20 desktop actions in one local round trip and optionally capture the target monitor afterward. Use this for fast computer-use loops. captureAfter defaults to true and requires both desktop_control and desktop_read permission.",
+      inputSchema: {
+        agentId: agentIdSchema,
+        actions: z.array(z.union([
+          z.object({
+            type: z.literal("click"),
+            x: z.number().int().min(-32768).max(32767),
+            y: z.number().int().min(-32768).max(32767),
+            button: z.enum(["left", "right", "middle"]).optional(),
+            clicks: z.union([z.literal(1), z.literal(2)]).optional(),
+          }),
+          z.object({
+            type: z.literal("text"),
+            text: z.string().min(1).max(8192),
+          }),
+          z.object({
+            type: z.literal("key"),
+            key: z.enum([
+              "Enter", "Tab", "Escape", "Backspace", "Delete",
+              "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown",
+              "Home", "End", "PageUp", "PageDown", "Space",
+              "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+              "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+              "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+              "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+            ]),
+            ctrl: z.boolean().optional(),
+            alt: z.boolean().optional(),
+            shift: z.boolean().optional(),
+            win: z.boolean().optional(),
+          }),
+          z.object({
+            type: z.literal("wait"),
+            ms: z.number().int().min(0).max(5000),
+          }),
+        ])).min(1).max(20),
+        captureAfter: z.boolean().optional(),
+        settleMs: z.number().int().min(0).max(5000).optional(),
+        monitor: z.union([z.enum(["primary", "secondary"]), z.number().int().min(0).max(15)]).optional(),
+      },
+      annotations: annotationsForTool("desktop_step", { destructiveHint: true }),
+    } as any,
+    async ({ agentId, actions, captureAfter, settleMs, monitor }: any) => instrumentTool(
+      env,
+      user,
+      "desktop_step",
+      { agentId, actions, captureAfter, settleMs, monitor },
+      async () => {
+        const wantsCapture = captureAfter !== false;
+        const call = await callAgent(
+          env,
+          user,
+          wantsCapture ? ["desktop_control", "desktop_read"] : "desktop_control",
+          agentId,
+          { action: "desktop.step", actions, captureAfter, settleMs, monitor },
+        );
+        return {
+          value: wantsCapture ? await screenshotToolResult(env, call.agentId, call) : toolResult(call),
+          ok: call.ok,
+          agentId: call.agentId,
+          ...(call.ok ? {} : { errorClass: "tool_error" }),
+        };
+      },
+    ),
+  );
+
   register(
     "terminal_exec",
     "Run one PowerShell command and wait for completion. Use for commands that finish within 20 seconds.",
@@ -1225,8 +1312,10 @@ async function handleDirectRelay(request: Request, env: Env, user: AuthUser): Pr
   const action = typeof body.payload === "object" && body.payload !== null
     ? String((body.payload as any).action ?? "")
     : "";
-  const scope = scopeForAction(action);
-  const resolved = await resolveAgent(env, user.id, scope, agentId);
+  const requestedScopes: Scope[] = action === "desktop.step" && (body.payload as any)?.captureAfter !== false
+    ? ["desktop_control", "desktop_read"]
+    : [scopeForAction(action)];
+  const resolved = await resolveAgentForScopes(env, user.id, requestedScopes, agentId);
   if (!resolved.ok) return resolved.response;
 
   const stub = env.RELAY.get(env.RELAY.idFromName(resolved.agentId));
