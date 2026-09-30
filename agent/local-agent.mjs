@@ -103,7 +103,7 @@ async function handlePayload(payload) {
       return terminals.exec(payload.command, payload.cwd, payload.timeoutMs);
     case "terminal.batch.start":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
-      return terminals.batchStart(payload.jobs, { cwd: payload.cwd, timeoutMs: payload.timeoutMs, concurrency: payload.concurrency });
+      return terminals.batchStart(payload.jobs, { cwd: payload.cwd, timeoutMs: payload.timeoutMs, concurrency: payload.concurrency, observability: payload.observability });
     case "terminal.batch.status":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.batchStatus(payload.batchId);
@@ -115,10 +115,10 @@ async function handlePayload(payload) {
       return terminals.batchCancel(payload.batchId);
     case "terminal.start":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
-      return terminals.start(payload.command, payload.cwd);
+      return terminals.start(payload.command, payload.cwd, payload.observability);
     case "terminal.shell.start":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
-      return terminals.startShell(payload.cwd);
+      return terminals.startShell(payload.cwd, payload.observability);
     case "terminal.read":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.read(payload.sessionId, payload.afterSeq, payload.maxChars);
@@ -131,6 +131,9 @@ async function handlePayload(payload) {
     case "terminal.list":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.list();
+    case "terminal.observability":
+      if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
+      return terminals.observability();
 
     default:
       return { ok: false, error: "unknown_action" };

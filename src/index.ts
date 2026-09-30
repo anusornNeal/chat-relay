@@ -329,6 +329,48 @@ function byteSize(value: unknown): number {
   catch { return 0; }
 }
 
+type ToolActivityContext = {
+  toolCallId: string;
+  activityId?: string;
+  startedAt: string;
+};
+
+const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
+
+async function activityContextForRequest(request: Request): Promise<ToolActivityContext> {
+  const source = [
+    "mcp-session-id",
+    "x-openai-conversation-id",
+    "x-openai-chat-id",
+    "x-chatgpt-conversation-id",
+  ].map((name) => request.headers.get(name)?.trim()).find(Boolean);
+  const activityId = source
+    ? "act_" + (await hashToken("chat-relay-activity:" + source)).slice(0, 20)
+    : undefined;
+  return {
+    toolCallId: "tc_" + crypto.randomUUID().replace(/-/g, ""),
+    ...(activityId ? { activityId } : {}),
+    startedAt: new Date().toISOString(),
+  };
+}
+
+async function beginUsage(env: Env, event: {
+  userId: string;
+  tool: string;
+  agentId?: string;
+  toolCallId: string;
+  activityId?: string;
+  startedAt: string;
+}): Promise<void> {
+  try {
+    await usageStub(env).fetch(new Request("https://usage.internal/activity/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(event),
+    }));
+  } catch {}
+}
+
 async function recordUsage(env: Env, event: UsageEvent): Promise<void> {
   try {
     await usageStub(env).fetch(new Request("https://usage.internal/record", {
@@ -388,14 +430,19 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
   if (decision.allowed) return null;
 
   const code = decision.code === "quota_exceeded" ? "quota_exceeded" : "rate_limited";
+  const activity = toolActivityContexts.get(user);
   await recordUsage(env, {
     userId: user.id,
     tool: call.tool,
     ...(call.agentId ? { agentId: call.agentId } : {}),
+    ...(activity?.toolCallId ? { toolCallId: activity.toolCallId } : {}),
+    ...(activity?.activityId ? { activityId: activity.activityId } : {}),
+    ...(activity?.startedAt ? { startedAt: activity.startedAt } : {}),
     timestamp: new Date().toISOString(),
     durationMs: 0,
     ok: false,
     errorClass: code,
+    statusCode: 429,
     requestBytes: byteSize(call.args),
     responseBytes: 0,
   });
@@ -423,10 +470,25 @@ async function instrumentTool<T>(
   user: AuthUser,
   tool: string,
   args: unknown,
-  run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string }>,
+  run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; statusCode?: number; exitCode?: number | null }>,
 ): Promise<T> {
   const started = Date.now();
-  let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string } | undefined;
+  const activity = toolActivityContexts.get(user) ?? {
+    toolCallId: "tc_" + crypto.randomUUID().replace(/-/g, ""),
+    startedAt: new Date().toISOString(),
+  };
+  const requestedAgentId = typeof args === "object" && args !== null && typeof (args as any).agentId === "string"
+    ? String((args as any).agentId).slice(0, 128)
+    : undefined;
+  await beginUsage(env, {
+    userId: user.id,
+    tool,
+    ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
+    toolCallId: activity.toolCallId,
+    ...(activity.activityId ? { activityId: activity.activityId } : {}),
+    startedAt: activity.startedAt,
+  });
+  let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string; statusCode?: number; exitCode?: number | null } | undefined;
   try {
     outcome = await run();
     return outcome.value;
@@ -434,6 +496,10 @@ async function instrumentTool<T>(
     await recordUsage(env, {
       userId: user.id,
       tool,
+      ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
+      toolCallId: activity.toolCallId,
+      ...(activity.activityId ? { activityId: activity.activityId } : {}),
+      startedAt: activity.startedAt,
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - started,
       ok: false,
@@ -448,10 +514,15 @@ async function instrumentTool<T>(
         userId: user.id,
         tool,
         ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
+        toolCallId: activity.toolCallId,
+        ...(activity.activityId ? { activityId: activity.activityId } : {}),
+        startedAt: activity.startedAt,
         timestamp: new Date().toISOString(),
         durationMs: Date.now() - started,
         ok: outcome.ok,
         ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
+        ...(Number.isFinite(outcome.statusCode) ? { statusCode: outcome.statusCode } : {}),
+        ...(outcome.exitCode === null || Number.isFinite(outcome.exitCode) ? { exitCode: outcome.exitCode } : {}),
         requestBytes: byteSize(args),
         responseBytes: byteSize(outcome.value),
       });
@@ -526,7 +597,7 @@ async function callAgent(
 ) {
   const resolved = await resolveAgent(env, user.id, scope, requestedAgentId);
   if (!resolved.ok) {
-    return { ok: false, body: await resolved.response.text(), agentId: requestedAgentId };
+    return { ok: false, body: await resolved.response.text(), agentId: requestedAgentId, statusCode: resolved.response.status };
   }
 
   const stub = env.RELAY.get(env.RELAY.idFromName(resolved.agentId));
@@ -538,12 +609,15 @@ async function callAgent(
   const body = await response.text();
 
   let ok = response.ok;
+  let exitCode: number | null | undefined;
   try {
-    const parsed = JSON.parse(body) as { payload?: { ok?: boolean } };
+    const parsed = JSON.parse(body) as { payload?: { ok?: boolean; exitCode?: unknown } };
     if (parsed.payload?.ok === false) ok = false;
+    if (parsed.payload?.exitCode === null) exitCode = null;
+    else if (Number.isFinite(Number(parsed.payload?.exitCode))) exitCode = Number(parsed.payload?.exitCode);
   } catch {}
 
-  return { ok, body, agentId: resolved.agentId };
+  return { ok, body, agentId: resolved.agentId, statusCode: response.status, ...(exitCode === undefined ? {} : { exitCode }) };
 }
 
 function toolResult(result: { ok: boolean; body: string }) {
@@ -700,11 +774,22 @@ function createMcpServer(env: Env, user: AuthUser) {
         annotations: annotationsForTool(name, annotations),
       } as any,
       async (args: any) => instrumentTool(env, user, name, args, async () => {
-        const call = await callAgent(env, user, scope, args.agentId, payload(args));
+        const agentPayload = payload(args) as any;
+        const activity = toolActivityContexts.get(user);
+        if (agentPayload && ["terminal.start", "terminal.shell.start", "terminal.batch.start"].includes(agentPayload.action)) {
+          agentPayload.observability = {
+            userId: user.id,
+            ...(activity?.activityId ? { activityId: activity.activityId } : {}),
+            ...(activity?.toolCallId ? { toolCallId: activity.toolCallId } : {}),
+          };
+        }
+        const call = await callAgent(env, user, scope, args.agentId, agentPayload);
         return {
           value: toolResult(call),
           ok: call.ok,
           agentId: call.agentId,
+          statusCode: call.statusCode,
+          ...(call.exitCode === undefined ? {} : { exitCode: call.exitCode }),
           ...(call.ok ? {} : { errorClass: "tool_error" }),
         };
       }),
@@ -1241,6 +1326,7 @@ export default {
         );
       }
 
+      toolActivityContexts.set(user, await activityContextForRequest(request));
       const quotaResponse = await enforceMcpQuota(request, env, user);
       if (quotaResponse) return quotaResponse;
 

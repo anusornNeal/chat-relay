@@ -4,12 +4,26 @@ export type UsageEvent = {
   userId: string;
   tool: string;
   agentId?: string;
+  toolCallId?: string;
+  activityId?: string;
+  startedAt?: string;
   timestamp: string;
   durationMs: number;
   ok: boolean;
   errorClass?: string;
+  statusCode?: number;
+  exitCode?: number | null;
   requestBytes: number;
   responseBytes: number;
+};
+
+type ActiveUsageEvent = {
+  userId: string;
+  tool: string;
+  agentId?: string;
+  toolCallId: string;
+  activityId?: string;
+  startedAt: string;
 };
 
 export type QuotaPolicy = {
@@ -91,6 +105,12 @@ function publicMetric(metric: Metric | undefined) {
     avgDurationMs: metric.calls ? metric.durationMs / metric.calls : 0,
     errorRate: metric.calls ? metric.errors / metric.calls : 0,
   };
+}
+
+function percentile95(values: number[]) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * 0.95) - 1))];
 }
 
 function safePart(value: string) {
@@ -177,8 +197,7 @@ export class Usage extends DurableObject {
             policy,
             source: override ? "admin" : "environment",
             retryAt: dailyResetAt,
-            resetAt: dailyResetAt,
-            remaining: 0,
+            resetAt: dailyResetAt,            remaining: 0,
           };
         }
 
@@ -199,6 +218,27 @@ export class Usage extends DurableObject {
       return Response.json(decision);
     }
 
+    if (url.pathname === "/activity/start" && request.method === "POST") {
+      const body = await request.json<any>().catch(() => null);
+      const userId = String(body?.userId ?? "").slice(0, 128);
+      const tool = String(body?.tool ?? "").slice(0, 160);
+      const toolCallId = String(body?.toolCallId ?? "").slice(0, 96);
+      const startedAt = String(body?.startedAt ?? body?.timestamp ?? "");
+      if (!userId || !tool || !toolCallId || !Number.isFinite(Date.parse(startedAt))) {
+        return Response.json({ error: "invalid_active_usage_event" }, { status: 400 });
+      }
+      const event: ActiveUsageEvent = {
+        userId,
+        tool,
+        toolCallId,
+        startedAt,
+        ...(body?.agentId ? { agentId: String(body.agentId).slice(0, 128) } : {}),
+        ...(body?.activityId ? { activityId: String(body.activityId).slice(0, 96) } : {}),
+      };
+      await this.ctx.storage.put("active:" + safePart(toolCallId), event);
+      return Response.json({ ok: true });
+    }
+
     if (url.pathname === "/record" && request.method === "POST") {
       const body = await request.json<UsageEvent>().catch(() => null);
       if (!body || !body.userId || !body.tool || !body.timestamp) {
@@ -208,10 +248,15 @@ export class Usage extends DurableObject {
         userId: String(body.userId).slice(0, 128),
         tool: String(body.tool).slice(0, 160),
         ...(body.agentId ? { agentId: String(body.agentId).slice(0, 128) } : {}),
+        ...(body.toolCallId ? { toolCallId: String(body.toolCallId).slice(0, 96) } : {}),
+        ...(body.activityId ? { activityId: String(body.activityId).slice(0, 96) } : {}),
+        ...(body.startedAt ? { startedAt: String(body.startedAt) } : {}),
         timestamp: String(body.timestamp),
         durationMs: Number(body.durationMs) || 0,
         ok: body.ok === true,
         ...(body.errorClass ? { errorClass: String(body.errorClass).slice(0, 80) } : {}),
+        ...(Number.isFinite(Number(body.statusCode)) ? { statusCode: Number(body.statusCode) } : {}),
+        ...(body.exitCode === null || Number.isFinite(Number(body.exitCode)) ? { exitCode: body.exitCode === null ? null : Number(body.exitCode) } : {}),
         requestBytes: Number(body.requestBytes) || 0,
         responseBytes: Number(body.responseBytes) || 0,
       };
@@ -232,6 +277,7 @@ export class Usage extends DurableObject {
         writes[key] = addMetric(existing[index], event);
       });
 
+      if (event.toolCallId) await this.ctx.storage.delete("active:" + safePart(event.toolCallId));
       const eventKey = `event:${event.timestamp}:${crypto.randomUUID()}`;
       await this.ctx.storage.put({
         ...writes,
@@ -274,10 +320,92 @@ export class Usage extends DurableObject {
       return Response.json({ ok: true, lastCleanup: lastCleanup ?? null });
     }
 
+    if (url.pathname === "/summary" && request.method === "GET") {
+      const hours = boundedInt(url.searchParams.get("hours"), 24, 1, 720);
+      const userId = url.searchParams.get("userId");
+      const tool = url.searchParams.get("tool");
+      const agentId = url.searchParams.get("agentId");
+      const cutoffMs = Date.now() - hours * 60 * 60 * 1000;
+      const records = await this.ctx.storage.list<UsageEvent>({ prefix: "event:", reverse: true, limit: 1000 });
+      const events = [...records.values()].filter((event) => {
+        const when = Date.parse(event.timestamp);
+        return when >= cutoffMs && (!userId || event.userId === userId) &&
+          (!tool || event.tool === tool) && (!agentId || event.agentId === agentId);
+      });
+      let metric: Metric | undefined;
+      for (const event of events) metric = addMetric(metric, event);
+      const activeRecords = await this.ctx.storage.list<ActiveUsageEvent>({ prefix: "active:", limit: 1000 });
+      const activeCutoffMs = Date.now() - 5 * 60 * 1000;
+      const active = [...activeRecords.values()].filter((event) =>
+        Date.parse(event.startedAt) >= activeCutoffMs &&
+        (!userId || event.userId === userId) && (!tool || event.tool === tool) && (!agentId || event.agentId === agentId)
+      );
+      return Response.json({
+        hours,
+        metric: metric ? { ...publicMetric(metric), p95DurationMs: percentile95(events.map((event) => Math.max(0, event.durationMs))) } : null,
+        activeCalls: active.length,
+        sampleSize: events.length,
+        bounded: records.size >= 1000,
+      });
+    }
+
+    if (url.pathname === "/activity/query" && request.method === "GET") {
+      const state = url.searchParams.get("state") === "active" ? "active" : "history";
+      const limit = boundedInt(url.searchParams.get("limit"), 100, 1, 500);
+      const userId = url.searchParams.get("userId");
+      const tool = url.searchParams.get("tool");
+      const agentId = url.searchParams.get("agentId");
+      const activityId = url.searchParams.get("activityId");
+      const fromMs = Date.parse(url.searchParams.get("from") || "");
+      const toMs = Date.parse(url.searchParams.get("to") || "");
+      const matches = (event: any) => {
+        const when = Date.parse(event.startedAt || event.timestamp || "");
+        return (!userId || event.userId === userId) &&
+          (!tool || event.tool === tool) &&
+          (!agentId || event.agentId === agentId) &&
+          (!activityId || event.activityId === activityId) &&
+          (!Number.isFinite(fromMs) || when >= fromMs) &&
+          (!Number.isFinite(toMs) || when <= toMs);
+      };
+      if (state === "active") {
+        const records = await this.ctx.storage.list<ActiveUsageEvent>({ prefix: "active:", limit: 1000 });
+        const activeCutoffMs = Date.now() - 5 * 60 * 1000;
+        const staleKeys: string[] = [];
+        const items = [...records.entries()].filter(([key, event]) => {
+          const fresh = Date.parse(event.startedAt) >= activeCutoffMs;
+          if (!fresh) staleKeys.push(key);
+          return fresh && matches(event);
+        }).slice(0, limit).map(([, event]) => event);
+        if (staleKeys.length) await this.ctx.storage.delete(staleKeys);
+        return Response.json({ state, items, total: items.length });
+      }
+      const records = await this.ctx.storage.list<UsageEvent>({ prefix: "event:", reverse: true, limit: 1000 });
+      const items = [...records.values()].filter(matches).slice(0, limit);
+      return Response.json({ state, items, total: items.length });
+    }
+
+    if (url.pathname === "/errors/query" && request.method === "GET") {
+      const limit = boundedInt(url.searchParams.get("limit"), 100, 1, 500);
+      const userId = url.searchParams.get("userId");
+      const tool = url.searchParams.get("tool");
+      const agentId = url.searchParams.get("agentId");
+      const errorClass = url.searchParams.get("errorClass");
+      const fromMs = Date.parse(url.searchParams.get("from") || "");
+      const toMs = Date.parse(url.searchParams.get("to") || "");
+      const records = await this.ctx.storage.list<UsageEvent>({ prefix: "event:", reverse: true, limit: 1000 });
+      const items = [...records.values()].filter((event) => {
+        const when = Date.parse(event.timestamp);
+        return !event.ok && (!userId || event.userId === userId) &&
+          (!tool || event.tool === tool) && (!agentId || event.agentId === agentId) &&
+          (!errorClass || event.errorClass === errorClass) &&
+          (!Number.isFinite(fromMs) || when >= fromMs) && (!Number.isFinite(toMs) || when <= toMs);
+      }).slice(0, limit);
+      return Response.json({ items, total: items.length });
+    }
+
     if (url.pathname === "/query" && request.method === "GET") {
       const day = url.searchParams.get("day") || new Date().toISOString().slice(0, 10);
-      const from = url.searchParams.get("from");
-      const to = url.searchParams.get("to");
+      const from = url.searchParams.get("from");      const to = url.searchParams.get("to");
       const userId = url.searchParams.get("userId");
       const tool = url.searchParams.get("tool");
       const agentId = url.searchParams.get("agentId");
@@ -311,7 +439,7 @@ export class Usage extends DurableObject {
       }
 
       const metric = await this.ctx.storage.get<Metric>(key);
-      const recentLimit = Math.max(0, Math.min(100, Number(url.searchParams.get("recentLimit")) || 0));
+      const recentLimit = Math.max(0, Math.min(1000, Number(url.searchParams.get("recentLimit")) || 0));
       let recent: UsageEvent[] = [];
       if (recentLimit > 0) {
         const events = await this.ctx.storage.list<UsageEvent>({ prefix: "event:", reverse: true, limit: recentLimit });

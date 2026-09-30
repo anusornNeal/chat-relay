@@ -119,28 +119,69 @@ export class TerminalManager {
     });
   }
 
-  start(command, cwd) {
+  start(command, cwd, observability) {
     validateCommand(command);
     return this.#spawnSession({
       type: "command",
       command,
       cwd: safeCwd(cwd),
       args: ["-NoLogo", "-NoProfile", "-Command", command],
+      observability,
     });
   }
 
-  startShell(cwd) {
+  startShell(cwd, observability) {
     return this.#spawnSession({
       type: "shell",
       command: "powershell",
       cwd: safeCwd(cwd),
       args: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", "-"],
+      observability,
     });
   }
 
   list() {
     this.#cleanup();
     return [...this.sessions.values()].map((session) => this.#summary(session));
+  }
+
+  observability() {
+    this.#cleanup();
+    return {
+      ok: true,
+      sessions: [...this.sessions.values()].map((session) => ({
+        sessionId: session.id,
+        type: session.type,
+        status: session.status,
+        exitCode: session.exitCode,
+        startedAt: session.startedAt,
+        endedAt: session.endedAt,
+        ...(session.observability?.userId ? { userId: session.observability.userId } : {}),
+        ...(session.observability?.activityId ? { activityId: session.observability.activityId } : {}),
+        ...(session.observability?.toolCallId ? { toolCallId: session.observability.toolCallId } : {}),
+      })),
+      batches: [...this.batches.values()].map((batch) => ({
+        batchId: batch.batchId,
+        createdAt: batch.createdAt,
+        endedAt: batch.endedAt,
+        cancelled: batch.cancelled,
+        ...(batch.observability?.userId ? { userId: batch.observability.userId } : {}),
+        ...(batch.observability?.activityId ? { activityId: batch.observability.activityId } : {}),
+        ...(batch.observability?.toolCallId ? { toolCallId: batch.observability.toolCallId } : {}),
+        counts: this.#batchSummary(batch).counts,
+        jobs: batch.jobs.map((job) => ({
+          jobId: job.jobId,
+          status: job.status,
+          queuedAt: job.queuedAt,
+          startedAt: job.startedAt,
+          endedAt: job.endedAt,
+          durationMs: job.durationMs,
+          exitCode: job.exitCode,
+        })),
+      })),
+      activeExecJobs: this.activeBatchJobs,
+      queuedJobs: this.batchQueue.length,
+    };
   }
 
   read(sessionId, afterSeq = 0, maxChars = MAX_READ_CHARS) {
@@ -216,6 +257,7 @@ export class TerminalManager {
       endedAt: null,
       requestedConcurrency,
       cancelled: false,
+      observability: options.observability ?? null,
       jobs: jobs.map((input, index) => {
         const item = typeof input === "string" ? { command: input } : input;
         validateCommand(item?.command);
@@ -311,7 +353,7 @@ export class TerminalManager {
     };
   }
 
-  #spawnSession({ type, command, cwd, args }) {
+  #spawnSession({ type, command, cwd, args, observability }) {
     this.#cleanup();
     const running = [...this.sessions.values()].filter((session) => session.status === "running").length;
     if (running >= MAX_SESSIONS) throw new Error("too_many_sessions");
@@ -337,6 +379,7 @@ export class TerminalManager {
       chunks: [],
       nextSeq: 1,
       totalChars: 0,
+      observability: observability ?? null,
     };
 
     this.sessions.set(session.id, session);

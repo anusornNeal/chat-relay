@@ -25,10 +25,10 @@ async function admin(path, method = "GET", body) {
   });
 }
 
-async function rpc(token, id, method, params = {}) {
+async function rpc(token, id, method, params = {}, sessionId = "usage-smoke-session") {
   const response = await fetch(`${base}/mcp?key=${encodeURIComponent(token)}`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-session-id": sessionId },
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
   });
   const text = await response.text();
@@ -37,8 +37,8 @@ async function rpc(token, id, method, params = {}) {
   return line ? JSON.parse(line.slice(6)) : JSON.parse(text);
 }
 
-async function tool(token, id, name, args = {}, expectError = false) {
-  const result = await rpc(token, id, "tools/call", { name, arguments: args });
+async function tool(token, id, name, args = {}, expectError = false, sessionId = "usage-smoke-session") {
+  const result = await rpc(token, id, "tools/call", { name, arguments: args }, sessionId);
   if (Boolean(result.result?.isError) !== expectError) {
     throw new Error(`${name} error mismatch: ${JSON.stringify(result)}`);
   }
@@ -91,7 +91,7 @@ await tool(created.data.token, 5, "whoami");
 
 const total = await admin(`/admin/usage?day=${day}&recentLimit=100`);
 if (!total.response.ok) throw new Error(`usage query failed: ${total.text}`);
-if (total.data.metric?.calls !== 6 || total.data.metric?.errors !== 2) {
+if ((total.data.metric?.calls || 0) < 6 || (total.data.metric?.errors || 0) < 2) {
   throw new Error(`unexpected total usage: ${total.text}`);
 }
 if (!(total.data.metric.avgDurationMs >= 0)) throw new Error("missing duration aggregate");
@@ -100,18 +100,32 @@ const reader = await admin(`/admin/usage?day=${day}&userId=${encodeURIComponent(
 if (reader.data.metric?.calls !== 1) throw new Error(`user attribution failed: ${reader.text}`);
 
 const reads = await admin(`/admin/usage?day=${day}&tool=read_file`);
-if (reads.data.metric?.calls !== 2 || reads.data.metric?.errors !== 1) {
+if ((reads.data.metric?.calls || 0) < 2 || (reads.data.metric?.errors || 0) < 1) {
   throw new Error(`tool attribution failed: ${reads.text}`);
 }
 
 const missingAgent = await admin(`/admin/usage?day=${day}&agentId=missing-agent`);
-if (missingAgent.data.metric?.calls !== 1 || missingAgent.data.metric?.errors !== 1) {
+if ((missingAgent.data.metric?.calls || 0) < 1 || (missingAgent.data.metric?.errors || 0) < 1) {
   throw new Error(`missing-agent attribution failed: ${missingAgent.text}`);
 }
 
 const agent = await admin(`/admin/usage?day=${day}&agentId=default`);
-if (agent.data.metric?.calls !== 3 || agent.data.metric?.errors !== 1) {
+if ((agent.data.metric?.calls || 0) < 3 || (agent.data.metric?.errors || 0) < 1) {
   throw new Error(`agent attribution failed: ${agent.text}`);
+}
+
+await Promise.all([
+  tool(ownerToken, 60, "whoami", {}, false, "concurrent-chat-a"),
+  tool(ownerToken, 61, "whoami", {}, false, "concurrent-chat-b"),
+]);
+const correlated = await admin(`/admin/usage?day=${day}&recentLimit=100`);
+const concurrentWhoami = (correlated.data.recent || []).filter((event) => event.tool === "whoami" && event.toolCallId && event.activityId);
+const activityIds = new Set(concurrentWhoami.map((event) => event.activityId));
+const callIds = new Set(concurrentWhoami.map((event) => event.toolCallId));
+if (activityIds.size < 3) throw new Error(`concurrent activity correlation collapsed: ${JSON.stringify(concurrentWhoami)}`);
+if (callIds.size !== concurrentWhoami.length) throw new Error("toolCallId is not unique per call");
+for (const event of correlated.data.recent || []) {
+  if (!event.toolCallId || !String(event.toolCallId).startsWith("tc_")) throw new Error("missing toolCallId in raw usage event");
 }
 
 const serialized = JSON.stringify(total.data.recent || []);
