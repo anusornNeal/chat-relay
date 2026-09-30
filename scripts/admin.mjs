@@ -51,6 +51,7 @@ const usage = () => {
     "    scopesCsv may include desktop_read and desktop_control; default grants do not include them.",
     "  node scripts/admin.mjs revoke <userId> <agentId>",
     "  node scripts/admin.mjs enable-user <userId> <true|false>",
+    "  node scripts/admin.mjs set-admin <userId> <true|false>",
     "  CHAT_RELAY_PASSWORD=... node scripts/admin.mjs set-login <userId> <login>",
     "  node scripts/admin.mjs enable-agent <agentId> <true|false>",
     "  node scripts/admin.mjs rotate-user <userId>",
@@ -106,6 +107,10 @@ switch (command) {
   case "enable-user":
     if (!args[0] || args[1] === undefined) { usage(); process.exit(1); }
     result = await call("/admin/users/enabled", "POST", { userId: args[0], enabled: args[1] === "true" });
+    break;
+  case "set-admin":
+    if (!args[0] || args[1] === undefined) { usage(); process.exit(1); }
+    result = await call("/admin/api/users/admin", "POST", { userId: args[0], admin: args[1] === "true" });
     break;
   case "enable-agent":
     if (!args[0] || args[1] === undefined) { usage(); process.exit(1); }
