@@ -9,7 +9,7 @@ if (pkg.name !== "@anusornneal/chat-relay") {
 if (!pkg.version || !/^\d+\.\d+\.\d+/.test(pkg.version)) {
   throw new Error(`Invalid package version: ${pkg.version}`);
 }
-if (pkg.bin?.["chat-relay"] !== "./bin/chat-relay.js") {
+if (pkg.bin?.["chat-relay"] !== "bin/chat-relay.js") {
   throw new Error("chat-relay bin entry is missing");
 }
 

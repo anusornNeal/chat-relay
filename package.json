@@ -4,7 +4,7 @@
   "description": "Zero-checkout remote MCP agent for ChatGPT with terminal, filesystem, process, multi-user, and multi-agent support.",
   "type": "module",
   "bin": {
-    "chat-relay": "./bin/chat-relay.js"
+    "chat-relay": "bin/chat-relay.js"
   },
   "files": [
     "bin/",
