@@ -58,6 +58,35 @@ type LoginAttemptRecord = {
   blockedUntil?: string;
 };
 
+type OAuthClientRecord = {
+  clientId: string;
+  clientName: string;
+  redirectUris: string[];
+  tokenEndpointAuthMethod: "none";
+  createdAt: string;
+};
+
+type OAuthCodeRecord = {
+  codeHash: string;
+  clientId: string;
+  userId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  scope: string[];
+  resource: string;
+  expiresAt: string;
+};
+
+type OAuthTokenRecord = {
+  tokenHash: string;
+  userId: string;
+  clientId: string;
+  scope: string[];
+  resource: string;
+  createdAt: string;
+  expiresAt: string;
+};
+
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 5;
@@ -65,6 +94,10 @@ const DEVICE_START_WINDOW_MS = 10 * 60 * 1000;
 const DEVICE_START_MAX = 30;
 const DEVICE_APPROVE_WINDOW_MS = 15 * 60 * 1000;
 const DEVICE_APPROVE_MAX = 60;
+const OAUTH_ACCESS_TTL_MS = 60 * 60 * 1000;
+const OAUTH_REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const OAUTH_REGISTER_WINDOW_MS = 15 * 60 * 1000;
+const OAUTH_REGISTER_MAX = 60;
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 const key = {
   user: (id: string) => `user:${id}`,
@@ -79,6 +112,11 @@ const key = {
   loginAttempt: (login: string) => `login-attempt:${login}`,
   deviceStartRate: (sourceHash: string) => `device-start-rate:${sourceHash}`,
   deviceApproveRate: (sourceHash: string) => `device-approve-rate:${sourceHash}`,
+  oauthClient: (clientId: string) => `oauth-client:${clientId}`,
+  oauthCode: (hash: string) => `oauth-code:${hash}`,
+  oauthAccess: (hash: string) => `oauth-access:${hash}`,
+  oauthRefresh: (hash: string) => `oauth-refresh:${hash}`,
+  oauthRegisterRate: (sourceHash: string) => `oauth-register-rate:${sourceHash}`,
 };
 
 export async function hashToken(token: string): Promise<string> {
@@ -146,6 +184,12 @@ export class Registry extends DurableObject {
       case "/device/start": return this.startDevice(body);
       case "/device/approve": return this.approveDevice(body);
       case "/device/exchange": return this.exchangeDevice(body);
+      case "/oauth/client/register": return this.registerOAuthClient(body);
+      case "/oauth/client/get": return this.getOAuthClient(body);
+      case "/oauth/password": return this.oauthPassword(body);
+      case "/oauth/code/create": return this.createOAuthCode(body);
+      case "/oauth/code/exchange": return this.exchangeOAuthCode(body);
+      case "/oauth/refresh/exchange": return this.exchangeOAuthRefresh(body);
       case "/session/revoke": return this.revokeSession(body);
       case "/session/logout-agent": return this.logoutAgent(body);
       case "/auth/user": return this.authUser(body);
@@ -345,9 +389,12 @@ export class Registry extends DurableObject {
 
   private async cleanupExpiredAuthArtifacts(): Promise<void> {
     const now = Date.now();
-    const [devices, sessions] = await Promise.all([
+    const [devices, sessions, codes, accessTokens, refreshTokens] = await Promise.all([
       this.ctx.storage.list<DeviceAuthRecord>({ prefix: "device:" }),
       this.ctx.storage.list<UserSessionRecord>({ prefix: "us:" }),
+      this.ctx.storage.list<OAuthCodeRecord>({ prefix: "oauth-code:" }),
+      this.ctx.storage.list<OAuthTokenRecord>({ prefix: "oauth-access:" }),
+      this.ctx.storage.list<OAuthTokenRecord>({ prefix: "oauth-refresh:" }),
     ]);
 
     const keys: string[] = [];
@@ -358,6 +405,11 @@ export class Registry extends DurableObject {
     }
     for (const [storageKey, session] of sessions) {
       if (Date.parse(session.expiresAt) <= now) keys.push(storageKey);
+    }
+    for (const records of [codes, accessTokens, refreshTokens]) {
+      for (const [storageKey, record] of records) {
+        if (Date.parse(record.expiresAt) <= now) keys.push(storageKey);
+      }
     }
 
     for (let index = 0; index < keys.length; index += 128) {
@@ -597,6 +649,239 @@ export class Registry extends DurableObject {
     });
   }
 
+  private async registerOAuthClient(body: any): Promise<Response> {
+    const clientId = String(body?.clientId ?? "");
+    const clientName = String(body?.clientName ?? "ChatGPT MCP").slice(0, 120);
+    const redirectUris = Array.isArray(body?.redirectUris)
+      ? body.redirectUris.map(String)
+      : [];
+    const sourceHash = String(body?.sourceHash ?? "unknown").slice(0, 128);
+
+    if (!clientId || redirectUris.length === 0 || redirectUris.length > 20) {
+      return json({ error: "invalid_client_metadata" }, 400);
+    }
+    if (!(await this.consumeRateLimit(
+      key.oauthRegisterRate(sourceHash),
+      OAUTH_REGISTER_MAX,
+      OAUTH_REGISTER_WINDOW_MS,
+    ))) {
+      return json({ error: "rate_limited" }, 429);
+    }
+    if (await this.ctx.storage.get(key.oauthClient(clientId))) {
+      return json({ error: "client_exists" }, 409);
+    }
+
+    const client: OAuthClientRecord = {
+      clientId,
+      clientName,
+      redirectUris,
+      tokenEndpointAuthMethod: "none",
+      createdAt: new Date().toISOString(),
+    };
+    await this.ctx.storage.put(key.oauthClient(clientId), client);
+    return json({ ok: true, client }, 201);
+  }
+
+  private async getOAuthClient(body: any): Promise<Response> {
+    const clientId = String(body?.clientId ?? "");
+    if (!clientId) return json({ error: "invalid_client" }, 400);
+
+    const client = await this.ctx.storage.get<OAuthClientRecord>(
+      key.oauthClient(clientId),
+    );
+    if (!client) return json({ error: "invalid_client" }, 404);
+    return json({ ok: true, client });
+  }
+
+  private async oauthPassword(body: any): Promise<Response> {
+    let login: string;
+    try { login = normalizeLogin(String(body?.login ?? "")); }
+    catch { return json({ error: "invalid_credentials" }, 401); }
+
+    const password = String(body?.password ?? "");
+    if (password.length < 8 || password.length > 128) {
+      return json({ error: "invalid_credentials" }, 401);
+    }
+    if (await this.loginBlocked(login)) {
+      return json({ error: "too_many_attempts" }, 429);
+    }
+
+    const userId = await this.ctx.storage.get<string>(key.userLogin(login));
+    const user = userId
+      ? await this.ctx.storage.get<UserRecord>(key.user(userId))
+      : undefined;
+    if (!user?.enabled || !user.passwordSalt || !user.passwordHash) {
+      await this.recordLoginFailure(login);
+      return json({ error: "invalid_credentials" }, 401);
+    }
+
+    const derived = await derivePasswordHash(
+      password,
+      user.passwordSalt,
+      user.passwordIterations ?? PASSWORD_ITERATIONS,
+    );
+    if (!secureEqual(derived, user.passwordHash)) {
+      await this.recordLoginFailure(login);
+      return json({ error: "invalid_credentials" }, 401);
+    }
+
+    await this.ctx.storage.delete(key.loginAttempt(login));
+    return json({ ok: true, user: publicUser(user) });
+  }
+
+  private async createOAuthCode(body: any): Promise<Response> {
+    const codeHash = String(body?.codeHash ?? "");
+    const clientId = String(body?.clientId ?? "");
+    const userId = String(body?.userId ?? "");
+    const redirectUri = String(body?.redirectUri ?? "");
+    const codeChallenge = String(body?.codeChallenge ?? "");
+    const resource = String(body?.resource ?? "");
+    const scope = Array.isArray(body?.scope) ? body.scope.map(String) : [];
+    const expiresAt = String(body?.expiresAt ?? "");
+
+    if (!codeHash || !clientId || !userId || !redirectUri ||
+        !codeChallenge || !resource || scope.length === 0 ||
+        !expiresAt || isExpired(expiresAt)) {
+      return json({ error: "invalid_request" }, 400);
+    }
+
+    const [client, user] = await Promise.all([
+      this.ctx.storage.get<OAuthClientRecord>(key.oauthClient(clientId)),
+      this.ctx.storage.get<UserRecord>(key.user(userId)),
+    ]);
+    if (!client || !client.redirectUris.includes(redirectUri)) {
+      return json({ error: "invalid_client" }, 400);
+    }
+    if (!user?.enabled) return json({ error: "access_denied" }, 403);
+
+    const record: OAuthCodeRecord = {
+      codeHash,
+      clientId,
+      userId,
+      redirectUri,
+      codeChallenge,
+      scope,
+      resource,
+      expiresAt,
+    };
+    await this.ctx.storage.put(key.oauthCode(codeHash), record);
+    return json({ ok: true });
+  }
+
+  private async issueOAuthTokens(
+    userId: string,
+    clientId: string,
+    scope: string[],
+    resource: string,
+  ) {
+    const now = new Date().toISOString();
+    const accessToken = newToken("access");
+    const access: OAuthTokenRecord = {
+      tokenHash: await hashToken(accessToken),
+      userId,
+      clientId,
+      scope,
+      resource,
+      createdAt: now,
+      expiresAt: new Date(Date.now() + OAUTH_ACCESS_TTL_MS).toISOString(),
+    };
+
+    const records: Record<string, OAuthTokenRecord> = {
+      [key.oauthAccess(access.tokenHash)]: access,
+    };
+    const result: Record<string, string | number> = {
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: Math.floor(OAUTH_ACCESS_TTL_MS / 1000),
+      scope: scope.join(" "),
+    };
+
+    if (scope.includes("offline_access")) {
+      const refreshToken = newToken("refresh");
+      const refresh: OAuthTokenRecord = {
+        tokenHash: await hashToken(refreshToken),
+        userId,
+        clientId,
+        scope,
+        resource,
+        createdAt: now,
+        expiresAt: new Date(Date.now() + OAUTH_REFRESH_TTL_MS).toISOString(),
+      };
+      records[key.oauthRefresh(refresh.tokenHash)] = refresh;
+      result.refresh_token = refreshToken;
+    }
+
+    await this.ctx.storage.put(records);
+    return result;
+  }
+
+  private async exchangeOAuthCode(body: any): Promise<Response> {
+    const codeHash = String(body?.codeHash ?? "");
+    const clientId = String(body?.clientId ?? "");
+    const redirectUri = String(body?.redirectUri ?? "");
+    const codeChallenge = String(body?.codeChallenge ?? "");
+    const resource = String(body?.resource ?? "");
+
+    const record = codeHash
+      ? await this.ctx.storage.get<OAuthCodeRecord>(key.oauthCode(codeHash))
+      : undefined;
+    if (!record || isExpired(record.expiresAt)) {
+      if (record) await this.ctx.storage.delete(key.oauthCode(codeHash));
+      return json({ error: "invalid_grant" }, 400);
+    }
+
+    if (record.clientId !== clientId ||
+        record.redirectUri !== redirectUri ||
+        record.codeChallenge !== codeChallenge ||
+        record.resource !== resource) {
+      return json({ error: "invalid_grant" }, 400);
+    }
+
+    const user = await this.ctx.storage.get<UserRecord>(key.user(record.userId));
+    if (!user?.enabled) return json({ error: "invalid_grant" }, 400);
+
+    await this.ctx.storage.delete(key.oauthCode(codeHash));
+    const tokens = await this.issueOAuthTokens(
+      record.userId,
+      record.clientId,
+      record.scope,
+      record.resource,
+    );
+    return json(tokens);
+  }
+
+  private async exchangeOAuthRefresh(body: any): Promise<Response> {
+    const refreshTokenHash = String(body?.refreshTokenHash ?? "");
+    const clientId = String(body?.clientId ?? "");
+    const resource = String(body?.resource ?? "");
+
+    const record = refreshTokenHash
+      ? await this.ctx.storage.get<OAuthTokenRecord>(
+        key.oauthRefresh(refreshTokenHash),
+      )
+      : undefined;
+    if (!record || isExpired(record.expiresAt) ||
+        record.clientId !== clientId ||
+        record.resource !== resource) {
+      if (record && isExpired(record.expiresAt)) {
+        await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
+      }
+      return json({ error: "invalid_grant" }, 400);
+    }
+
+    const user = await this.ctx.storage.get<UserRecord>(key.user(record.userId));
+    if (!user?.enabled) return json({ error: "invalid_grant" }, 400);
+
+    await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
+    const tokens = await this.issueOAuthTokens(
+      record.userId,
+      record.clientId,
+      record.scope,
+      record.resource,
+    );
+    return json(tokens);
+  }
+
   private async revokeSession(body: any): Promise<Response> {
     const tokenHash = String(body?.tokenHash ?? "");
     if (!tokenHash) return json({ error: "token_required" }, 400);
@@ -630,12 +915,30 @@ export class Registry extends DurableObject {
 
     let userId = await this.ctx.storage.get<string>(key.userToken(tokenHash));
     if (!userId) {
-      const session = await this.ctx.storage.get<UserSessionRecord>(key.userSession(tokenHash));
-      if (!session || isExpired(session.expiresAt)) {
-        if (session) await this.ctx.storage.delete(key.userSession(tokenHash));
+      const session = await this.ctx.storage.get<UserSessionRecord>(
+        key.userSession(tokenHash),
+      );
+      if (session && !isExpired(session.expiresAt)) {
+        userId = session.userId;
+      } else if (session) {
+        await this.ctx.storage.delete(key.userSession(tokenHash));
+      }
+    }
+
+    if (!userId) {
+      const resource = String(body?.resource ?? "");
+      const access = await this.ctx.storage.get<OAuthTokenRecord>(
+        key.oauthAccess(tokenHash),
+      );
+      if (!access || isExpired(access.expiresAt) ||
+          !resource || access.resource !== resource ||
+          !access.scope.includes("mcp")) {
+        if (access && isExpired(access.expiresAt)) {
+          await this.ctx.storage.delete(key.oauthAccess(tokenHash));
+        }
         return json({ error: "unauthorized" }, 401);
       }
-      userId = session.userId;
+      userId = access.userId;
     }
 
     const user = await this.ctx.storage.get<UserRecord>(key.user(userId));

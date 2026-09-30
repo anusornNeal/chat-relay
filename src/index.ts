@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { handleDeviceAuth } from "./device-auth";
+import { handleOAuth, oauthChallenge, oauthResource } from "./oauth";
 import { Registry, hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 
 export { Registry };
@@ -189,16 +190,20 @@ function bearerToken(request: Request): string | null {
   return value?.startsWith("Bearer ") ? value.slice(7) : null;
 }
 
-function userToken(request: Request): string | null {
-  const url = new URL(request.url);
-  return url.searchParams.get("key") || bearerToken(request);
-}
-
 async function authenticateUser(request: Request, env: Env): Promise<AuthUser | null> {
-  const token = userToken(request);
+  const url = new URL(request.url);
+  const queryToken = url.searchParams.get("key");
+  const headerToken = bearerToken(request);
+  const token = queryToken || headerToken;
   if (!token) return null;
   const tokenHash = await hashToken(token);
-  const { response, data } = await registryJson<{ user?: AuthUser }>(env, "/auth/user", { tokenHash });
+  const resource = !queryToken && headerToken && url.pathname === "/mcp"
+    ? oauthResource(request)
+    : undefined;
+  const { response, data } = await registryJson<{ user?: AuthUser }>(env, "/auth/user", {
+    tokenHash,
+    ...(resource ? { resource } : {}),
+  });
   return response.ok && data.user ? data.user : null;
 }
 
@@ -790,9 +795,15 @@ export default {
 
     if (path === "/health") {
       return request.method === "GET"
-        ? Response.json({ status: "ok", service: "chat-relay", version: "0.5.0" })
+        ? Response.json({ status: "ok", service: "chat-relay", version: "0.6.0" })
         : error(405, "method_not_allowed");
     }
+
+    const oauthResponse = await handleOAuth(
+      request,
+      (registryPath, body) => registryCall(env, registryPath, body),
+    );
+    if (oauthResponse) return oauthResponse;
 
     const authResponse = await handleDeviceAuth(
       request,
@@ -817,7 +828,18 @@ export default {
 
     if (path === "/mcp") {
       const user = await authenticateUser(request, env);
-      if (!user) return error(401, "unauthorized");
+      if (!user) {
+        return Response.json(
+          { error: "unauthorized" },
+          {
+            status: 401,
+            headers: {
+              "WWW-Authenticate": oauthChallenge(url.origin),
+              "cache-control": "no-store",
+            },
+          },
+        );
+      }
 
       return createMcpHandler(() => createMcpServer(env, user), {
         route: "/mcp",

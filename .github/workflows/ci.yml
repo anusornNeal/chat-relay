@@ -75,6 +75,13 @@ jobs:
           TEST_RELAY_URL: http://127.0.0.1:8796
         run: npm run test:device-auth
 
+      - name: OAuth smoke
+        env:
+          TEST_RELAY_URL: http://127.0.0.1:8796
+          TEST_ADMIN_TOKEN: test-admin
+          TEST_CALLER_TOKEN: test-caller
+        run: npm run test:oauth
+
       - name: Pack npm artifact
         id: pack
         shell: bash

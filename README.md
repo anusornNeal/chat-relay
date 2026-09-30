@@ -73,7 +73,7 @@ The published package locates its bundled local agent relative to the package it
 - `ADMIN_TOKEN` remains separate and protects administration routes.
 - The existing legacy owner token remains supported so current ChatGPT MCP URLs continue to work during migration.
 
-ChatGPT can currently authenticate with `/mcp?key=<USER_TOKEN>`; Bearer auth is also accepted by the server. Browser/device login is for the zero-checkout local CLI and creates the same registry user/agent model.
+ChatGPT MCP supports OAuth 2.1 authorization-code login with PKCE S256. OAuth access tokens are audience-bound to `/mcp`; `offline_access` issues rotating refresh tokens. Dynamic client registration and protected-resource/authorization-server discovery are exposed for compatible MCP clients. The legacy `/mcp?key=<USER_TOKEN>` flow remains supported during migration. Browser/device login is for the zero-checkout local CLI and creates the same registry user/agent model used by OAuth.
 
 ## MCP tools
 
@@ -143,6 +143,11 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 | Route | Authentication | Purpose |
 | --- | --- | --- |
 | `GET /health` | none | Worker health |
+| `GET /.well-known/oauth-protected-resource[/mcp]` | none | MCP protected-resource metadata |
+| `GET /.well-known/oauth-authorization-server` | none | OAuth authorization-server metadata |
+| `POST /register` | none | Dynamic registration for public PKCE clients |
+| `GET/POST /authorize` | login/password | OAuth authorization-code sign-in |
+| `POST /token` | public client + PKCE/refresh token | Access/refresh token exchange |
 | `POST /auth/device/start` | none | Start CLI device authorization |
 | `GET /device?user_code=<code>` | none | Browser sign-in/approval page |
 | `POST /auth/device/approve` | login/password + device code | Approve or create a user account |
@@ -189,6 +194,12 @@ Device/browser login is covered by:
 TEST_RELAY_URL=http://127.0.0.1:8796 npm run test:device-auth
 ```
 
+OAuth discovery, DCR, PKCE, token exchange, refresh rotation, audience binding, MCP Bearer auth, and legacy-key compatibility are covered by:
+
+```bash
+TEST_RELAY_URL=http://127.0.0.1:8796 npm run test:oauth
+```
+
 After `npm pack`, the zero-checkout package smoke test installs and runs the tarball from a temporary directory:
 
 ```bash
@@ -199,7 +210,7 @@ The npm package is configured as `@anusornneal/chat-relay`. Publishing requires 
 
 ## CI and npm publishing
 
-GitHub Actions runs package verification on Node 20 and Node 24. A separate integration job starts a local Worker and verifies device auth plus the zero-checkout tarball flow.
+GitHub Actions runs package verification on Node 20 and Node 24. A separate integration job starts a local Worker and verifies device auth, OAuth, and the zero-checkout tarball flow.
 
 Before publishing locally:
 

@@ -55,6 +55,18 @@ async function tool(token, id, name, args = {}, expectError = false) {
   return JSON.parse(text);
 }
 
+async function waitForText(token, sessionId, expected, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  let text = "";
+  while (Date.now() < deadline) {
+    const output = await tool(token, 900, "terminal_read", { sessionId, afterSeq: 0 });
+    text = output.payload.chunks.map((chunk) => chunk.text).join("");
+    if (text.includes(expected)) return text;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return text;
+}
+
 const tools = await rpc(ownerToken, 1, "tools/list");
 const names = new Set(tools.result.tools.map((item) => item.name));
 for (const required of [
@@ -118,25 +130,26 @@ if (!execResult.payload.ok || execResult.payload.exitCode !== 0) throw new Error
 const started = await tool(ownerToken, 14, "terminal_start", {
   command: "Write-Output long-start; Start-Sleep -Milliseconds 250; Write-Output long-end",
 });
-await new Promise((resolve) => setTimeout(resolve, 600));
-const startedOutput = await tool(ownerToken, 15, "terminal_read", {
-  sessionId: started.payload.sessionId,
-  afterSeq: 0,
-});
-const longText = startedOutput.payload.chunks.map((chunk) => chunk.text).join("");
-if (!longText.includes("long-start") || !longText.includes("long-end")) throw new Error("terminal_start/read failed");
+const longText = await waitForText(
+  ownerToken,
+  started.payload.sessionId,
+  "long-end",
+);
+if (!longText.includes("long-start") || !longText.includes("long-end")) {
+  throw new Error("terminal_start/read failed");
+}
 
 const shell = await tool(ownerToken, 16, "terminal_start_shell");
 await tool(ownerToken, 17, "terminal_write", {
   sessionId: shell.payload.sessionId,
   input: "Write-Output interactive-ok",
 });
-await new Promise((resolve) => setTimeout(resolve, 400));
-const shellOut = await tool(ownerToken, 18, "terminal_read", {
-  sessionId: shell.payload.sessionId,
-  afterSeq: 0,
-});
-if (!shellOut.payload.chunks.map((chunk) => chunk.text).join("").includes("interactive-ok")) {
+const shellText = await waitForText(
+  ownerToken,
+  shell.payload.sessionId,
+  "interactive-ok",
+);
+if (!shellText.includes("interactive-ok")) {
   throw new Error("interactive terminal failed");
 }
 await tool(ownerToken, 19, "terminal_kill", { sessionId: shell.payload.sessionId });

@@ -1,6 +1,6 @@
 {
   "name": "@anusornneal/chat-relay",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Zero-checkout remote MCP agent for ChatGPT with terminal, filesystem, process, multi-user, and multi-agent support.",
   "type": "module",
   "bin": {
@@ -34,7 +34,8 @@
     "test:device-auth": "node test/device-auth-smoke.mjs",
     "test:zero-checkout": "node test/zero-checkout-smoke.mjs",
     "verify:publish": "node scripts/verify-publish.mjs && npx wrangler deploy --dry-run && npm audit --omit=dev",
-    "prepublishOnly": "npm run verify:publish"
+    "prepublishOnly": "npm run verify:publish",
+    "test:oauth": "node test/oauth-smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0"
