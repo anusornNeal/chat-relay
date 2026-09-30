@@ -104,6 +104,8 @@ export class Usage extends DurableObject {
 
     if (url.pathname === "/query" && request.method === "GET") {
       const day = url.searchParams.get("day") || new Date().toISOString().slice(0, 10);
+      const from = url.searchParams.get("from");
+      const to = url.searchParams.get("to");
       const userId = url.searchParams.get("userId");
       const tool = url.searchParams.get("tool");
       const agentId = url.searchParams.get("agentId");
@@ -114,6 +116,27 @@ export class Usage extends DurableObject {
           : agentId
             ? `day:${day}:agent:${safePart(agentId)}`
             : `day:${day}:total`;
+      if (from && to && /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)) {
+        const start = Date.parse(from + "T00:00:00.000Z");
+        const end = Date.parse(to + "T00:00:00.000Z");
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end < start || end - start > 30 * 86400000) {
+          return Response.json({ error: "invalid_usage_range" }, { status: 400 });
+        }
+        const days = [];
+        for (let ts = start; ts <= end; ts += 86400000) {
+          const rangeDay = new Date(ts).toISOString().slice(0, 10);
+          const rangeKey = userId
+            ? "day:" + rangeDay + ":user:" + safePart(userId)
+            : tool
+              ? "day:" + rangeDay + ":tool:" + safePart(tool)
+              : agentId
+                ? "day:" + rangeDay + ":agent:" + safePart(agentId)
+                : "day:" + rangeDay + ":total";
+          days.push({ day: rangeDay, metric: publicMetric(await this.ctx.storage.get<Metric>(rangeKey)) });
+        }
+        return Response.json({ from, to, days });
+      }
+
       const metric = await this.ctx.storage.get<Metric>(key);
       const recentLimit = Math.max(0, Math.min(100, Number(url.searchParams.get("recentLimit")) || 0));
       let recent: UsageEvent[] = [];

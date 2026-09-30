@@ -192,6 +192,8 @@ export class Registry extends DurableObject {
       case "/oauth/code/exchange": return this.exchangeOAuthCode(body);
       case "/oauth/refresh/exchange": return this.exchangeOAuthRefresh(body);
       case "/session/revoke": return this.revokeSession(body);
+      case "/sessions/list": return this.listSessions(body);
+      case "/sessions/revoke-user": return this.revokeUserSessions(body);
       case "/session/logout-agent": return this.logoutAgent(body);
       case "/auth/user": return this.authUser(body);
       case "/auth/agent": return this.authAgent(body);
@@ -919,6 +921,31 @@ export class Registry extends DurableObject {
       record.resource,
     );
     return json(tokens);
+  }
+
+  private async listSessions(body: any): Promise<Response> {
+    const userId = body?.userId ? String(body.userId) : "";
+    const sessions = await this.ctx.storage.list<UserSessionRecord>({ prefix: "us:" });
+    const result = [...sessions.values()]
+      .filter((session) => !userId || session.userId === userId)
+      .map((session) => ({
+        userId: session.userId,
+        createdAt: session.createdAt,
+        expiresAt: session.expiresAt,
+        expired: isExpired(session.expiresAt),
+      }));
+    return json({ ok: true, sessions: result });
+  }
+
+  private async revokeUserSessions(body: any): Promise<Response> {
+    const userId = String(body?.userId ?? "");
+    if (!userId) return json({ error: "user_id_required" }, 400);
+    const sessions = await this.ctx.storage.list<UserSessionRecord>({ prefix: "us:" });
+    const keys = [...sessions.entries()]
+      .filter(([, session]) => session.userId === userId)
+      .map(([sessionKey]) => sessionKey);
+    if (keys.length > 0) await this.ctx.storage.delete(keys);
+    return json({ ok: true, revoked: keys.length });
   }
 
   private async revokeSession(body: any): Promise<Response> {

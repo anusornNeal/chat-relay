@@ -4,6 +4,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { handleDeviceAuth } from "./device-auth";
 import { handleOAuth, oauthChallenge, oauthResource } from "./oauth";
+import { handleAdmin } from "./admin";
 import { Registry, hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 import { Usage, type UsageEvent } from "./usage";
 
@@ -714,147 +715,6 @@ function createMcpServer(env: Env, user: AuthUser) {
   return server;
 }
 
-function generatedId(name: string, fallback: string) {
-  const slug = name.toLowerCase().trim().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || fallback;
-  return `${slug.slice(0, 40)}-${crypto.randomUUID().slice(0, 8)}`;
-}
-
-async function adminHandler(request: Request, env: Env): Promise<Response> {
-  if (!env.ADMIN_TOKEN || !authorized(request, env.ADMIN_TOKEN)) {
-    return error(401, "unauthorized");
-  }
-
-  const url = new URL(request.url);
-  const path = url.pathname;
-  const body = request.method === "GET" ? null : await request.json<any>().catch(() => null);
-
-  if (path === "/admin/bootstrap" && request.method === "POST") {
-    if (!env.CALLER_TOKEN || !env.AGENT_TOKEN) return error(503, "legacy_tokens_missing");
-    const response = await registryCall(env, "/bootstrap", {
-      userTokenHash: await hashToken(env.CALLER_TOKEN),
-      agentTokenHash: await hashToken(env.AGENT_TOKEN),
-      userName: body?.userName || "Owner",
-      agentId: body?.agentId || "default",
-      agentName: body?.agentName || "Primary PC",
-    });
-    return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  if (path === "/admin/users" && request.method === "POST") {
-    const name = String(body?.name ?? "").trim();
-    if (!name) return error(400, "name_required");
-    const id = String(body?.id || generatedId(name, "user"));
-    const token = newToken("usr");
-    const response = await registryCall(env, "/users/create", {
-      id,
-      name,
-      tokenHash: await hashToken(token),
-    });
-    const data = await response.json<any>();
-    return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
-  }
-
-  if (path === "/admin/agents" && request.method === "POST") {
-    const name = String(body?.name ?? "").trim();
-    if (!name) return error(400, "name_required");
-    let id: string;
-    try { id = body?.id ? normalizeAgentId(String(body.id)) : generatedId(name, "agent"); }
-    catch { return error(400, "invalid_agent_id"); }
-
-    const token = newToken("agt");
-    const response = await registryCall(env, "/agents/create", {
-      id,
-      name,
-      tokenHash: await hashToken(token),
-    });
-    const data = await response.json<any>();
-    return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
-  }
-
-  if (path === "/admin/grants" && request.method === "POST") {
-    const userId = String(body?.userId ?? "");
-    const agentId = String(body?.agentId ?? "");
-    const scopes = Array.isArray(body?.scopes) ? body.scopes : [];
-    const response = await registryCall(env, "/grants/upsert", { userId, agentId, scopes });
-    return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  if (path === "/admin/grants/delete" && request.method === "POST") {
-    const response = await registryCall(env, "/grants/delete", {
-      userId: String(body?.userId ?? ""),
-      agentId: String(body?.agentId ?? ""),
-    });
-    return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  if (path === "/admin/users/login" && request.method === "POST") {
-    const userId = String(body?.userId ?? "");
-    const login = String(body?.login ?? "");
-    const password = String(body?.password ?? "");
-    if (!userId || !login || !password) return error(400, "credentials_required");
-    const response = await registryCall(env, "/users/set-login", { userId, login, password });
-    return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-  if (path === "/admin/users/enabled" && request.method === "POST") {
-    const response = await registryCall(env, "/users/set-enabled", {
-      userId: String(body?.userId ?? ""),
-      enabled: Boolean(body?.enabled),
-    });
-    return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  if (path === "/admin/agents/enabled" && request.method === "POST") {
-    const response = await registryCall(env, "/agents/set-enabled", {
-      agentId: String(body?.agentId ?? ""),
-      enabled: Boolean(body?.enabled),
-    });
-    return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  if (path === "/admin/users/rotate" && request.method === "POST") {
-    const userId = String(body?.userId ?? "");
-    if (!userId) return error(400, "user_id_required");
-    const token = newToken("usr");
-    const response = await registryCall(env, "/users/rotate", {
-      userId,
-      tokenHash: await hashToken(token),
-    });
-    const data = await response.json<any>();
-    return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
-  }
-
-  if (path === "/admin/agents/rotate" && request.method === "POST") {
-    const agentId = String(body?.agentId ?? "");
-    if (!agentId) return error(400, "agent_id_required");
-    const token = newToken("agt");
-    const response = await registryCall(env, "/agents/rotate", {
-      agentId,
-      tokenHash: await hashToken(token),
-    });
-    const data = await response.json<any>();
-    return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
-  }
-
-  if (path === "/admin/usage" && request.method === "GET") {
-    const query = new URLSearchParams();
-    for (const key of ["day", "userId", "tool", "agentId", "recentLimit"]) {
-      const value = url.searchParams.get(key);
-      if (value) query.set(key, value);
-    }
-    const response = await usageStub(env).fetch(
-      "https://usage.internal/query" + (query.size ? "?" + query.toString() : ""),
-    );
-    return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  if (path === "/admin/state" && request.method === "GET") {
-    const response = await registryCall(env, "/state");
-    return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  return error(404, "not_found");
-}
-
 async function handleDirectRelay(request: Request, env: Env, user: AuthUser): Promise<Response> {
   const url = new URL(request.url);
   const agentId = url.searchParams.get("agentId") || undefined;
@@ -907,7 +767,7 @@ export default {
     if (authResponse) return authResponse;
 
     if (path.startsWith("/admin/")) {
-      return adminHandler(request, env);
+      return handleAdmin(request, env);
     }
 
     if (path === "/agent") {

@@ -36,7 +36,8 @@
     "verify:publish": "node scripts/verify-publish.mjs && npx wrangler deploy --dry-run && npm audit --omit=dev",
     "prepublishOnly": "npm run verify:publish",
     "test:oauth": "node test/oauth-smoke.mjs",
-    "test:usage": "node test/usage-smoke.mjs"
+    "test:usage": "node test/usage-smoke.mjs",
+    "test:admin-api": "node test/admin-api-smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0"
