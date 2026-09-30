@@ -1,1 +1,67 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chat Relay Admin</title><link rel="stylesheet" href="/dashboard/styles.css"></head><body><main><section id="login"><h1>Chat Relay Admin</h1><form id="loginForm"><input id="loginName" placeholder="Login" required><input id="password" type="password" placeholder="Password" required><button>Sign in</button><p id="loginError"></p></form></section><section id="app" hidden><header><h1>Operations</h1><div><span id="who"></span> <button id="refresh">Refresh</button> <button id="logout">Sign out</button></div></header><nav><button data-tab="overview" class="active">Overview</button><button data-tab="users">Users</button><button data-tab="agents">Agents</button><button data-tab="usage">Usage</button></nav><p id="status"></p><section id="overview" class="tab"><div id="cards" class="cards"></div><article id="today"></article></section><section id="users" class="tab" hidden><input id="uq" placeholder="Search users"><button id="us">Search</button><article><table><tbody id="ub"></tbody></table></article></section><section id="agents" class="tab" hidden><input id="aq" placeholder="Search agents"><button id="as">Search</button><article><table><tbody id="ab"></tbody></table></article></section><section id="usage" class="tab" hidden><form id="uf"><input id="from" type="date"><input id="to" type="date"><input id="uid" placeholder="User"><input id="tool" placeholder="Tool"><input id="aid" placeholder="Agent"><button>Apply</button></form><article id="trend"></article></section></section></main><script type="module" src="/dashboard/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chat Relay</title>
+  <link rel="stylesheet" href="/dashboard/styles.css">
+</head>
+<body>
+  <section id="loginView" class="auth-shell">
+    <form id="loginForm" class="auth-card">
+      <div class="brand-row"><span class="brand-mark">CR</span><div><strong>Chat Relay</strong><small>Operations dashboard</small></div></div>
+      <div class="auth-copy"><h1>Sign in</h1><p>Use your Chat Relay account.</p></div>
+      <label>Login<input id="loginName" autocomplete="username" required></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+      <button class="button primary" type="submit">Sign in</button>
+      <p id="loginError" class="form-error" role="alert"></p>
+    </form>
+  </section>
+
+  <div id="appView" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="brand-row sidebar-brand"><span class="brand-mark">CR</span><div><strong>Chat Relay</strong><small>Operations</small></div></div>
+      <nav id="nav"></nav>
+      <div class="sidebar-footer">
+        <span id="roleBadge" class="role-badge"></span>
+        <small>Refreshes every 5 seconds</small>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div><p id="eyebrow" class="eyebrow"></p><h1 id="pageTitle"></h1><p id="pageSubtitle" class="subtitle"></p></div>
+        <div class="top-actions"><span id="freshness" class="soft-pill">Waiting for data</span><span id="who" class="identity"></span><button id="refresh" class="icon-button" title="Refresh">↻</button><button id="logout" class="button">Sign out</button></div>
+      </header>
+      <div id="notice" class="notice" hidden></div>
+      <section id="content" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <dialog id="userDialog" class="dialog">
+    <form id="userForm" method="dialog">
+      <div class="dialog-head"><div><h2>Add user</h2><p>Create Admin or User dashboard access.</p></div><button type="button" class="icon-button" data-close-dialog>×</button></div>
+      <label>Name<input id="newName" required maxlength="120"></label>
+      <label>Login<input id="newLogin" required minlength="3" maxlength="64"></label>
+      <label>Temporary password<input id="newPassword" type="password" required minlength="8" maxlength="128"></label>
+      <label>Role<select id="newAdmin"><option value="false">User</option><option value="true">Admin</option></select></label>
+      <p class="privacy-note">Quota configuration is intentionally excluded from this release.</p>
+      <div class="dialog-actions"><button type="button" class="button" data-close-dialog>Cancel</button><button class="button primary" type="submit">Create user</button></div>
+      <p id="userFormError" class="form-error"></p>
+    </form>
+  </dialog>
+
+  <dialog id="confirmDialog" class="dialog">
+    <div class="dialog-head"><div><h2>Soft delete user?</h2><p id="confirmCopy"></p></div></div>
+    <div class="privacy-note">Login and access are blocked; active sessions are revoked. Usage and audit history remain available.</div>
+    <div class="dialog-actions"><button id="cancelDelete" class="button">Cancel</button><button id="confirmDelete" class="button danger">Soft delete</button></div>
+  </dialog>
+
+  <dialog id="detailDialog" class="dialog">
+    <div class="dialog-head"><div><h2 id="detailTitle">Safe detail</h2><p>Metadata only. Commands, arguments, payloads, and output are never stored.</p></div><button id="closeDetail" class="icon-button" type="button">×</button></div>
+    <div id="detailBody" class="detail-list"></div>
+  </dialog>
+
+  <script type="module" src="/dashboard/app.js"></script>
+</body>
+</html>

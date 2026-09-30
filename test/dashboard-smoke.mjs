@@ -3,8 +3,8 @@ const adminToken=process.env.TEST_ADMIN_TOKEN||"test-admin";
 async function req(path,opt={}){const r=await fetch(base+path,{redirect:"manual",...opt}),text=await r.text();let data={};try{data=text?JSON.parse(text):{}}catch{data={raw:text}}return{response:r,text,data}}
 async function admin(path,method="GET",body){return req(path,{method,headers:{authorization:"Bearer "+adminToken,...(body===undefined?{}:{"content-type":"application/json"})},body:body===undefined?undefined:JSON.stringify(body)})}
 const redirect=await req("/dashboard");if(redirect.response.status!==302||!String(redirect.response.headers.get("location")).endsWith("/dashboard/"))throw Error("dashboard redirect failed");
-const page=await req("/dashboard/");if(!page.response.ok||!page.text.includes("Chat Relay Admin")||!page.text.includes("/dashboard/app.js"))throw Error("dashboard html failed");
-const js=await req("/dashboard/app.js");if(!js.response.ok||!js.text.includes("/admin/api/overview")||js.text.includes("ADMIN_TOKEN"))throw Error("dashboard app asset invalid");
+const page=await req("/dashboard/");if(!page.response.ok||!page.text.includes("Chat Relay")||!page.text.includes("/dashboard/app.js")||!page.text.includes("userDialog")||!page.text.includes("detailDialog"))throw Error("dashboard html failed");
+const js=await req("/dashboard/app.js");if(!js.response.ok||!js.text.includes("/admin/api/overview")||!js.text.includes("/admin/api/tool-calls")||!js.text.includes("/admin/api/errors")||!js.text.includes("bindDetailRows")||!js.text.includes("bindTableFilter")||!js.text.includes("5000")||js.text.includes("ADMIN_TOKEN"))throw Error("dashboard app asset invalid");
 const css=await req("/dashboard/styles.css");if(!css.response.ok||!css.text.includes("@media"))throw Error("dashboard css invalid");
 const protectedRead=await req("/admin/api/overview");if(protectedRead.response.status!==401)throw Error("dashboard API exposed without auth");
 const bootstrap=await admin("/admin/bootstrap","POST",{userName:"Owner",agentId:"default",agentName:"Primary PC"});if(!bootstrap.response.ok)throw Error("bootstrap failed");
