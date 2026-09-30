@@ -106,7 +106,29 @@ public static class ChatRelayNative {
   }
 
   if ($Operation -eq "screenshot") {
-    $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+    $screens = @([System.Windows.Forms.Screen]::AllScreens)
+    if ($screens.Count -eq 0) { Fail "session_unavailable" }
+
+    $monitor = if ($null -ne $payload.monitor) { $payload.monitor } else { "primary" }
+    $screen = $null
+    $monitorIndex = -1
+
+    if ([string]$monitor -eq "primary") {
+      $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+      for ($i = 0; $i -lt $screens.Count; $i++) { if ($screens[$i].Primary) { $monitorIndex = $i; break } }
+    } elseif ([string]$monitor -eq "secondary") {
+      for ($i = 0; $i -lt $screens.Count; $i++) {
+        if (-not $screens[$i].Primary) { $screen = $screens[$i]; $monitorIndex = $i; break }
+      }
+      if ($null -eq $screen) { Fail "monitor_not_found" }
+    } else {
+      $parsedIndex = 0
+      if (-not [int]::TryParse([string]$monitor, [ref]$parsedIndex)) { Fail "invalid_monitor" }
+      if ($parsedIndex -lt 0 -or $parsedIndex -ge $screens.Count) { Fail "monitor_not_found" }
+      $screen = $screens[$parsedIndex]
+      $monitorIndex = $parsedIndex
+    }
+
     if ($null -eq $screen) { Fail "session_unavailable" }
     $bounds = $screen.Bounds
     if ($bounds.Width -le 0 -or $bounds.Height -le 0) { Fail "session_unavailable" }
@@ -189,6 +211,9 @@ public static class ChatRelayNative {
       desktopHeight = $bounds.Height
       scaleX = $bounds.Width / [double]$finalWidth
       scaleY = $bounds.Height / [double]$finalHeight
+      monitorIndex = $monitorIndex
+      isPrimary = [bool]$screen.Primary
+      deviceName = [string]$screen.DeviceName
       byteLength = $bytes.Length
     })
     exit 0

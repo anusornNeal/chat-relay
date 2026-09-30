@@ -3,6 +3,7 @@
   "name": "chat-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-29",
+  "vars": { "PUBLIC_BASE_URL": "https://chat-relay.anusorn-hank.workers.dev" },
   "assets": {
     "directory": "./dashboard",
     "binding": "ASSETS",

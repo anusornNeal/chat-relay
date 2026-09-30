@@ -53,6 +53,10 @@ async function managerTests() {
   const manager = new DesktopManager({ enabled: true, platform: "win32", runner });
   const screenshot = await manager.screenshot();
   assert(screenshot.ok && screenshot.mimeType === "image/jpeg" && screenshot.data === tinyJpeg, "controlled screenshot failed");
+  const secondaryScreenshot = await manager.screenshot({ monitor: "secondary" });
+  assert(secondaryScreenshot.ok, "secondary screenshot failed");
+  assert(runnerCalls.some((item) => item.operation === "screenshot" && item.args.monitor === "secondary"), "secondary monitor was not forwarded");
+  assert((await manager.screenshot({ monitor: "bogus" })).error === "invalid_monitor", "invalid monitor accepted");
   assert((await manager.mouseClick({ x: 1.2, y: 2 })).error === "invalid_coordinates", "invalid coordinates accepted");
   assert((await manager.mouseClick({ x: 1, y: 2, button: "side" })).error === "invalid_button", "invalid button accepted");
   assert((await manager.mouseClick({ x: 1, y: 2, clicks: 3 })).error === "invalid_click_count", "invalid click count accepted");
@@ -179,11 +183,18 @@ async function mcpTests() {
     arguments: { agentId },
   });
   assert(!shot.result?.isError, "desktop_read screenshot failed");
-  assert(shot.result?.content?.[0]?.type === "image", "screenshot did not return MCP image content");
-  assert(shot.result?.content?.[0]?.mimeType === "image/jpeg", "screenshot mime type invalid");
-  assert(shot.result?.content?.[0]?.data === tinyJpeg, "screenshot image data mismatch");
-  const metadata = JSON.parse(shot.result?.content?.[1]?.text || "{}");
+  assert(shot.result?.content?.[0]?.type === "text", "screenshot did not return temporary URL metadata");
+  const metadata = JSON.parse(shot.result?.content?.[0]?.text || "{}");
   assert(metadata.desktopWidth === 1920 && metadata.scaleX === 1920, "screenshot metadata missing");
+  assert(typeof metadata.tempUrl === "string" && metadata.tempUrl.includes("/tmp-shot/"), "temporary screenshot URL missing");
+  assert(metadata.expiresInSeconds === 300, "temporary screenshot TTL invalid");
+
+  const tempUrl = metadata.tempUrl.startsWith("http") ? metadata.tempUrl : base + metadata.tempUrl;
+  const tempShot = await fetch(tempUrl);
+  assert(tempShot.ok, "temporary screenshot URL was not readable");
+  assert(tempShot.headers.get("content-type") === "image/jpeg", "temporary screenshot mime type invalid");
+  const tempBytes = Buffer.from(await tempShot.arrayBuffer());
+  assert(tempBytes.equals(Buffer.from(tinyJpeg, "base64")), "temporary screenshot bytes mismatch");
 
   const readerClick = await rpc(reader.token, 3, "tools/call", {
     name: "mouse_click",

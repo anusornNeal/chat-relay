@@ -26,6 +26,7 @@ interface Env {
   USAGE_RAW_RETENTION_DAYS?: string;
   AUDIT_RETENTION_DAYS?: string;
   OPENAI_APPS_CHALLENGE?: string;
+  PUBLIC_BASE_URL?: string;
 }
 
 type Pending = {
@@ -86,13 +87,103 @@ export class Relay extends DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
-    switch (new URL(request.url).pathname) {
+    const path = new URL(request.url).pathname;
+    if (path.startsWith("/temp-shot/")) {
+      return this.getTempShot(path.slice("/temp-shot/".length));
+    }
+    switch (path) {
       case "/agent": return this.connectAgent(request);
       case "/status": return Response.json({ online: this.agent !== null });
       case "/disconnect": return this.disconnectAgent();
       case "/relay": return this.relay(request);
+      case "/temp-shot": return this.storeTempShot(request);
       default: return error(404, "not_found");
     }
+  }
+
+  async alarm(): Promise<void> {
+    await this.cleanupTempShots();
+  }
+
+  private async storeTempShot(request: Request): Promise<Response> {
+    if (request.method !== "POST") return error(405, "method_not_allowed");
+
+    let body: any;
+    try { body = await request.json(); }
+    catch { return error(400, "invalid_json"); }
+
+    if (body?.mimeType !== "image/jpeg" || typeof body.data !== "string") {
+      return error(400, "invalid_screenshot");
+    }
+
+    let byteLength = 0;
+    try { byteLength = Uint8Array.from(atob(body.data), (c) => c.charCodeAt(0)).byteLength; }
+    catch { return error(400, "invalid_screenshot"); }
+    if (byteLength <= 0 || byteLength > MAX_BYTES) {
+      return error(413, "screenshot_too_large", { maxBytes: MAX_BYTES });
+    }
+
+    const token = crypto.randomUUID().replaceAll("-", "");
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    await this.ctx.storage.put("temp-shot:" + token, {
+      mimeType: body.mimeType,
+      data: body.data,
+      expiresAt,
+    });
+
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (currentAlarm === null || currentAlarm > expiresAt) {
+      await this.ctx.storage.setAlarm(expiresAt);
+    }
+
+    return Response.json({ ok: true, token, expiresAt });
+  }
+
+  private async getTempShot(token: string): Promise<Response> {
+    if (!/^[a-f0-9]{32}$/.test(token)) return error(404, "not_found");
+
+    const key = "temp-shot:" + token;
+    const shot = await this.ctx.storage.get<any>(key);
+    if (!shot) return error(404, "not_found");
+
+    if (typeof shot.expiresAt !== "number" || Date.now() >= shot.expiresAt) {
+      await this.ctx.storage.delete(key);
+      return error(410, "expired");
+    }
+
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)); }
+    catch {
+      await this.ctx.storage.delete(key);
+      return error(500, "invalid_screenshot");
+    }
+
+    return new Response(bytes, {
+      headers: {
+        "content-type": shot.mimeType || "image/jpeg",
+        "cache-control": "private, no-store, max-age=0",
+        "content-disposition": "inline",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }
+
+  private async cleanupTempShots(): Promise<void> {
+    const entries = await this.ctx.storage.list<any>({ prefix: "temp-shot:" });
+    const now = Date.now();
+    let nextExpiry: number | null = null;
+
+    for (const [key, shot] of entries) {
+      const expiresAt = typeof shot?.expiresAt === "number" ? shot.expiresAt : 0;
+      if (expiresAt <= now) {
+        await this.ctx.storage.delete(key);
+      } else if (nextExpiry === null || expiresAt < nextExpiry) {
+        nextExpiry = expiresAt;
+      }
+    }
+
+    if (nextExpiry === null) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(nextExpiry);
   }
 
   private connectAgent(request: Request): Response {
@@ -462,14 +553,28 @@ function toolResult(result: { ok: boolean; body: string }) {
   };
 }
 
-function screenshotToolResult(result: { ok: boolean; body: string }) {
+async function screenshotToolResult(env: Env, agentId: string | undefined, result: { ok: boolean; body: string }) {
   if (!result.ok) return toolResult(result);
   try {
     const envelope = JSON.parse(result.body) as { payload?: any };
     const payload = envelope?.payload;
-    if (!payload?.ok || payload.mimeType !== "image/jpeg" || typeof payload.data !== "string") {
+    if (!payload?.ok || payload.mimeType !== "image/jpeg" || typeof payload.data !== "string" || !agentId) {
       return toolResult({ ok: false, body: JSON.stringify({ error: payload?.error || "invalid_screenshot_result" }) });
     }
+
+    const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
+    const stored = await stub.fetch(new Request("https://relay.internal/temp-shot", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mimeType: payload.mimeType, data: payload.data }),
+    }));
+    if (!stored.ok) {
+      return toolResult({ ok: false, body: JSON.stringify({ error: "temp_screenshot_store_failed" }) });
+    }
+
+    const temp = await stored.json<any>();
+    const tempPath = "/tmp-shot/" + encodeURIComponent(agentId) + "/" + temp.token;
+    const baseUrl = String(env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
     const metadata = {
       width: payload.width,
       height: payload.height,
@@ -480,12 +585,17 @@ function screenshotToolResult(result: { ok: boolean; body: string }) {
       scaleX: payload.scaleX,
       scaleY: payload.scaleY,
       byteLength: payload.byteLength,
+      monitorIndex: payload.monitorIndex,
+      isPrimary: payload.isPrimary === true,
+      deviceName: payload.deviceName,
+      tempUrl: baseUrl ? baseUrl + tempPath : tempPath,
+      expiresAt: new Date(temp.expiresAt).toISOString(),
+      expiresInSeconds: 300,
     };
+
     return {
-      content: [
-        { type: "image" as const, data: payload.data, mimeType: payload.mimeType },
-        { type: "text" as const, text: JSON.stringify(metadata) },
-      ],
+      structuredContent: metadata,
+      content: [{ type: "text" as const, text: JSON.stringify(metadata) }],
     };
   } catch {
     return toolResult({ ok: false, body: JSON.stringify({ error: "invalid_screenshot_result" }) });
@@ -535,6 +645,8 @@ function annotationsForTool(name: string, override: Record<string, boolean> = {}
     ...override,
   };
 }
+
+const SCREENSHOT_UI_URI = "ui://chat-relay/screenshot-v3.html";
 
 function createMcpServer(env: Env, user: AuthUser) {
   const server = new McpServer({ name: "chat-relay", version: "0.7.0" });
@@ -772,14 +884,17 @@ function createMcpServer(env: Env, user: AuthUser) {
   server.registerTool(
     "screenshot",
     {
-      description: "Capture the primary Windows desktop as a bounded JPEG image. Requires local desktop opt-in and desktop_read permission.",
-      inputSchema: { agentId: agentIdSchema },
+      description: "Capture a Windows monitor and return a temporary JPEG URL valid for 5 minutes. monitor can be primary, secondary, or a zero-based monitor index. Requires local desktop opt-in and desktop_read permission.",
+      inputSchema: {
+        agentId: agentIdSchema,
+        monitor: z.union([z.enum(["primary", "secondary"]), z.number().int().min(0).max(15)]).optional(),
+      },
       annotations: annotationsForTool("screenshot"),
     } as any,
-    async ({ agentId }: any) => instrumentTool(env, user, "screenshot", { agentId }, async () => {
-      const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot" });
+    async ({ agentId, monitor }: any) => instrumentTool(env, user, "screenshot", { agentId, monitor }, async () => {
+      const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot", monitor });
       return {
-        value: screenshotToolResult(call),
+        value: await screenshotToolResult(env, call.agentId, call),
         ok: call.ok,
         agentId: call.agentId,
         ...(call.ok ? {} : { errorClass: "tool_error" }),
@@ -997,6 +1112,21 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    if (path.startsWith("/tmp-shot/")) {
+      if (request.method !== "GET") return error(405, "method_not_allowed");
+      const parts = path.split("/").filter(Boolean);
+      if (parts.length !== 3) return error(404, "not_found");
+
+      const agentId = decodeURIComponent(parts[1]);
+      const token = parts[2];
+      if (!/^[a-z0-9_-]{1,64}$/.test(agentId) || !/^[a-f0-9]{32}$/.test(token)) {
+        return error(404, "not_found");
+      }
+
+      const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
+      return stub.fetch("https://relay.internal/temp-shot/" + token);
+    }
 
     if (path === "/dashboard" && env.ASSETS) {
       return Response.redirect(url.origin + "/dashboard/", 302);

@@ -88,7 +88,7 @@ async function handlePayload(payload) {
       return processes.kill(payload.pid);
 
     case "desktop.screenshot":
-      return desktop.screenshot();
+      return desktop.screenshot(payload);
     case "desktop.mouse.click":
       return desktop.mouseClick(payload);
     case "desktop.keyboard.input":

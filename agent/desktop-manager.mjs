@@ -94,11 +94,16 @@ export class DesktopManager {
     return null;
   }
 
-  async screenshot() {
+  async screenshot(input = {}) {
     const gate = this.gate();
     if (gate) return gate;
 
-    const result = await this.runner("screenshot", {});
+    const monitor = input.monitor ?? "primary";
+    if (!(monitor === "primary" || monitor === "secondary" || (Number.isInteger(monitor) && monitor >= 0 && monitor <= 15))) {
+      return { ok: false, error: "invalid_monitor" };
+    }
+
+    const result = await this.runner("screenshot", { monitor });
     if (!result?.ok) return result || { ok: false, error: "capture_failed" };
     if (result.mimeType !== "image/jpeg" || typeof result.data !== "string") {
       return { ok: false, error: "capture_failed" };
@@ -121,6 +126,9 @@ export class DesktopManager {
       desktopHeight: Number(result.desktopHeight),
       scaleX: Number(result.scaleX),
       scaleY: Number(result.scaleY),
+      monitorIndex: Number(result.monitorIndex),
+      isPrimary: result.isPrimary === true,
+      deviceName: typeof result.deviceName === "string" ? result.deviceName : undefined,
       byteLength: binaryBytes,
     };
   }
