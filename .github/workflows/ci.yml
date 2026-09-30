@@ -13,15 +13,12 @@ jobs:
   package-runtime:
     name: Package runtime Node 20
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-
       - run: npm ci --omit=dev
       - run: node scripts/verify-publish.mjs
       - run: npm audit --omit=dev
@@ -29,58 +26,119 @@ jobs:
   worker-verify:
     name: Worker and package Node 24
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-
       - run: npm ci
       - run: npm run verify:publish
 
   integration:
-    name: Device auth and zero-checkout
+    name: Public-review integration
     runs-on: ubuntu-latest
     needs: [package-runtime, worker-verify]
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-
       - run: npm ci
 
       - name: Start local Worker
         shell: bash
         run: |
-          npx wrangler dev --local --port 8796             --var AGENT_TOKEN:test-agent             --var CALLER_TOKEN:test-caller             --var ADMIN_TOKEN:test-admin             > /tmp/chat-relay-wrangler.log 2>&1 &
+          npx wrangler dev --local --port 8796 \
+            --var AGENT_TOKEN:test-agent \
+            --var CALLER_TOKEN:test-caller \
+            --var ADMIN_TOKEN:test-admin \
+            --var OPENAI_APPS_CHALLENGE:test-openai-apps-challenge \
+            > /tmp/chat-relay-wrangler.log 2>&1 &
           echo $! > /tmp/chat-relay-wrangler.pid
           for i in {1..40}; do
-            if curl -fsS http://127.0.0.1:8796/health >/dev/null; then
-              exit 0
-            fi
+            if curl -fsS http://127.0.0.1:8796/health >/dev/null; then exit 0; fi
             sleep 0.5
           done
           cat /tmp/chat-relay-wrangler.log
           exit 1
 
-      - name: Device auth smoke
+      - name: Bootstrap CI agent
         env:
+          RELAY_URL: http://127.0.0.1:8796
+          ADMIN_TOKEN: test-admin
+        run: node scripts/admin.mjs bootstrap default "CI Agent"
+
+      - name: Start CI agent
+        shell: bash
+        env:
+          RELAY_URL: http://127.0.0.1:8796
+          AGENT_TOKEN: test-agent
+          AGENT_ID: default
+          AGENT_NAME: CI Agent
+          TERMINAL_ENABLED: "0"
+          ALLOWED_ROOTS: .
+        run: |
+          node agent/local-agent.mjs > /tmp/chat-relay-agent.log 2>&1 &
+          echo $! > /tmp/chat-relay-agent.pid
+          for i in {1..20}; do
+            if grep -q "Agent connected" /tmp/chat-relay-agent.log; then exit 0; fi
+            sleep 0.5
+          done
+          cat /tmp/chat-relay-agent.log
+          exit 1
+
+      - name: Usage telemetry smoke
+        env: &test-env
           TEST_RELAY_URL: http://127.0.0.1:8796
+          TEST_ADMIN_TOKEN: test-admin
+          TEST_CALLER_TOKEN: test-caller
+        run: npm run test:usage
+
+      - name: Quota smoke
+        env: *test-env
+        run: npm run test:quota
+
+      - name: Admin API smoke
+        env: *test-env
+        run: npm run test:admin-api
+
+      - name: Admin auth smoke
+        env: *test-env
+        run: npm run test:admin-auth
+
+      - name: Dashboard smoke
+        env: *test-env
+        run: npm run test:dashboard
+
+      - name: Device auth smoke
+        env: *test-env
         run: npm run test:device-auth
 
       - name: OAuth smoke
+        env: *test-env
+        run: npm run test:oauth
+
+      - name: Operations audit smoke
+        env: *test-env
+        run: npm run test:ops
+
+      - name: Desktop contract smoke
+        env: *test-env
+        run: npm run test:desktop
+
+      - name: Device management smoke
+        env: *test-env
+        run: npm run test:device-management
+
+      - name: Submission readiness smoke
         env:
           TEST_RELAY_URL: http://127.0.0.1:8796
           TEST_ADMIN_TOKEN: test-admin
           TEST_CALLER_TOKEN: test-caller
-        run: npm run test:oauth
+          TEST_OPENAI_APPS_CHALLENGE: test-openai-apps-challenge
+        run: npm run test:submission
 
       - name: Pack npm artifact
         id: pack
@@ -96,15 +154,16 @@ jobs:
           CHAT_RELAY_TARBALL: ${{ steps.pack.outputs.tarball }}
         run: npm run test:zero-checkout
 
-      - name: Show Worker logs on failure
+      - name: Show integration logs on failure
         if: failure()
         shell: bash
-        run: cat /tmp/chat-relay-wrangler.log || true
+        run: |
+          cat /tmp/chat-relay-wrangler.log || true
+          cat /tmp/chat-relay-agent.log || true
 
-      - name: Stop local Worker
+      - name: Stop local processes
         if: always()
         shell: bash
         run: |
-          if [ -f /tmp/chat-relay-wrangler.pid ]; then
-            kill "$(cat /tmp/chat-relay-wrangler.pid)" 2>/dev/null || true
-          fi
+          if [ -f /tmp/chat-relay-agent.pid ]; then kill "$(cat /tmp/chat-relay-agent.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/chat-relay-wrangler.pid ]; then kill "$(cat /tmp/chat-relay-wrangler.pid)" 2>/dev/null || true; fi

@@ -1,13 +1,15 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 
-const vars = Object.fromEntries(
-  fs.readFileSync(".dev.vars", "utf8").split(/\r?\n/)
-    .filter((line) => line && line.includes("="))
-    .map((line) => {
-      const index = line.indexOf("=");
-      return [line.slice(0, index), line.slice(index + 1)];
-    }),
-);
+const vars = fs.existsSync(".dev.vars")
+  ? Object.fromEntries(
+      fs.readFileSync(".dev.vars", "utf8").split(/\r?\n/)
+        .filter((line) => line && line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    )
+  : {};
 
 const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8805").replace(/\/$/, "");
 const adminToken = process.env.TEST_ADMIN_TOKEN || vars.ADMIN_TOKEN;

@@ -14,3 +14,4 @@ ALLOWED_ROOTS=C:\Users\you\Projects
 # Owner/admin values are only needed on the machine used to administer the relay
 CALLER_TOKEN=replace-with-owner-user-token
 ADMIN_TOKEN=replace-with-admin-token
+OPENAI_APPS_CHALLENGE=

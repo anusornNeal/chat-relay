@@ -25,6 +25,7 @@ interface Env {
   USER_DAILY_CALL_QUOTA?: string;
   USAGE_RAW_RETENTION_DAYS?: string;
   AUDIT_RETENTION_DAYS?: string;
+  OPENAI_APPS_CHALLENGE?: string;
 }
 
 type Pending = {
@@ -506,12 +507,41 @@ async function listUserAgents(env: Env, user: AuthUser) {
 
 const agentIdSchema = z.string().regex(/^[a-z0-9_-]{1,64}$/).optional();
 
+const READ_ONLY_TOOLS = new Set([
+  "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls",
+  "stat_path", "list_directory", "read_file", "read_multiple_files",
+  "start_search", "get_more_search_results", "list_processes", "screenshot",
+  "terminal_read", "terminal_list", "read_process_output", "list_sessions",
+]);
+
+const OPEN_WORLD_TOOLS = new Set([
+  "mouse_click", "keyboard_input",
+  "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write",
+  "start_process", "interact_with_process",
+]);
+
+const DESTRUCTIVE_TOOLS = new Set([
+  "write_file", "edit_block", "move_path", "delete_path", "kill_process",
+  "mouse_click", "keyboard_input",
+  "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write", "terminal_kill",
+  "start_process", "interact_with_process", "force_terminate",
+]);
+
+function annotationsForTool(name: string, override: Record<string, boolean> = {}) {
+  return {
+    readOnlyHint: READ_ONLY_TOOLS.has(name),
+    openWorldHint: OPEN_WORLD_TOOLS.has(name),
+    destructiveHint: DESTRUCTIVE_TOOLS.has(name),
+    ...override,
+  };
+}
+
 function createMcpServer(env: Env, user: AuthUser) {
-  const server = new McpServer({ name: "chat-relay", version: "0.4.0" });
+  const server = new McpServer({ name: "chat-relay", version: "0.6.0" });
 
   server.registerTool(
     "whoami",
-    { description: "Show the authenticated relay user.", inputSchema: {} },
+    { description: "Show the authenticated relay user.", inputSchema: {}, annotations: annotationsForTool("whoami") } as any,
     async () => instrumentTool(env, user, "whoami", {}, async () => {
       const value = toolResult({ ok: true, body: JSON.stringify({ user }) });
       return { value, ok: true };
@@ -520,7 +550,7 @@ function createMcpServer(env: Env, user: AuthUser) {
 
   server.registerTool(
     "list_agents",
-    { description: "List agents this user can access, including scopes and online status.", inputSchema: {} },
+    { description: "List agents this user can access, including scopes and online status.", inputSchema: {}, annotations: annotationsForTool("list_agents") } as any,
     async () => instrumentTool(env, user, "list_agents", {}, async () => {
       const call = await listUserAgents(env, user);
       return { value: toolResult(call), ok: call.ok };
@@ -532,7 +562,8 @@ function createMcpServer(env: Env, user: AuthUser) {
     {
       description: "Check whether a permitted local agent is reachable.",
       inputSchema: { agentId: agentIdSchema },
-    },
+      annotations: annotationsForTool("ping_agent"),
+    } as any,
     async ({ agentId }) => instrumentTool(env, user, "ping_agent", { agentId }, async () => {
       const call = await callAgent(env, user, "read", agentId, { action: "ping" });
       return { value: toolResult(call), ok: call.ok, agentId: call.agentId };
@@ -552,7 +583,7 @@ function createMcpServer(env: Env, user: AuthUser) {
       {
         description,
         inputSchema: { agentId: agentIdSchema, ...inputSchema },
-        ...(annotations ? { annotations } : {}),
+        annotations: annotationsForTool(name, annotations),
       } as any,
       async (args: any) => instrumentTool(env, user, name, args, async () => {
         const call = await callAgent(env, user, scope, args.agentId, payload(args));
@@ -743,7 +774,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     {
       description: "Capture the primary Windows desktop as a bounded JPEG image. Requires local desktop opt-in and desktop_read permission.",
       inputSchema: { agentId: agentIdSchema },
-      annotations: { readOnlyHint: true },
+      annotations: annotationsForTool("screenshot"),
     } as any,
     async ({ agentId }: any) => instrumentTool(env, user, "screenshot", { agentId }, async () => {
       const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot" });
@@ -980,6 +1011,18 @@ export default {
       return request.method === "GET"
         ? Response.json({ status: "ok", service: "chat-relay", version: "0.6.0" })
         : error(405, "method_not_allowed");
+    }
+
+    if (path === "/.well-known/openai-apps-challenge") {
+      if (request.method !== "GET") return error(405, "method_not_allowed");
+      const token = String(env.OPENAI_APPS_CHALLENGE || "").trim();
+      if (!token) return error(404, "not_found");
+      return new Response(token, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
     }
 
     const oauthResponse = await handleOAuth(

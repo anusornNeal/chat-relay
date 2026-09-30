@@ -1,73 +1,75 @@
 {
-  "name": "@anusornneal/chat-relay",
-  "version": "0.6.0",
-  "description": "Zero-checkout remote MCP agent for ChatGPT with terminal, filesystem, process, multi-user, and multi-agent support.",
-  "type": "module",
-  "bin": {
-    "chat-relay": "bin/chat-relay.js"
-  },
-  "files": [
-    "bin/",
-    "cli/",
-    "agent/",
-    "README.md"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "scripts": {
-    "start": "node bin/chat-relay.js remote",
-    "remote": "node bin/chat-relay.js remote",
-    "login": "node bin/chat-relay.js login",
-    "logout": "node bin/chat-relay.js logout",
-    "status": "node bin/chat-relay.js status",
-    "dev": "wrangler dev",
-    "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN=test-caller --var ADMIN_TOKEN=test-admin",
-    "deploy": "wrangler deploy",
-    "agent": "node --env-file-if-exists=.dev.vars agent/local-agent.mjs",
-    "admin": "node scripts/admin.mjs",
-    "test:terminal": "node test/mcp-terminal-smoke.mjs",
-    "test:full": "node test/multiuser-smoke.mjs",
-    "test:device-auth": "node test/device-auth-smoke.mjs",
-    "test:zero-checkout": "node test/zero-checkout-smoke.mjs",
-    "verify:publish": "node scripts/verify-publish.mjs && npx wrangler deploy --dry-run && npm audit --omit=dev",
-    "prepublishOnly": "npm run verify:publish",
-    "test:oauth": "node test/oauth-smoke.mjs",
-    "test:usage": "node test/usage-smoke.mjs",
-    "test:admin-api": "node test/admin-api-smoke.mjs",
-    "test:admin-auth": "node test/admin-auth-smoke.mjs",
-    "test:dashboard": "node test/dashboard-smoke.mjs",
-    "test:quota": "node test/quota-smoke.mjs",
-    "test:ops": "node test/ops-smoke.mjs",
-    "test:desktop": "node test/mcp-desktop-smoke.mjs",
-    "test:device-management": "node test/device-management-smoke.mjs"
-  },
-  "dependencies": {
-    "ws": "^8.22.0"
-  },
-  "devDependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
-    "agents": "^0.24.0",
-    "wrangler": "^4.143.0",
-    "zod": "^4.6.5"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/anusornNeal/chat-relay.git"
-  },
-  "bugs": {
-    "url": "https://github.com/anusornNeal/chat-relay/issues"
-  },
-  "homepage": "https://github.com/anusornNeal/chat-relay#readme",
-  "keywords": [
-    "chatgpt",
-    "mcp",
-    "remote-agent",
-    "terminal",
-    "cloudflare",
-    "cli"
-  ]
+    "name":  "@anusornneal/chat-relay",
+    "version":  "0.6.0",
+    "description":  "Zero-checkout remote MCP agent for ChatGPT with terminal, filesystem, process, multi-user, and multi-agent support.",
+    "type":  "module",
+    "bin":  {
+                "chat-relay":  "bin/chat-relay.js"
+            },
+    "files":  [
+                  "bin/",
+                  "cli/",
+                  "agent/",
+                  "README.md"
+              ],
+    "engines":  {
+                    "node":  "\u003e=20"
+                },
+    "publishConfig":  {
+                          "access":  "public"
+                      },
+    "scripts":  {
+                    "start":  "node bin/chat-relay.js remote",
+                    "remote":  "node bin/chat-relay.js remote",
+                    "login":  "node bin/chat-relay.js login",
+                    "logout":  "node bin/chat-relay.js logout",
+                    "status":  "node bin/chat-relay.js status",
+                    "dev":  "wrangler dev",
+                    "dev:test":  "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN=test-caller --var ADMIN_TOKEN=test-admin",
+                    "deploy":  "wrangler deploy",
+                    "agent":  "node --env-file-if-exists=.dev.vars agent/local-agent.mjs",
+                    "admin":  "node scripts/admin.mjs",
+                    "test:terminal":  "node test/mcp-terminal-smoke.mjs",
+                    "test:full":  "node test/multiuser-smoke.mjs",
+                    "test:device-auth":  "node test/device-auth-smoke.mjs",
+                    "test:zero-checkout":  "node test/zero-checkout-smoke.mjs",
+                    "verify:publish":  "npm run verify:review \u0026\u0026 node scripts/verify-publish.mjs \u0026\u0026 npx wrangler deploy --dry-run \u0026\u0026 npm audit --omit=dev",
+                    "prepublishOnly":  "npm run verify:publish",
+                    "test:oauth":  "node test/oauth-smoke.mjs",
+                    "test:usage":  "node test/usage-smoke.mjs",
+                    "test:admin-api":  "node test/admin-api-smoke.mjs",
+                    "test:admin-auth":  "node test/admin-auth-smoke.mjs",
+                    "test:dashboard":  "node test/dashboard-smoke.mjs",
+                    "test:quota":  "node test/quota-smoke.mjs",
+                    "test:ops":  "node test/ops-smoke.mjs",
+                    "test:desktop":  "node test/mcp-desktop-smoke.mjs",
+                    "test:device-management":  "node test/device-management-smoke.mjs",
+                    "test:submission":  "node test/submission-smoke.mjs",
+                    "verify:review":  "node scripts/verify-review-artifacts.mjs"
+                },
+    "dependencies":  {
+                         "ws":  "^8.22.0"
+                     },
+    "devDependencies":  {
+                            "@modelcontextprotocol/server":  "^2.0.0",
+                            "agents":  "^0.24.0",
+                            "wrangler":  "^4.143.0",
+                            "zod":  "^4.6.5"
+                        },
+    "repository":  {
+                       "type":  "git",
+                       "url":  "git+https://github.com/anusornNeal/chat-relay.git"
+                   },
+    "bugs":  {
+                 "url":  "https://github.com/anusornNeal/chat-relay/issues"
+             },
+    "homepage":  "https://github.com/anusornNeal/chat-relay#readme",
+    "keywords":  [
+                     "chatgpt",
+                     "mcp",
+                     "remote-agent",
+                     "terminal",
+                     "cloudflare",
+                     "cli"
+                 ]
 }

@@ -1,4 +1,4 @@
-# chat-relay
+﻿# chat-relay
 
 Cloudflare Worker + Durable Objects relay that exposes one or more local Windows agents to ChatGPT through remote MCP.
 
@@ -212,6 +212,11 @@ Desktop interaction is disabled by default and requires two independent gates:
 - Screenshot bytes, typed text, key chords, and click coordinates are not stored in recentCalls. Only action/timing/success metadata is retained there.
 - This card does not add streaming video, OCR, remote-desktop viewer UI, clipboard sync, drag-and-drop, app-specific automation, or Session 0/service automation.
 
+## Public plugin review
+
+Public ChatGPT onboarding uses the plain production `/mcp` URL and OAuth; the legacy `?key=` route is migration compatibility only. Submission/reviewer requirements, permission boundaries, privacy/retention behavior, domain-verification setup, positive/negative test cases, and clean-room demo steps are maintained in `docs/plugin-review.md`.
+
+The OpenAI domain verification token is served at `/.well-known/openai-apps-challenge` when `OPENAI_APPS_CHALLENGE` is configured. Keep reviewer credentials and challenge values separate from production administrator secrets.
 ## Runtime limits and controls
 
 - MCP tool calls are protected by per-user durable limits before local-agent dispatch. Defaults are 120 calls per 60-second window and 10,000 calls per UTC day. Set `USER_RATE_LIMIT_PER_WINDOW=0` or `USER_DAILY_CALL_QUOTA=0` to disable that limit; `USER_RATE_WINDOW_SECONDS` controls the rate window (1-3600 seconds).
