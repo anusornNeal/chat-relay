@@ -76,6 +76,7 @@ await tool(ownerToken, 1, "whoami");
 await tool(ownerToken, 2, "ping_agent", { agentId: "default" });
 await tool(ownerToken, 3, "read_file", { path: "SENSITIVE_PATH_SECRET.txt" });
 await tool(ownerToken, 4, "read_file", { path: "fail-SENSITIVE_FAILURE_PATH.txt" }, true);
+await tool(ownerToken, 41, "ping_agent", { agentId: "missing-agent" }, true);
 
 const suffix = Date.now().toString(36);
 const created = await admin("/admin/users", "POST", { name: "Usage Reader", id: `usage-reader-${suffix}` });
@@ -90,7 +91,7 @@ await tool(created.data.token, 5, "whoami");
 
 const total = await admin(`/admin/usage?day=${day}&recentLimit=100`);
 if (!total.response.ok) throw new Error(`usage query failed: ${total.text}`);
-if (total.data.metric?.calls !== 5 || total.data.metric?.errors !== 1) {
+if (total.data.metric?.calls !== 6 || total.data.metric?.errors !== 2) {
   throw new Error(`unexpected total usage: ${total.text}`);
 }
 if (!(total.data.metric.avgDurationMs >= 0)) throw new Error("missing duration aggregate");
@@ -101,6 +102,11 @@ if (reader.data.metric?.calls !== 1) throw new Error(`user attribution failed: $
 const reads = await admin(`/admin/usage?day=${day}&tool=read_file`);
 if (reads.data.metric?.calls !== 2 || reads.data.metric?.errors !== 1) {
   throw new Error(`tool attribution failed: ${reads.text}`);
+}
+
+const missingAgent = await admin(`/admin/usage?day=${day}&agentId=missing-agent`);
+if (missingAgent.data.metric?.calls !== 1 || missingAgent.data.metric?.errors !== 1) {
+  throw new Error(`missing-agent attribution failed: ${missingAgent.text}`);
 }
 
 const agent = await admin(`/admin/usage?day=${day}&agentId=default`);
