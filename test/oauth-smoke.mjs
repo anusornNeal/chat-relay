@@ -339,7 +339,121 @@ if (!bootstrap.response.ok) {
   throw new Error(`legacy bootstrap failed: ${bootstrap.text}`);
 }
 
-const legacyTools = await mcpRpc(callerToken, 3, "tools/list", {}, true);
+const ownerLogin = `owner-${suffix}`;
+const ownerPassword = `Owner-${suffix}-Password!`;
+const duplicateLogin = await jsonFetch("/admin/users/login", {
+  method: "POST",
+  headers: {
+    authorization: `Bearer ${adminToken}`,
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({ userId: "owner", login, password: ownerPassword }),
+});
+if (duplicateLogin.response.status !== 409 || duplicateLogin.data.error !== "login_exists") {
+  throw new Error(`duplicate login was accepted: ${duplicateLogin.text}`);
+}
+
+const migrated = await jsonFetch("/admin/users/login", {
+  method: "POST",
+  headers: {
+    authorization: `Bearer ${adminToken}`,
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({ userId: "owner", login: ownerLogin, password: ownerPassword }),
+});
+if (!migrated.response.ok || migrated.data.user?.id !== "owner" || migrated.data.user?.login !== ownerLogin) {
+  throw new Error(`owner login migration failed: ${migrated.text}`);
+}
+console.log("legacy owner login migration ok");
+
+const ownerVerifier = "o".repeat(64);
+const ownerAuthorizeParams = {
+  ...authorizeParams,
+  code_challenge: challenge(ownerVerifier),
+  state: `owner-state-${suffix}`,
+};
+const badOwnerLogin = await fetch(`${base}/authorize`, {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: formBody({ ...ownerAuthorizeParams, login: ownerLogin, password: "wrong-password" }),
+  redirect: "manual",
+});
+if (!badOwnerLogin.ok || !(await badOwnerLogin.text()).includes("Invalid login or password")) {
+  throw new Error("wrong migrated-owner password was not rejected");
+}
+
+const disabledOwner = await jsonFetch("/admin/users/enabled", {
+  method: "POST",
+  headers: {
+    authorization: `Bearer ${adminToken}`,
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({ userId: "owner", enabled: false }),
+});
+if (!disabledOwner.response.ok) throw new Error("failed to disable migrated owner fixture");
+const disabledAuthorize = await fetch(`${base}/authorize`, {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: formBody({ ...ownerAuthorizeParams, login: ownerLogin, password: ownerPassword }),
+  redirect: "manual",
+});
+if (!disabledAuthorize.ok || !(await disabledAuthorize.text()).includes("Invalid login or password")) {
+  throw new Error("disabled migrated owner was able to authorize");
+}
+const reenabledOwner = await jsonFetch("/admin/users/enabled", {
+  method: "POST",
+  headers: {
+    authorization: `Bearer ${adminToken}`,
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({ userId: "owner", enabled: true }),
+});
+if (!reenabledOwner.response.ok) throw new Error("failed to re-enable migrated owner fixture");
+
+const ownerAuthorize = await fetch(`${base}/authorize`, {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: formBody({ ...ownerAuthorizeParams, login: ownerLogin, password: ownerPassword }),
+  redirect: "manual",
+});
+if (ownerAuthorize.status !== 302) throw new Error(`owner authorize failed: ${ownerAuthorize.status}`);
+const ownerCallback = new URL(ownerAuthorize.headers.get("location"));
+const ownerCode = ownerCallback.searchParams.get("code");
+if (!ownerCode) throw new Error("migrated owner authorization code missing");
+const ownerToken = await jsonFetch("/token", {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: formBody({
+    grant_type: "authorization_code",
+    client_id: clientId,
+    code: ownerCode,
+    redirect_uri: redirectUri,
+    code_verifier: ownerVerifier,
+    resource,
+  }),
+});
+if (!ownerToken.response.ok || !ownerToken.data.access_token) {
+  throw new Error(`migrated owner token exchange failed: ${ownerToken.text}`);
+}
+const ownerWho = await mcpRpc(ownerToken.data.access_token, 3, "tools/call", {
+  name: "whoami",
+  arguments: {},
+});
+const ownerWhoText = ownerWho.result?.content?.[0]?.text;
+const ownerWhoData = ownerWhoText ? JSON.parse(ownerWhoText) : null;
+if (ownerWhoData?.user?.id !== "owner") throw new Error("migrated OAuth owner identity changed");
+const ownerAgents = await mcpRpc(ownerToken.data.access_token, 4, "tools/call", {
+  name: "list_agents",
+  arguments: {},
+});
+const ownerAgentsText = ownerAgents.result?.content?.[0]?.text;
+const ownerAgentsData = ownerAgentsText ? JSON.parse(ownerAgentsText) : null;
+if (!ownerAgentsData?.agents?.some((agent) => agent.id === "default")) {
+  throw new Error("migrated owner lost default agent grant");
+}
+console.log("migrated owner OAuth identity and grant ok");
+
+const legacyTools = await mcpRpc(callerToken, 5, "tools/list", {}, true);
 if (!legacyTools.result?.tools?.some((item) => item.name === "whoami")) {
   throw new Error("legacy MCP authentication failed");
 }

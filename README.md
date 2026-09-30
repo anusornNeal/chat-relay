@@ -85,9 +85,9 @@ The published package locates its bundled local agent relative to the package it
 - Grants map users to agents with scopes: `read`, `write`, `terminal`, `process`, or `*`.
 - Logging out revokes the local user session and the owning machine credential.
 - `ADMIN_TOKEN` remains separate and protects administration routes.
-- The existing legacy owner token remains supported so current ChatGPT MCP URLs continue to work during migration.
+- The existing legacy owner token remains supported only as transitional compatibility while OAuth becomes the normal ChatGPT MCP path.
 
-ChatGPT MCP supports OAuth 2.1 authorization-code login with PKCE S256. OAuth access tokens are audience-bound to `/mcp`; `offline_access` issues rotating refresh tokens. Dynamic client registration and protected-resource/authorization-server discovery are exposed for compatible MCP clients. The legacy `/mcp?key=<USER_TOKEN>` flow remains supported during migration. Browser/device login is for the zero-checkout local CLI and creates the same registry user/agent model used by OAuth.
+ChatGPT MCP should connect to the plain `/mcp` endpoint. Compatible clients discover OAuth 2.1 automatically, then use authorization-code login with PKCE S256. OAuth access tokens are audience-bound to `/mcp`; `offline_access` issues rotating refresh tokens. Dynamic client registration and protected-resource/authorization-server discovery are exposed for compatible MCP clients. The legacy `/mcp?key=<USER_TOKEN>` flow remains available only during migration. Browser/device login is for the zero-checkout local CLI and creates the same registry user/agent model used by OAuth.
 
 ## MCP tools
 
@@ -143,6 +143,7 @@ npm run admin -- create-agent "Work Laptop" work-laptop
 npm run admin -- grant <userId> <agentId> read,write,terminal,process
 npm run admin -- revoke <userId> <agentId>
 npm run admin -- enable-user <userId> false
+$env:CHAT_RELAY_PASSWORD="choose-a-password"; npm run admin -- set-login <userId> <login>
 npm run admin -- enable-agent <agentId> false
 npm run admin -- rotate-user <userId>
 npm run admin -- rotate-agent <agentId>
@@ -150,7 +151,7 @@ npm run admin -- rotate-agent <agentId>
 
 Create and rotate commands return the new raw token once. Store it on the corresponding client/agent; the registry retains only its hash.
 
-The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` secrets into an owner user and the default agent so an existing installation can upgrade without changing its current ChatGPT URL or local agent token.
+The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` secrets into an owner user and the default agent. To move that existing owner to OAuth without creating a duplicate account, set `CHAT_RELAY_PASSWORD` in the administrator shell and run `npm run admin -- set-login owner <login>`. This attaches login credentials to the same owner user, preserving its grants and agent ownership.
 
 ## Worker routes
 
@@ -169,7 +170,8 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 | `GET /auth/me` | user Bearer token | Current user and permitted agents |
 | `POST /auth/session/revoke` | user Bearer token | Revoke only the current user session |
 | `POST /auth/logout` | user Bearer token | Revoke local session and owning agent credential |
-| `POST /mcp?key=<user token>` | user token | Streamable HTTP MCP |
+| `POST /mcp` | OAuth Bearer token | Streamable HTTP MCP (normal path) |
+| `POST /mcp?key=<user token>` | legacy user token | Transitional Streamable HTTP MCP compatibility |
 | `GET /agent?agentId=<id>` | agent Bearer token | Local agent WebSocket |
 | `GET /status?agentId=<id>` | user token | Agent online status |
 | `POST /relay?agentId=<id>` | user token | Direct JSON relay with scope checks |

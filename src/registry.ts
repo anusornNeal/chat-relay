@@ -178,6 +178,7 @@ export class Registry extends DurableObject {
       case "/grants/upsert": return this.upsertGrant(body);
       case "/grants/delete": return this.deleteGrant(body);
       case "/users/set-enabled": return this.setUserEnabled(body);
+      case "/users/set-login": return this.setUserLogin(body);
       case "/agents/set-enabled": return this.setAgentEnabled(body);
       case "/users/rotate": return this.rotateUser(body);
       case "/agents/rotate": return this.rotateAgent(body);
@@ -331,6 +332,44 @@ export class Registry extends DurableObject {
     return json({ ok: true, user: { id: user.id, name: user.name, enabled: user.enabled } });
   }
 
+  private async setUserLogin(body: any): Promise<Response> {
+    const id = String(body?.userId ?? "");
+    const password = String(body?.password ?? "");
+    if (!id || password.length < 8 || password.length > 128) {
+      return json({ error: "invalid_credentials" }, 400);
+    }
+
+    let login: string;
+    try { login = normalizeLogin(String(body?.login ?? "")); }
+    catch { return json({ error: "invalid_login" }, 400); }
+
+    const user = await this.ctx.storage.get<UserRecord>(key.user(id));
+    if (!user) return json({ error: "user_not_found" }, 404);
+
+    const existingUserId = await this.ctx.storage.get<string>(key.userLogin(login));
+    if (existingUserId && existingUserId !== user.id) {
+      return json({ error: "login_exists" }, 409);
+    }
+
+    const previousLogin = user.login;
+    const salt = randomSalt();
+    user.login = login;
+    user.passwordSalt = salt;
+    user.passwordHash = await derivePasswordHash(password, salt, PASSWORD_ITERATIONS);
+    user.passwordIterations = PASSWORD_ITERATIONS;
+
+    if (previousLogin && previousLogin !== login) {
+      const previousOwner = await this.ctx.storage.get<string>(key.userLogin(previousLogin));
+      if (previousOwner === user.id) await this.ctx.storage.delete(key.userLogin(previousLogin));
+    }
+
+    await this.ctx.storage.put({
+      [key.user(user.id)]: user,
+      [key.userLogin(login)]: user.id,
+    });
+    await this.ctx.storage.delete(key.loginAttempt(login));
+    return json({ ok: true, user: publicUser(user) });
+  }
   private async setAgentEnabled(body: any): Promise<Response> {
     const id = String(body?.agentId ?? "");
     const agent = await this.ctx.storage.get<AgentRecord>(key.agent(id));

@@ -713,6 +713,14 @@ async function adminHandler(request: Request, env: Env): Promise<Response> {
     return new Response(response.body, { status: response.status, headers: response.headers });
   }
 
+  if (path === "/admin/users/login" && request.method === "POST") {
+    const userId = String(body?.userId ?? "");
+    const login = String(body?.login ?? "");
+    const password = String(body?.password ?? "");
+    if (!userId || !login || !password) return error(400, "credentials_required");
+    const response = await registryCall(env, "/users/set-login", { userId, login, password });
+    return new Response(response.body, { status: response.status, headers: response.headers });
+  }
   if (path === "/admin/users/enabled" && request.method === "POST") {
     const response = await registryCall(env, "/users/set-enabled", {
       userId: String(body?.userId ?? ""),

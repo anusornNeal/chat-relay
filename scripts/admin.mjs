@@ -50,6 +50,7 @@ const usage = () => {
     "  node scripts/admin.mjs grant <userId> <agentId> [scopesCsv]",
     "  node scripts/admin.mjs revoke <userId> <agentId>",
     "  node scripts/admin.mjs enable-user <userId> <true|false>",
+    "  CHAT_RELAY_PASSWORD=... node scripts/admin.mjs set-login <userId> <login>",
     "  node scripts/admin.mjs enable-agent <agentId> <true|false>",
     "  node scripts/admin.mjs rotate-user <userId>",
     "  node scripts/admin.mjs rotate-agent <agentId>",
@@ -88,6 +89,19 @@ switch (command) {
     if (!args[0] || !args[1]) { usage(); process.exit(1); }
     result = await call("/admin/grants/delete", "POST", { userId: args[0], agentId: args[1] });
     break;
+  case "set-login": {
+    if (!args[0] || !args[1]) { usage(); process.exit(1); }
+    const password = process.env.CHAT_RELAY_PASSWORD;
+    if (!password) {
+      throw new Error("CHAT_RELAY_PASSWORD is required for set-login");
+    }
+    result = await call("/admin/users/login", "POST", {
+      userId: args[0],
+      login: args[1],
+      password,
+    });
+    break;
+  }
   case "enable-user":
     if (!args[0] || args[1] === undefined) { usage(); process.exit(1); }
     result = await call("/admin/users/enabled", "POST", { userId: args[0], enabled: args[1] === "true" });
