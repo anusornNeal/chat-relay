@@ -27,6 +27,7 @@ export type AgentRecord = {
   enabled: boolean;
   createdAt: string;
   lastSeenAt?: string;
+  retiredAt?: string;
 };
 export type GrantRecord = {
   userId: string;
@@ -191,6 +192,8 @@ export class Registry extends DurableObject {
       case "/users/set-enabled": return this.setUserEnabled(body);
       case "/users/set-login": return this.setUserLogin(body);
       case "/agents/set-enabled": return this.setAgentEnabled(body);
+      case "/agents/rename": return this.renameAgent(body);
+      case "/agents/retire": return this.retireAgent(body);
       case "/users/rotate": return this.rotateUser(body);
       case "/agents/rotate": return this.rotateAgent(body);
       case "/device/start": return this.startDevice(body);
@@ -213,6 +216,7 @@ export class Registry extends DurableObject {
       case "/session/logout-agent": return this.logoutAgent(body);
       case "/auth/user": return this.authUser(body);
       case "/auth/agent": return this.authAgent(body);
+      case "/agent-access": return this.agentAccess(body);
       case "/resolve": return this.resolveAgent(body);
       case "/list-agents": return this.listAgents(body);
       case "/ops/cleanup": return json({ ok: true, ...(await this.cleanupExpiredAuthArtifacts(body?.limit)) });
@@ -305,12 +309,16 @@ export class Registry extends DurableObject {
     try { id = normalizeAgentId(String(body.id)); }
     catch { return json({ error: "invalid_agent_id" }, 400); }
     if (await this.ctx.storage.get(key.agent(id))) return json({ error: "agent_exists" }, 409);
+    const ownerUserId = body?.ownerUserId ? String(body.ownerUserId) : undefined;
+    if (ownerUserId && !(await this.ctx.storage.get<UserRecord>(key.user(ownerUserId)))) {
+      return json({ error: "owner_not_found" }, 404);
+    }
 
     const agent: AgentRecord = {
       id,
       name: String(body.name).slice(0, 120),
       tokenHash: String(body.tokenHash),
-      ownerUserId: body?.ownerUserId ? String(body.ownerUserId) : undefined,
+      ownerUserId,
       enabled: true,
       createdAt: new Date().toISOString(),
     };
@@ -318,7 +326,16 @@ export class Registry extends DurableObject {
       [key.agent(id)]: agent,
       [key.agentToken(agent.tokenHash)]: id,
     });
-    return json({ ok: true, agent: { id: agent.id, name: agent.name, enabled: agent.enabled } }, 201);
+    return json({
+      ok: true,
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        ownerUserId: agent.ownerUserId ?? null,
+        enabled: agent.enabled,
+        retiredAt: agent.retiredAt ?? null,
+      },
+    }, 201);
   }
 
   private async upsertGrant(body: any): Promise<Response> {
@@ -400,11 +417,78 @@ export class Registry extends DurableObject {
     const id = String(body?.agentId ?? "");
     const agent = await this.ctx.storage.get<AgentRecord>(key.agent(id));
     if (!agent) return json({ error: "agent_not_found" }, 404);
-    agent.enabled = Boolean(body.enabled);
+    const enabled = Boolean(body.enabled);
+    if (enabled && agent.retiredAt) {
+      return json({
+        error: "reauthorization_required",
+        agent: { id: agent.id, name: agent.name, retiredAt: agent.retiredAt },
+      }, 409);
+    }
+    agent.enabled = enabled;
     await this.ctx.storage.put(key.agent(id), agent);
-    return json({ ok: true, agent: { id: agent.id, name: agent.name, enabled: agent.enabled } });
+    return json({
+      ok: true,
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        ownerUserId: agent.ownerUserId ?? null,
+        enabled: agent.enabled,
+        retiredAt: agent.retiredAt ?? null,
+      },
+    });
   }
 
+  private async renameAgent(body: any): Promise<Response> {
+    const id = String(body?.agentId ?? "");
+    const name = String(body?.name ?? "").trim();
+    if (!id || !name || name.length > 120) return json({ error: "invalid_agent_name" }, 400);
+    const agent = await this.ctx.storage.get<AgentRecord>(key.agent(id));
+    if (!agent) return json({ error: "agent_not_found" }, 404);
+    const expectedOwnerUserId = body?.expectedOwnerUserId ? String(body.expectedOwnerUserId) : "";
+    if (expectedOwnerUserId && agent.ownerUserId !== expectedOwnerUserId) {
+      return json({ error: "owner_mismatch" }, 409);
+    }
+    agent.name = name;
+    await this.ctx.storage.put(key.agent(id), agent);
+    return json({
+      ok: true,
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        ownerUserId: agent.ownerUserId ?? null,
+        enabled: agent.enabled,
+        retiredAt: agent.retiredAt ?? null,
+      },
+    });
+  }
+
+  private async retireAgent(body: any): Promise<Response> {
+    const id = String(body?.agentId ?? "");
+    if (!id) return json({ error: "agent_id_required" }, 400);
+    const agent = await this.ctx.storage.get<AgentRecord>(key.agent(id));
+    if (!agent) return json({ error: "agent_not_found" }, 404);
+    const expectedOwnerUserId = body?.expectedOwnerUserId ? String(body.expectedOwnerUserId) : "";
+    if (expectedOwnerUserId && agent.ownerUserId !== expectedOwnerUserId) {
+      return json({ error: "owner_mismatch" }, 409);
+    }
+
+    await this.ctx.storage.delete(key.agentToken(agent.tokenHash));
+    agent.tokenHash = await hashToken(newToken("retired"));
+    agent.enabled = false;
+    agent.retiredAt = agent.retiredAt ?? new Date().toISOString();
+    await this.ctx.storage.put(key.agent(id), agent);
+    return json({
+      ok: true,
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        ownerUserId: agent.ownerUserId ?? null,
+        enabled: false,
+        retiredAt: agent.retiredAt,
+        reauthorizationRequired: true,
+      },
+    });
+  }
   private async rotateUser(body: any): Promise<Response> {
     const id = String(body?.userId ?? "");
     const tokenHash = String(body?.tokenHash ?? "");
@@ -428,6 +512,8 @@ export class Registry extends DurableObject {
     if (!agent) return json({ error: "agent_not_found" }, 404);
     await this.ctx.storage.delete(key.agentToken(agent.tokenHash));
     agent.tokenHash = tokenHash;
+    agent.enabled = true;
+    delete agent.retiredAt;
     await this.ctx.storage.put({
       [key.agent(id)]: agent,
       [key.agentToken(tokenHash)]: id,
@@ -677,9 +763,9 @@ export class Registry extends DurableObject {
 
     if (agent) {
       await this.ctx.storage.delete(key.agentToken(agent.tokenHash));
-      agent.name = device.agentName;
       agent.tokenHash = agentTokenHash;
       agent.enabled = true;
+      delete agent.retiredAt;
       await this.ctx.storage.put({
         [key.agent(agent.id)]: agent,
         [key.agentToken(agent.tokenHash)]: agent.id,
@@ -1077,6 +1163,7 @@ export class Registry extends DurableObject {
     await this.ctx.storage.delete(key.agentToken(agent.tokenHash));
     agent.tokenHash = await hashToken(newToken("revoked"));
     agent.enabled = false;
+    agent.retiredAt = new Date().toISOString();
     await this.ctx.storage.put(key.agent(agent.id), agent);
     return json({ ok: true });
   }
@@ -1128,6 +1215,33 @@ export class Registry extends DurableObject {
     agent.lastSeenAt = new Date().toISOString();
     await this.ctx.storage.put(key.agent(agent.id), agent);
     return json({ ok: true, agent: { id: agent.id, name: agent.name } });
+  }
+
+  private async agentAccess(body: any): Promise<Response> {
+    const userId = String(body?.userId ?? "");
+    const agentId = String(body?.agentId ?? "");
+    if (!userId || !agentId) return json({ error: "agent_identity_required" }, 400);
+
+    const [grant, agent] = await Promise.all([
+      this.ctx.storage.get<GrantRecord>(key.grant(userId, agentId)),
+      this.ctx.storage.get<AgentRecord>(key.agent(agentId)),
+    ]);
+    if (!grant || !agent) return json({ error: "permission_denied" }, 403);
+
+    return json({
+      ok: true,
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        ownerUserId: agent.ownerUserId ?? null,
+        enabled: agent.enabled,
+        retiredAt: agent.retiredAt ?? null,
+        lastSeenAt: agent.lastSeenAt ?? null,
+      },
+      scopes: grant.scopes,
+      authorized: agent.enabled && !agent.retiredAt,
+      reauthorizationRequired: Boolean(agent.retiredAt),
+    });
   }
 
   private async listAgents(body: any): Promise<Response> {

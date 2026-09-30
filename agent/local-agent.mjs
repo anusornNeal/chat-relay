@@ -17,6 +17,7 @@ const files = new FileManager(process.env.ALLOWED_ROOTS);
 const processes = new ProcessManager();
 const desktop = new DesktopManager({ enabled: desktopEnabled });
 const recentCalls = [];
+let reauthorizationRequired = false;
 
 if (!relayUrl || !agentToken) {
   console.error("RELAY_URL and AGENT_TOKEN are required");
@@ -120,7 +121,16 @@ async function handlePayload(payload) {
   }
 }
 
+function requireReauthorization() {
+  if (reauthorizationRequired) return;
+  reauthorizationRequired = true;
+  process.exitCode = 2;
+  console.error("Agent credential was revoked or rejected.");
+  console.error('Recovery: run "chat-relay login --force", then "chat-relay remote".');
+}
+
 function connect() {
+  if (reauthorizationRequired) return;
   console.log(`Connecting to ${wsUrl}`);
   console.log(`Terminal access: ${terminalEnabled ? "enabled" : "disabled"}`);
   console.log("Desktop access: " + (desktopEnabled ? "enabled" : "disabled"));
@@ -135,6 +145,12 @@ function connect() {
     try {
       message = JSON.parse(raw.toString());
     } catch {
+      return;
+    }
+
+    if (message?.control === "credential_revoked") {
+      requireReauthorization();
+      try { socket.close(4001, "credential_revoked"); } catch {}
       return;
     }
 
@@ -170,13 +186,26 @@ function connect() {
     }
   });
 
+  socket.on("unexpected-response", (_request, response) => {
+    if (response.statusCode === 401 || response.statusCode === 403) {
+      response.resume();
+      requireReauthorization();
+      socket.terminate();
+    }
+  });
+
   socket.on("close", (code, reason) => {
-    console.log(`Agent disconnected (${code}) ${reason.toString()}`);
-    setTimeout(connect, reconnectMs);
+    const reasonText = reason.toString();
+    console.log("Agent disconnected (" + code + ") " + reasonText);
+    if (code === 4001 || reasonText === "credential_revoked") {
+      requireReauthorization();
+      return;
+    }
+    if (!reauthorizationRequired) setTimeout(connect, reconnectMs);
   });
 
   socket.on("error", (error) => {
-    console.error("WebSocket error:", error.message);
+    if (!reauthorizationRequired) console.error("WebSocket error:", error.message);
   });
 }
 

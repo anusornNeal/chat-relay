@@ -75,6 +75,14 @@ chat-relay remote --no-desktop
 ```
 
 The published package locates its bundled local agent relative to the package itself, so commands work from any working directory. Existing repository users can still run `npm start`; legacy `.dev.vars` credentials are migrated once into the user-level config.
+## Device lifecycle and recovery
+
+- `chat-relay status` shows the signed-in account, readable device name/id, relay URL, access state, online/offline state, last-seen time, and granted scopes without printing secrets.
+- One account can own multiple PCs. Each PC keeps its own agent id and credential, so devices remain independently visible and revocable.
+- Admins can rename a device from the dashboard without changing its agent id or grants.
+- Retiring a device invalidates its current machine credential and disconnects the live agent. That credential cannot reconnect until the device is authorized again.
+- Recovery after retirement does not require copying tokens: run `chat-relay login --force`, complete browser authorization, then run `chat-relay remote`.
+- A different account cannot reclaim another owner's active or retired agent id; a colliding login receives a separate device identity instead.
 
 ## Dashboard administrator sessions
 

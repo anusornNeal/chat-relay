@@ -88,6 +88,7 @@ export class Relay extends DurableObject {
     switch (new URL(request.url).pathname) {
       case "/agent": return this.connectAgent(request);
       case "/status": return Response.json({ online: this.agent !== null });
+      case "/disconnect": return this.disconnectAgent();
       case "/relay": return this.relay(request);
       default: return error(404, "not_found");
     }
@@ -109,6 +110,26 @@ export class Relay extends DurableObject {
     this.ctx.acceptWebSocket(server);
     this.agent = server;
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private disconnectAgent(): Response {
+    const sockets = [...new Set([
+      ...(this.agent ? [this.agent] : []),
+      ...this.ctx.getWebSockets(),
+    ])];
+    this.agent = null;
+    for (const socket of sockets) {
+      try {
+        socket.send(JSON.stringify({ control: "credential_revoked" }));
+        setTimeout(() => {
+          try { socket.close(4001, "credential_revoked"); } catch {}
+        }, 250);
+      } catch {
+        try { socket.close(4001, "credential_revoked"); } catch {}
+      }
+    }
+    this.failPending(503, "agent_disconnected");
+    return Response.json({ ok: true, disconnected: sockets.length });
   }
 
   webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
@@ -1018,15 +1039,43 @@ export default {
       if (!user) return error(401, "unauthorized");
 
       const requestedAgentId = url.searchParams.get("agentId") || undefined;
-      const resolved = await resolveAgent(env, user.id, "read", requestedAgentId);
-      if (!resolved.ok) return resolved.response;
+      let agentId = requestedAgentId;
+      if (!agentId) {
+        const resolved = await resolveAgent(env, user.id, "read");
+        if (!resolved.ok) return resolved.response;
+        agentId = resolved.agentId;
+      }
 
-      const stub = env.RELAY.get(env.RELAY.idFromName(resolved.agentId));
-      const status = await stub.fetch("https://relay.internal/status");
-      const data = await status.json<any>();
-      return Response.json({ agentId: resolved.agentId, ...data });
+      const access = await registryJson<any>(env, "/agent-access", {
+        userId: user.id,
+        agentId,
+      });
+      if (!access.response.ok) {
+        return Response.json(access.data, { status: access.response.status });
+      }
+
+      let online = false;
+      if (access.data.authorized) {
+        const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
+        const relayStatus = await stub.fetch("https://relay.internal/status")
+          .then((response) => response.json<any>())
+          .catch(() => ({ online: false }));
+        online = Boolean(relayStatus.online);
+      }
+
+      return Response.json({
+        agentId,
+        agentName: access.data.agent?.name ?? agentId,
+        ownerUserId: access.data.agent?.ownerUserId ?? null,
+        enabled: access.data.agent?.enabled === true,
+        retiredAt: access.data.agent?.retiredAt ?? null,
+        lastSeenAt: access.data.agent?.lastSeenAt ?? null,
+        scopes: access.data.scopes ?? [],
+        authorized: access.data.authorized === true,
+        reauthorizationRequired: access.data.reauthorizationRequired === true,
+        online,
+      });
     }
-
     if (path === "/relay") {
       if (request.method !== "POST") return error(405, "method_not_allowed");
       if (request.headers.get("content-type")?.split(";")[0].trim() !== "application/json") {

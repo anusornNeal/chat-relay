@@ -1,4 +1,4 @@
-import { clearConfig, configPath, loadConfig } from "./config.mjs";
+import { clearConfig, configPath, loadConfig, saveConfig } from "./config.mjs";
 import { login, requestJson } from "./device-login.mjs";
 import { remote, validateConfig } from "./remote.mjs";
 
@@ -55,39 +55,90 @@ async function status() {
   const config = loadConfig();
   if (!config) {
     console.log("Chat Relay: not signed in");
-    console.log(`Config: ${configPath()}`);
+    console.log("Access:  sign-in required");
+    console.log('Recovery: run "chat-relay login", then "chat-relay remote".');
+    console.log("Config:  " + configPath());
     return 1;
   }
 
-  const me = await requestJson(`${config.relayUrl}/auth/me`, {
-    headers: { authorization: `Bearer ${config.userToken}` },
-  }).catch((error) => ({ response: { ok: false, status: 0 }, data: { error: error.message } }));
+  const me = await requestJson(config.relayUrl + "/auth/me", {
+    headers: { authorization: "Bearer " + config.userToken },
+  }).catch((error) => ({
+    response: { ok: false, status: 0 },
+    data: { error: error.message },
+  }));
 
   if (!me.response.ok) {
-    console.log("Chat Relay: login expired or unavailable");
-    console.log(`Relay:  ${config.relayUrl}`);
-    console.log(`Agent:  ${config.agentName} (${config.agentId})`);
-    console.log(`Config: ${configPath()}`);
+    console.log("Chat Relay");
+    console.log("----------");
+    console.log("Relay:   " + config.relayUrl);
+    console.log("Device:  " + config.agentName + " (" + config.agentId + ")");
+    if (me.response.status === 401 || me.response.status === 403) {
+      console.log("Access:  sign-in expired");
+      console.log('Recovery: run "chat-relay login --force", then "chat-relay remote".');
+    } else {
+      console.log("Access:  relay unavailable");
+      console.log("Recovery: retry status when the relay is reachable.");
+    }
+    console.log("Config:  " + configPath());
     return 1;
   }
 
   const agentStatus = await requestJson(
-    `${config.relayUrl}/status?agentId=${encodeURIComponent(config.agentId)}`,
-    { headers: { authorization: `Bearer ${config.userToken}` } },
-  ).catch(() => ({ response: { ok: false }, data: { online: false } }));
+    config.relayUrl + "/status?agentId=" + encodeURIComponent(config.agentId),
+    { headers: { authorization: "Bearer " + config.userToken } },
+  ).catch((error) => ({
+    response: { ok: false, status: 0 },
+    data: { error: error.message, online: false },
+  }));
+
+  const serverAgentName = agentStatus.response.ok && agentStatus.data.agentName
+    ? String(agentStatus.data.agentName)
+    : config.agentName;
+  if (agentStatus.response.ok && serverAgentName !== config.agentName) {
+    saveConfig({ ...config, agentName: serverAgentName });
+  }
+
+  const reauthorizationRequired = agentStatus.response.ok
+    ? agentStatus.data.reauthorizationRequired === true || agentStatus.data.authorized === false
+    : agentStatus.response.status === 401 || agentStatus.response.status === 403;
 
   console.log("Chat Relay");
   console.log("----------");
-  console.log(`Account: ${me.data.user?.name || me.data.user?.login || "signed in"}`);
-  console.log(`Login:   ${me.data.user?.login || "-"}`);
-  console.log(`Agent:   ${config.agentName} (${config.agentId})`);
-  console.log(`Remote:  ${agentStatus.response.ok && agentStatus.data.online ? "connected" : "offline"}`);
-  console.log(`Files:   ${config.allowedRoots}`);
+  console.log(
+    "Account: " +
+    (me.data.user?.name || me.data.user?.login || "signed in") +
+    " (" + (me.data.user?.id || "unknown") + ")",
+  );
+  console.log("Login:   " + (me.data.user?.login || "-"));
+  console.log("Device:  " + serverAgentName + " (" + config.agentId + ")");
+  console.log("Relay:   " + config.relayUrl);
+  console.log("Access:  " + (reauthorizationRequired ? "re-authorization required" : "authorized"));
+  console.log(
+    "Remote:  " +
+    (agentStatus.response.ok && agentStatus.data.online ? "connected" : "offline"),
+  );
+  if (agentStatus.response.ok) {
+    console.log("LastSeen: " + (agentStatus.data.lastSeenAt || "-"));
+    console.log(
+      "Scopes:   " +
+      (Array.isArray(agentStatus.data.scopes) ? agentStatus.data.scopes.join(",") : "-"),
+    );
+  }
+  console.log("Files:   " + config.allowedRoots);
   console.log("Desktop: " + (config.desktopEnabled === true ? "enabled" : "disabled"));
-  console.log(`Config:  ${configPath()}`);
+  console.log("Config:  " + configPath());
+
+  if (reauthorizationRequired) {
+    console.log('Recovery: run "chat-relay login --force", then "chat-relay remote".');
+    return 1;
+  }
+  if (!agentStatus.response.ok && agentStatus.response.status === 0) {
+    console.log("Recovery: retry status when the relay is reachable.");
+    return 1;
+  }
   return 0;
 }
-
 async function logout() {
   const config = loadConfig();
   if (!config) {

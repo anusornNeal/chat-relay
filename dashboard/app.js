@@ -173,26 +173,74 @@ async function agents() {
     const query = encodeURIComponent($("aq").value);
     const data = await api("/admin/api/agents?limit=100" + (query ? "&q=" + query : ""));
     $("ab").innerHTML = data.items?.length
-      ? data.items.map((agent) =>
-          '<tr><td><b>' + esc(agent.name) + "</b><br>" + esc(agent.id) +
-          '</td><td class="' + (agent.online ? "ok" : "bad") + '">' + (agent.online ? "Online" : "Offline") +
-          "</td><td>" + esc(agent.ownerUserId || "-") +
-          "</td><td>" + esc(agent.lastSeenAt || "-") +
-          '</td><td><button data-agent-usage="' + esc(agent.id) + '">Usage</button></td></tr>'
-        ).join("")
-      : '<tr><td colspan="5">No agents</td></tr>';
+      ? data.items.map((agent) => {
+          const owner = agent.owner
+            ? esc(agent.owner.name || agent.owner.login || agent.owner.id) + "<br>" + esc(agent.owner.id)
+            : esc(agent.ownerUserId || "-");
+          const grants = (agent.grants || []).length
+            ? (agent.grants || []).map((grant) =>
+                esc(grant.userId) + ": " + esc((grant.scopes || []).join(","))
+              ).join("<br>")
+            : "-";
+          const lifecycle = agent.lifecycle || (agent.enabled ? "active" : "disabled");
+          const stateLabel = lifecycle === "retired"
+            ? "Retired - re-authorize on device"
+            : lifecycle === "active"
+              ? (agent.online ? "Online" : "Offline")
+              : "Disabled";
+          const stateClass = lifecycle === "active" && agent.online ? "ok" : "bad";
+          const actions =
+            '<button data-agent-usage="' + esc(agent.id) + '">Usage</button> ' +
+            '<button data-agent-rename="' + esc(agent.id) + '" data-agent-name="' +
+              esc(agent.name) + '" data-agent-owner="' + esc(agent.ownerUserId || "") +
+              '">Rename</button> ' +
+            (lifecycle === "retired"
+              ? '<span>Run login --force on this device</span>'
+              : '<button data-agent-retire="' + esc(agent.id) + '" data-agent-owner="' +
+                esc(agent.ownerUserId || "") + '">Retire</button>');
+          return '<tr><td><b>' + esc(agent.name) + "</b><br>" + esc(agent.id) +
+            '</td><td class="' + stateClass + '">' + esc(stateLabel) +
+            "</td><td>" + owner +
+            "</td><td>" + esc(agent.lastSeenAt || "-") +
+            "</td><td>" + grants +
+            "</td><td>" + actions + "</td></tr>";
+        }).join("")
+      : '<tr><td colspan="6">No agents</td></tr>';
+
     document.querySelectorAll("[data-agent-usage]").forEach((button) => {
       button.onclick = () => {
         $("aid").value = button.dataset.agentUsage;
         show("usage");
       };
     });
+
+    document.querySelectorAll("[data-agent-rename]").forEach((button) => {
+      button.onclick = async () => {
+        const nextName = prompt("Device name", button.dataset.agentName || "");
+        if (!nextName || !nextName.trim() || nextName.trim() === button.dataset.agentName) return;
+        await mutate("/admin/api/agents/rename", {
+          agentId: button.dataset.agentRename,
+          name: nextName.trim(),
+          ...(button.dataset.agentOwner ? { expectedOwnerUserId: button.dataset.agentOwner } : {}),
+        });
+      };
+    });
+
+    document.querySelectorAll("[data-agent-retire]").forEach((button) => {
+      button.onclick = async () => {
+        if (!confirm("Retire this device? Its current credential will stop reconnecting until the device is authorized again.")) return;
+        await mutate("/admin/api/agents/retire", {
+          agentId: button.dataset.agentRetire,
+          ...(button.dataset.agentOwner ? { expectedOwnerUserId: button.dataset.agentOwner } : {}),
+        });
+      };
+    });
+
     message("");
   } catch (error) {
     if (error.message !== "unauthorized") message(error.message, true);
   }
 }
-
 async function usage() {
   message("Loading usage...");
   try {

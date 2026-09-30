@@ -188,16 +188,34 @@ async function usageQuery(env: AdminEnv, source: URL) {
   return usageStub(env).fetch("https://usage.internal/query" + (query.size ? "?" + query : ""));
 }
 
-async function onlineAgents(env: AdminEnv, agents: any[]) {
+async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], grants: any[] = []) {
+  const userById = new Map(users.map((user) => [user.id, user]));
+  const grantsByAgent = new Map<string, any[]>();
+  for (const grant of grants) {
+    const current = grantsByAgent.get(grant.agentId) ?? [];
+    current.push({ userId: grant.userId, scopes: grant.scopes });
+    grantsByAgent.set(grant.agentId, current);
+  }
+
   return Promise.all(agents.map(async (agent) => {
-    const status = await env.RELAY.get(env.RELAY.idFromName(agent.id))
-      .fetch("https://relay.internal/status")
-      .then((response) => response.json<any>())
-      .catch(() => ({ online: false }));
-    return { ...agent, online: Boolean(status.online) };
+    const status = agent.enabled && !agent.retiredAt
+      ? await env.RELAY.get(env.RELAY.idFromName(agent.id))
+        .fetch("https://relay.internal/status")
+        .then((response) => response.json<any>())
+        .catch(() => ({ online: false }))
+      : { online: false };
+    const owner = agent.ownerUserId ? userById.get(agent.ownerUserId) : null;
+    return {
+      ...agent,
+      retiredAt: agent.retiredAt ?? null,
+      online: Boolean(status.online),
+      lifecycle: agent.retiredAt ? "retired" : agent.enabled ? "active" : "disabled",
+      reauthorizationRequired: Boolean(agent.retiredAt),
+      owner: owner ? { id: owner.id, name: owner.name, login: owner.login ?? null } : null,
+      grants: grantsByAgent.get(agent.id) ?? [],
+    };
   }));
 }
-
 export async function handleAdmin(request: Request, env: AdminEnv): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -340,7 +358,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
   if (path === "/admin/api/overview" && request.method === "GET") {
     const state = await registryState(env);
-    const agents = await onlineAgents(env, state.agents ?? []);
+    const agents = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
     const usageResponse = await usageQuery(env, url);
     const usage = await usageResponse.json<any>();
     return Response.json({
@@ -376,13 +394,13 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const state = await registryState(env);
     const baseAgent = (state.agents ?? []).find((item: any) => item.id === id);
     if (!baseAgent) return error(404, "agent_not_found");
-    const [agent] = await onlineAgents(env, [baseAgent]);
+    const [agent] = await onlineAgents(env, [baseAgent], state.users ?? [], state.grants ?? []);
     return Response.json({ agent, grants: (state.grants ?? []).filter((grant: any) => grant.agentId === id) });
   }
 
   if (path === "/admin/api/agents" && request.method === "GET") {
     const state = await registryState(env);
-    let items = await onlineAgents(env, state.agents ?? []);
+    let items = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
     const q = String(url.searchParams.get("q") || "").toLowerCase();
     const online = url.searchParams.get("online");
     items = items.filter((agent: any) =>
@@ -413,6 +431,53 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     return new Response(response.body, { status: response.status, headers: response.headers });
   }
 
+  if (path === "/admin/api/agents/rename" && request.method === "POST") {
+    const agentId = String(body?.agentId ?? "");
+    const name = String(body?.name ?? "").trim();
+    if (!agentId) return error(400, "agent_id_required");
+    if (!name || name.length > 120) return error(400, "invalid_agent_name");
+    return auditedRegistryMutation(
+      env,
+      actor,
+      "agent.rename",
+      { type: "agent", id: agentId },
+      "/agents/rename",
+      {
+        agentId,
+        name,
+        ...(body?.expectedOwnerUserId ? { expectedOwnerUserId: String(body.expectedOwnerUserId) } : {}),
+      },
+      { nameLength: name.length },
+    );
+  }
+
+  if (path === "/admin/api/agents/retire" && request.method === "POST") {
+    const agentId = String(body?.agentId ?? "");
+    if (!agentId) return error(400, "agent_id_required");
+    const response = await registryCall(env, "/agents/retire", {
+      agentId,
+      ...(body?.expectedOwnerUserId ? { expectedOwnerUserId: String(body.expectedOwnerUserId) } : {}),
+    });
+    const data = await response.json<any>().catch(() => ({}));
+    await recordAudit(
+      env,
+      actor,
+      "agent.retire",
+      { type: "agent", id: agentId },
+      response.ok ? "success" : "failure",
+      { status: response.status },
+    );
+    if (response.ok) {
+      const disconnectResponse = await env.RELAY.get(env.RELAY.idFromName(agentId))
+        .fetch("https://relay.internal/disconnect")
+        .catch(() => null);
+      if (disconnectResponse) {
+        const disconnect = await disconnectResponse.json<any>().catch(() => null);
+        if (disconnect) data.disconnect = disconnect;
+      }
+    }
+    return Response.json(data, { status: response.status });
+  }
   if (path === "/admin/api/users/admin" && request.method === "POST") {
     const userId = String(body?.userId ?? "");
     if (!userId) return error(400, "user_id_required");
@@ -462,7 +527,12 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     try { id = body?.id ? normalizeAgentId(String(body.id)) : generatedId(name, "agent"); }
     catch { return error(400, "invalid_agent_id"); }
     const token = newToken("agt");
-    const response = await registryCall(env, "/agents/create", { id, name, tokenHash: await hashToken(token) });
+    const response = await registryCall(env, "/agents/create", {
+      id,
+      name,
+      tokenHash: await hashToken(token),
+      ...(body?.ownerUserId ? { ownerUserId: String(body.ownerUserId) } : {}),
+    });
     const data = await response.json<any>();
     await recordAudit(env, actor, "agent.create", { type: "agent", id }, response.ok ? "success" : "failure", { status: response.status });
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });

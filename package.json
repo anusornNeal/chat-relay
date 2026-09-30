@@ -42,7 +42,8 @@
     "test:dashboard": "node test/dashboard-smoke.mjs",
     "test:quota": "node test/quota-smoke.mjs",
     "test:ops": "node test/ops-smoke.mjs",
-    "test:desktop": "node test/mcp-desktop-smoke.mjs"
+    "test:desktop": "node test/mcp-desktop-smoke.mjs",
+    "test:device-management": "node test/device-management-smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0"
