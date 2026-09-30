@@ -37,7 +37,8 @@
     "prepublishOnly": "npm run verify:publish",
     "test:oauth": "node test/oauth-smoke.mjs",
     "test:usage": "node test/usage-smoke.mjs",
-    "test:admin-api": "node test/admin-api-smoke.mjs"
+    "test:admin-api": "node test/admin-api-smoke.mjs",
+    "test:admin-auth": "node test/admin-auth-smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0"

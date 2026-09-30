@@ -15,6 +15,7 @@ export type UserRecord = {
   passwordSalt?: string;
   passwordHash?: string;
   passwordIterations?: number;
+  admin?: boolean;
   enabled: boolean;
   createdAt: string;
 };
@@ -37,6 +38,13 @@ export type GrantRecord = {
 type UserSessionRecord = {
   userId: string;
   tokenHash: string;
+  createdAt: string;
+  expiresAt: string;
+};
+
+type AdminSessionRecord = {
+  userId: string;
+  csrfHash: string;
   createdAt: string;
   expiresAt: string;
 };
@@ -88,6 +96,7 @@ type OAuthTokenRecord = {
 };
 
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 5;
 const DEVICE_START_WINDOW_MS = 10 * 60 * 1000;
@@ -104,6 +113,7 @@ const key = {
   userLogin: (login: string) => `ul:${login}`,
   userToken: (hash: string) => `ut:${hash}`,
   userSession: (hash: string) => `us:${hash}`,
+  adminSession: (hash: string) => `admin-session:${hash}`,
   agent: (id: string) => `agent:${id}`,
   agentToken: (hash: string) => `at:${hash}`,
   grant: (userId: string, agentId: string) => `grant:${userId}:${agentId}`,
@@ -157,6 +167,7 @@ function publicUser(user: UserRecord) {
     name: user.name,
     login: user.login ?? null,
     enabled: user.enabled,
+    admin: user.admin === true,
     createdAt: user.createdAt,
   };
 }
@@ -192,6 +203,11 @@ export class Registry extends DurableObject {
       case "/oauth/code/exchange": return this.exchangeOAuthCode(body);
       case "/oauth/refresh/exchange": return this.exchangeOAuthRefresh(body);
       case "/session/revoke": return this.revokeSession(body);
+      case "/admin-session/create": return this.createAdminSession(body);
+      case "/admin-session/auth": return this.authAdminSession(body);
+      case "/admin-session/revoke": return this.revokeAdminSession(body);
+      case "/admin-session/revoke-user": return this.revokeAdminUserSessions(body);
+      case "/users/set-admin": return this.setUserAdmin(body);
       case "/sessions/list": return this.listSessions(body);
       case "/sessions/revoke-user": return this.revokeUserSessions(body);
       case "/session/logout-agent": return this.logoutAgent(body);
@@ -208,6 +224,11 @@ export class Registry extends DurableObject {
     const existing = await this.ctx.storage.get<UserRecord>(key.user("owner"));
     if (existing) {
       let migratedOwner = false;
+      if (existing.admin !== true) {
+        existing.admin = true;
+        await this.ctx.storage.put(key.user(existing.id), existing);
+        migratedOwner = true;
+      }
       const requestedAgentId = normalizeAgentId(String(body?.agentId || "default"));
       const existingAgent = await this.ctx.storage.get<AgentRecord>(key.agent(requestedAgentId));
       if (existingAgent && !existingAgent.ownerUserId) {
@@ -228,6 +249,7 @@ export class Registry extends DurableObject {
       name: body.userName || "Owner",
       tokenHash: body.userTokenHash,
       enabled: true,
+      admin: true,
       createdAt: now,
     };
     const agent: AgentRecord = {
@@ -921,6 +943,73 @@ export class Registry extends DurableObject {
       record.resource,
     );
     return json(tokens);
+  }
+
+  private async createAdminSession(body: any): Promise<Response> {
+    const passwordResponse = await this.oauthPassword(body);
+    const passwordData = await passwordResponse.json<any>();
+    if (!passwordResponse.ok) return json(passwordData, passwordResponse.status);
+    const user = await this.ctx.storage.get<UserRecord>(key.user(String(passwordData.user?.id || "")));
+    if (!user?.enabled || user.admin !== true) return json({ error: "admin_required" }, 403);
+
+    const token = newToken("adm");
+    const csrfToken = newToken("csrf");
+    const tokenHash = await hashToken(token);
+    const csrfHash = await hashToken(csrfToken);
+    const now = new Date();
+    const record: AdminSessionRecord = {
+      userId: user.id,
+      csrfHash,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + ADMIN_SESSION_TTL_MS).toISOString(),
+    };
+    await this.ctx.storage.put(key.adminSession(tokenHash), record);
+    return json({ ok: true, user: publicUser(user), token, csrfToken, expiresAt: record.expiresAt });
+  }
+
+  private async authAdminSession(body: any): Promise<Response> {
+    const tokenHash = String(body?.tokenHash ?? "");
+    if (!tokenHash) return json({ error: "unauthorized" }, 401);
+    const record = await this.ctx.storage.get<AdminSessionRecord>(key.adminSession(tokenHash));
+    if (!record || isExpired(record.expiresAt)) {
+      if (record) await this.ctx.storage.delete(key.adminSession(tokenHash));
+      return json({ error: "unauthorized" }, 401);
+    }
+    const user = await this.ctx.storage.get<UserRecord>(key.user(record.userId));
+    if (!user?.enabled || user.admin !== true) {
+      await this.ctx.storage.delete(key.adminSession(tokenHash));
+      return json({ error: "unauthorized" }, 401);
+    }
+    if (body?.csrfHash && !secureEqual(String(body.csrfHash), record.csrfHash)) {
+      return json({ error: "csrf_invalid" }, 403);
+    }
+    return json({ ok: true, user: publicUser(user), expiresAt: record.expiresAt });
+  }
+
+  private async revokeAdminSession(body: any): Promise<Response> {
+    const tokenHash = String(body?.tokenHash ?? "");
+    if (!tokenHash) return json({ error: "unauthorized" }, 401);
+    await this.ctx.storage.delete(key.adminSession(tokenHash));
+    return json({ ok: true });
+  }
+
+  private async revokeAdminUserSessions(body: any): Promise<Response> {
+    const userId = String(body?.userId ?? "");
+    if (!userId) return json({ error: "user_id_required" }, 400);
+    const sessions = await this.ctx.storage.list<AdminSessionRecord>({ prefix: "admin-session:" });
+    const keys = [...sessions.entries()].filter(([, record]) => record.userId === userId).map(([entryKey]) => entryKey);
+    if (keys.length) await this.ctx.storage.delete(keys);
+    return json({ ok: true, revoked: keys.length });
+  }
+
+  private async setUserAdmin(body: any): Promise<Response> {
+    const userId = String(body?.userId ?? "");
+    const user = await this.ctx.storage.get<UserRecord>(key.user(userId));
+    if (!user) return json({ error: "user_not_found" }, 404);
+    user.admin = body?.admin === true;
+    await this.ctx.storage.put(key.user(userId), user);
+    if (!user.admin) await this.revokeAdminUserSessions({ userId });
+    return json({ ok: true, user: publicUser(user) });
   }
 
   private async listSessions(body: any): Promise<Response> {

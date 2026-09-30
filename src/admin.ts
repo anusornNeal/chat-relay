@@ -15,6 +15,41 @@ const error = (status: number, code: string, details?: unknown) =>
 const authorized = (request: Request, token: string) =>
   request.headers.get("authorization") === `Bearer ${token}`;
 
+const ADMIN_COOKIE = "chat_relay_admin";
+
+function readCookie(request: Request, name: string) {
+  const raw = request.headers.get("cookie") || "";
+  for (const part of raw.split(";")) {
+    const [key, ...value] = part.trim().split("=");
+    if (key === name) return decodeURIComponent(value.join("="));
+  }
+  return "";
+}
+
+function adminCookie(token: string, maxAgeSeconds: number) {
+  return ADMIN_COOKIE + "=" + encodeURIComponent(token) + "; Path=/admin; Max-Age=" + maxAgeSeconds + "; HttpOnly; Secure; SameSite=Strict";
+}
+
+async function browserSession(request: Request, env: AdminEnv, requireCsrf: boolean) {
+  const token = readCookie(request, ADMIN_COOKIE);
+  if (!token) return { ok: false as const, response: error(401, "unauthorized") };
+  const url = new URL(request.url);
+  const origin = request.headers.get("origin");
+  if (requireCsrf && origin && origin !== url.origin) {
+    return { ok: false as const, response: error(403, "csrf_invalid") };
+  }
+  const csrfToken = requireCsrf ? request.headers.get("x-csrf-token") || "" : "";
+  if (requireCsrf && !csrfToken) return { ok: false as const, response: error(403, "csrf_required") };
+  const tokenHash = await hashToken(token);
+  const response = await registryCall(env, "/admin-session/auth", {
+    tokenHash,
+    ...(requireCsrf ? { csrfHash: await hashToken(csrfToken) } : {}),
+  });
+  const data = await response.json<any>();
+  if (!response.ok) return { ok: false as const, response: Response.json(data, { status: response.status }) };
+  return { ok: true as const, data, tokenHash };
+}
+
 function registryStub(env: AdminEnv) {
   return env.REGISTRY.get(env.REGISTRY.idFromName("global"));
 }
@@ -69,10 +104,42 @@ async function onlineAgents(env: AdminEnv, agents: any[]) {
 }
 
 export async function handleAdmin(request: Request, env: AdminEnv): Promise<Response> {
-  if (!env.ADMIN_TOKEN || !authorized(request, env.ADMIN_TOKEN)) return error(401, "unauthorized");
   const url = new URL(request.url);
   const path = url.pathname;
   const body = request.method === "GET" ? null : await request.json<any>().catch(() => null);
+  const operatorAuthorized = Boolean(env.ADMIN_TOKEN && authorized(request, env.ADMIN_TOKEN));
+
+  if (path === "/admin/session/login" && request.method === "POST") {
+    const response = await registryCall(env, "/admin-session/create", {
+      login: String(body?.login ?? ""),
+      password: String(body?.password ?? ""),
+    });
+    const data = await response.json<any>();
+    if (!response.ok) return Response.json(data, { status: response.status });
+    const maxAge = Math.max(1, Math.floor((Date.parse(data.expiresAt) - Date.now()) / 1000));
+    return Response.json(
+      { ok: true, user: data.user, csrfToken: data.csrfToken, expiresAt: data.expiresAt },
+      { headers: { "set-cookie": adminCookie(data.token, maxAge), "cache-control": "no-store" } },
+    );
+  }
+
+  const browserProtected = path.startsWith("/admin/api/") || path === "/admin/session" || path === "/admin/session/logout";
+  let browserAuth: Awaited<ReturnType<typeof browserSession>> | null = null;
+  if (browserProtected && !operatorAuthorized) {
+    browserAuth = await browserSession(request, env, request.method !== "GET");
+    if (!browserAuth.ok) return browserAuth.response;
+  } else if (!browserProtected && !operatorAuthorized) {
+    return error(401, "unauthorized");
+  }
+
+  if (path === "/admin/session" && request.method === "GET") {
+    return Response.json({ ok: true, user: browserAuth?.ok ? browserAuth.data.user : { operator: true }, expiresAt: browserAuth?.ok ? browserAuth.data.expiresAt : null });
+  }
+
+  if (path === "/admin/session/logout" && request.method === "POST") {
+    if (browserAuth?.ok) await registryCall(env, "/admin-session/revoke", { tokenHash: browserAuth.tokenHash });
+    return Response.json({ ok: true }, { headers: { "set-cookie": adminCookie("", 0), "cache-control": "no-store" } });
+  }
 
   if (path === "/admin/api/overview" && request.method === "GET") {
     const state = await registryState(env);
@@ -147,6 +214,18 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   if (path === "/admin/api/usage" && request.method === "GET") {
     const response = await usageQuery(env, url);
     return new Response(response.body, { status: response.status, headers: response.headers });
+  }
+
+  if (path === "/admin/api/users/admin" && request.method === "POST") {
+    const userId = String(body?.userId ?? "");
+    if (!userId) return error(400, "user_id_required");
+    return registryCall(env, "/users/set-admin", { userId, admin: body?.admin === true });
+  }
+
+  if (path === "/admin/api/admin-sessions/revoke" && request.method === "POST") {
+    const userId = String(body?.userId ?? "");
+    if (!userId) return error(400, "user_id_required");
+    return registryCall(env, "/admin-session/revoke-user", { userId });
   }
 
   if (path === "/admin/api/sessions/revoke" && request.method === "POST") {

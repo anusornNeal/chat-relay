@@ -73,6 +73,9 @@ chat-relay login --no-open
 
 The published package locates its bundled local agent relative to the package itself, so commands work from any working directory. Existing repository users can still run `npm start`; legacy `.dev.vars` credentials are migrated once into the user-level config.
 
+## Dashboard administrator sessions
+
+Browser dashboard access uses the same Chat Relay username/password accounts but requires an explicit global administrator entitlement. Successful dashboard login creates a short-lived opaque server-side session; the browser receives an HttpOnly, Secure, SameSite=Strict cookie plus a CSRF token for state-changing requests. `ADMIN_TOKEN` remains an operator/CLI recovery credential and must never be embedded in dashboard JavaScript, browser storage, or URLs.
 ## Authentication and multi-user model
 
 - Browser/device login uses a short-lived device code. Raw user or admin tokens are not typed into the CLI.
