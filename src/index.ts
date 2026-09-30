@@ -116,8 +116,18 @@ export class Relay extends DurableObject {
   }
 
   private handleMessage(socket: WebSocket, data: string | ArrayBuffer): void {
-    if (socket !== this.agent || typeof data !== "string" ||
-      new TextEncoder().encode(data).byteLength > MAX_BYTES) return;
+    if (socket !== this.agent || typeof data !== "string") return;
+
+    if (new TextEncoder().encode(data).byteLength > MAX_BYTES) {
+      const requestId = data.slice(0, 256).match(/"requestId"\s*:\s*"([^"]+)"/)?.[1];
+      if (!requestId) return;
+      const pending = this.pending.get(requestId);
+      if (!pending) return;
+      clearTimeout(pending.timeout);
+      this.pending.delete(requestId);
+      pending.resolve(error(502, "agent_response_too_large", { maxBytes: MAX_BYTES }));
+      return;
+    }
 
     let message: unknown;
     try { message = JSON.parse(data); } catch { return; }
@@ -449,22 +459,36 @@ function createMcpServer(env: Env, user: AuthUser) {
 
   register(
     "read_file",
-    "Read a UTF-8 text file by line offset and line count.",
+    "Read a UTF-8 text file by line offset/count with a bounded response and deterministic nextOffset.",
     "read",
     {
       path: z.string().min(1).max(2048),
       offset: z.number().int().min(0).optional(),
       length: z.number().int().min(1).max(1000).optional(),
+      maxBytes: z.number().int().min(1024).max(49152).optional(),
     },
-    ({ path, offset, length }) => ({ action: "fs.read", path, offset, length }),
+    ({ path, offset, length, maxBytes }) => ({
+      action: "fs.read", path, offset, length, maxBytes,
+    }),
   );
 
   register(
     "read_multiple_files",
-    "Read up to 20 UTF-8 text files.",
+    "Read up to 20 UTF-8 text files with one aggregate response budget. String paths remain supported; object entries can set offset, length, and maxBytes.",
     "read",
-    { paths: z.array(z.string().min(1).max(2048)).min(1).max(20) },
-    ({ paths }) => ({ action: "fs.readMany", paths }),
+    {
+      paths: z.array(z.union([
+        z.string().min(1).max(2048),
+        z.object({
+          path: z.string().min(1).max(2048),
+          offset: z.number().int().min(0).optional(),
+          length: z.number().int().min(1).max(1000).optional(),
+          maxBytes: z.number().int().min(1024).max(49152).optional(),
+        }),
+      ])).min(1).max(20),
+      maxTotalBytes: z.number().int().min(4096).max(49152).optional(),
+    },
+    ({ paths, maxTotalBytes }) => ({ action: "fs.readMany", paths, maxTotalBytes }),
   );
 
   register(

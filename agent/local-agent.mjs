@@ -9,6 +9,7 @@ const agentId = process.env.AGENT_ID || "default";
 const agentName = process.env.AGENT_NAME || agentId;
 const reconnectMs = Number(process.env.RECONNECT_MS ?? 2000);
 const terminalEnabled = process.env.TERMINAL_ENABLED === "1";
+const MAX_RESPONSE_BYTES = 60 * 1024;
 const terminals = new TerminalManager();
 const files = new FileManager(process.env.ALLOWED_ROOTS);
 const processes = new ProcessManager();
@@ -21,6 +22,19 @@ if (!relayUrl || !agentToken) {
 
 const wsUrl = relayUrl.replace(/^http/, "ws").replace(/\/$/, "") +
   `/agent?agentId=${encodeURIComponent(agentId)}`;
+
+function serializeResponse(requestId, payload) {
+  const response = JSON.stringify({ requestId, payload });
+  if (Buffer.byteLength(response, "utf8") <= MAX_RESPONSE_BYTES) return response;
+  return JSON.stringify({
+    requestId,
+    payload: {
+      ok: false,
+      error: "response_too_large",
+      maxBytes: MAX_RESPONSE_BYTES,
+    },
+  });
+}
 
 async function handlePayload(payload) {
   if (!payload || typeof payload !== "object") return payload;
@@ -45,9 +59,9 @@ async function handlePayload(payload) {
     case "fs.list":
       return files.list(payload.path, payload.depth);
     case "fs.read":
-      return files.read(payload.path, payload.offset, payload.length);
+      return files.read(payload.path, payload.offset, payload.length, payload.maxBytes);
     case "fs.readMany":
-      return files.readMany(payload.paths);
+      return files.readMany(payload.paths, payload.maxTotalBytes);
     case "fs.write":
       return files.write(payload.path, payload.content, payload.mode);
     case "fs.edit":
@@ -127,7 +141,7 @@ function connect() {
         ok: !(result && typeof result === "object" && result.ok === false),
       });
       if (recentCalls.length > 100) recentCalls.shift();
-      socket.send(JSON.stringify({ requestId: message.requestId, payload: result }));
+      socket.send(serializeResponse(message.requestId, result));
     } catch (error) {
       recentCalls.push({
         at: new Date().toISOString(),
@@ -137,9 +151,9 @@ function connect() {
         error: error instanceof Error ? error.message : "agent_error",
       });
       if (recentCalls.length > 100) recentCalls.shift();
-      socket.send(JSON.stringify({
-        requestId: message.requestId,
-        payload: { ok: false, error: error instanceof Error ? error.message : "agent_error" },
+      socket.send(serializeResponse(message.requestId, {
+        ok: false,
+        error: error instanceof Error ? error.message : "agent_error",
       }));
     }
   });

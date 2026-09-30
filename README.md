@@ -104,8 +104,8 @@ Identity and agent routing:
 Filesystem:
 - `stat_path`
 - `list_directory`
-- `read_file`
-- `read_multiple_files`
+- `read_file` - bounded by bytes; returns `truncated` and `nextOffset` when more lines remain
+- `read_multiple_files` - bounded aggregate response; supports string paths or per-file `{ path, offset, length, maxBytes }` entries plus `maxTotalBytes`
 - `start_search`
 - `get_more_search_results`
 - `write_file`
@@ -182,7 +182,9 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 
 ## Runtime limits and controls
 
-- Relay request/response message: 64 KiB.
+- Relay request/response message: 64 KiB. The local agent caps serialized responses below that transport ceiling and returns `response_too_large` instead of allowing a silent timeout.
+- `read_file` defaults to a 32 KiB content budget (max 48 KiB) and exposes deterministic `nextOffset` continuation.
+- `read_multiple_files` defaults to a 48 KiB aggregate budget (max 48 KiB). If not all requested files fit, use `nextIndex`; if an individual file is truncated, continue it with that entry's `nextOffset`.
 - One-shot terminal command: max 20 seconds.
 - Persistent terminal sessions: up to 8 running sessions per local agent.
 - Terminal output buffer: bounded in memory; completed sessions retained for 30 minutes.

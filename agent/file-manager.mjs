@@ -3,6 +3,10 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 const MAX_READ_BYTES = 256 * 1024;
+const DEFAULT_READ_RESPONSE_BYTES = 32 * 1024;
+const DEFAULT_MULTI_READ_RESPONSE_BYTES = 48 * 1024;
+const MAX_READ_RESPONSE_BYTES = 48 * 1024;
+const MIN_READ_RESPONSE_BYTES = 1024;
 const MAX_WRITE_BYTES = 256 * 1024;
 const MAX_SEARCH_FILES = 5000;
 const SKIP_DIRS = new Set([".git", "node_modules", ".gradle", ".idea", ".wrangler"]);
@@ -19,6 +23,21 @@ function within(root, target) {
 
 async function existingCanonical(target) {
   return fs.realpath(target);
+}
+
+function byteSize(value) {
+  if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function boundedReadBytes(value, fallback, minimum = MIN_READ_RESPONSE_BYTES) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(Math.max(Math.floor(numeric), minimum), MAX_READ_RESPONSE_BYTES);
+}
+
+function normalizeReadRequest(input) {
+  return typeof input === "string" ? { path: input } : { ...(input || {}) };
 }
 
 export class FileManager {
@@ -92,7 +111,7 @@ export class FileManager {
     }
   }
 
-  async read(input, offset = 0, length = 200) {
+  async read(input, offset = 0, length = 200, maxBytes = DEFAULT_READ_RESPONSE_BYTES) {
     const target = await this.#resolveExisting(input);
     const info = await fs.stat(target);
     if (!info.isFile()) throw new Error("not_a_file");
@@ -102,28 +121,113 @@ export class FileManager {
     const lines = text.split(/\r?\n/);
     const start = Math.max(Number(offset) || 0, 0);
     const count = Math.min(Math.max(Number(length) || 200, 1), 1000);
+    const contentBudget = boundedReadBytes(maxBytes, DEFAULT_READ_RESPONSE_BYTES);
+    const end = Math.min(start + count, lines.length);
+    const selected = [];
+    let contentBytes = 0;
+
+    for (let index = start; index < end; index++) {
+      const line = lines[index];
+      const nextBytes = byteSize(line) + (selected.length === 0 ? 0 : 1);
+      if (contentBytes + nextBytes > contentBudget) {
+        if (selected.length === 0) throw new Error("line_too_large");
+        break;
+      }
+      selected.push(line);
+      contentBytes += nextBytes;
+    }
+
+    const nextOffset = start + selected.length;
+    const truncated = nextOffset < lines.length;
     return {
       path: target,
       offset: start,
-      length: Math.min(count, Math.max(lines.length - start, 0)),
+      length: selected.length,
       totalLines: lines.length,
-      content: lines.slice(start, start + count).join("\n"),
+      content: selected.join("\n"),
+      contentBytes,
+      truncated,
+      nextOffset: truncated ? nextOffset : null,
     };
   }
 
-  async readMany(paths) {
+  async readMany(paths, maxTotalBytes = DEFAULT_MULTI_READ_RESPONSE_BYTES) {
     if (!Array.isArray(paths) || paths.length === 0 || paths.length > 20) {
       throw new Error("invalid_paths");
     }
-    const files = [];
-    for (const input of paths) {
-      try {
-        files.push({ ok: true, ...(await this.read(input, 0, 1000)) });
-      } catch (error) {
-        files.push({ ok: false, path: String(input), error: error instanceof Error ? error.message : "read_failed" });
-      }
+
+    const requests = paths.map(normalizeReadRequest);
+    if (requests.some((entry) => typeof entry.path !== "string" || entry.path.length === 0)) {
+      throw new Error("invalid_paths");
     }
-    return { files };
+
+    const totalBudget = boundedReadBytes(
+      maxTotalBytes,
+      DEFAULT_MULTI_READ_RESPONSE_BYTES,
+      4 * 1024,
+    );
+    const files = [];
+    let nextIndex = null;
+
+    for (let index = 0; index < requests.length; index++) {
+      const request = requests[index];
+      const start = Math.max(Number(request.offset) || 0, 0);
+      const length = Math.min(Math.max(Number(request.length) || 1000, 1), 1000);
+      let fileBudget = boundedReadBytes(request.maxBytes, DEFAULT_READ_RESPONSE_BYTES);
+      let candidate;
+
+      try {
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const result = await this.read(request.path, start, length, fileBudget);
+          candidate = { ok: true, ...result };
+          const projected = {
+            files: [...files, candidate],
+            totalFiles: requests.length,
+            nextIndex: index + 1 < requests.length ? index + 1 : null,
+            truncated: false,
+            maxTotalBytes: totalBudget,
+          };
+          if (byteSize(projected) <= totalBudget) break;
+          fileBudget = Math.floor(fileBudget * 0.65);
+          candidate = undefined;
+          if (fileBudget < MIN_READ_RESPONSE_BYTES) break;
+        }
+      } catch (error) {
+        candidate = {
+          ok: false,
+          path: String(request.path),
+          error: error instanceof Error ? error.message : "read_failed",
+        };
+      }
+
+      if (!candidate) {
+        nextIndex = index;
+        break;
+      }
+
+      const projected = {
+        files: [...files, candidate],
+        totalFiles: requests.length,
+        nextIndex: index + 1 < requests.length ? index + 1 : null,
+        truncated: false,
+        maxTotalBytes: totalBudget,
+      };
+      if (byteSize(projected) > totalBudget) {
+        nextIndex = index;
+        break;
+      }
+      files.push(candidate);
+    }
+
+    const fileTruncated = files.some((entry) => entry.ok && entry.truncated);
+    const truncated = nextIndex !== null || fileTruncated;
+    return {
+      files,
+      totalFiles: requests.length,
+      nextIndex,
+      truncated,
+      maxTotalBytes: totalBudget,
+    };
   }
 
   async write(input, content, mode = "rewrite") {
