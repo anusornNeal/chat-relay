@@ -5,15 +5,17 @@ import { z } from "zod";
 import { handleDeviceAuth } from "./device-auth";
 import { handleOAuth, oauthChallenge, oauthResource } from "./oauth";
 import { handleAdmin } from "./admin";
+import { Audit } from "./audit";
 import { Registry, hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 import { DEFAULT_QUOTA_POLICY, Usage, normalizeQuotaPolicy, type QuotaPolicy, type UsageEvent } from "./usage";
 
-export { Registry, Usage };
+export { Audit, Registry, Usage };
 
 interface Env {
   RELAY: DurableObjectNamespace;
   REGISTRY: DurableObjectNamespace;
   USAGE: DurableObjectNamespace;
+  AUDIT: DurableObjectNamespace;
   ASSETS?: Fetcher;
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
@@ -21,6 +23,8 @@ interface Env {
   USER_RATE_LIMIT_PER_WINDOW?: string;
   USER_RATE_WINDOW_SECONDS?: string;
   USER_DAILY_CALL_QUOTA?: string;
+  USAGE_RAW_RETENTION_DAYS?: string;
+  AUDIT_RETENTION_DAYS?: string;
 }
 
 type Pending = {

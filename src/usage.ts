@@ -42,6 +42,8 @@ export const DEFAULT_QUOTA_POLICY: QuotaPolicy = {
   dailyCallQuota: 10000,
 };
 
+const CLEANUP_STATUS_KEY = "ops:cleanup:last";
+
 function boundedInt(value: unknown, fallback: number, min: number, max: number) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return fallback;
@@ -236,6 +238,40 @@ export class Usage extends DurableObject {
         [eventKey]: event,
       });
       return Response.json({ ok: true });
+    }
+
+    if (url.pathname === "/cleanup" && request.method === "POST") {
+      const body = await request.json<any>().catch(() => ({}));
+      const retentionDays = boundedInt(body?.retentionDays, 30, 0, 3650);
+      const limit = boundedInt(body?.limit, 250, 1, 1000);
+      const cutoffMs = Date.now() - retentionDays * 86400000;
+      const records = await this.ctx.storage.list<UsageEvent>({
+        prefix: "event:",
+        limit: Math.min(1000, limit * 4),
+      });
+      const keys: string[] = [];
+      let scanned = 0;
+      for (const [key, event] of records) {
+        scanned++;
+        if (Date.parse(event.timestamp) < cutoffMs) keys.push(key);
+        if (keys.length >= limit) break;
+      }
+      if (keys.length) await this.ctx.storage.delete(keys);
+      const status = {
+        ranAt: new Date().toISOString(),
+        retentionDays,
+        scanned,
+        deleted: keys.length,
+        aggregatesPreserved: true,
+        bounded: true,
+      };
+      await this.ctx.storage.put(CLEANUP_STATUS_KEY, status);
+      return Response.json({ ok: true, ...status });
+    }
+
+    if (url.pathname === "/ops/status" && request.method === "GET") {
+      const lastCleanup = await this.ctx.storage.get(CLEANUP_STATUS_KEY);
+      return Response.json({ ok: true, lastCleanup: lastCleanup ?? null });
     }
 
     if (url.pathname === "/query" && request.method === "GET") {

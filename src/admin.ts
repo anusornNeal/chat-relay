@@ -5,12 +5,15 @@ type AdminEnv = {
   REGISTRY: DurableObjectNamespace;
   RELAY: DurableObjectNamespace;
   USAGE: DurableObjectNamespace;
+  AUDIT: DurableObjectNamespace;
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
   CALLER_TOKEN?: string;
   USER_RATE_LIMIT_PER_WINDOW?: string;
   USER_RATE_WINDOW_SECONDS?: string;
   USER_DAILY_CALL_QUOTA?: string;
+  USAGE_RAW_RETENTION_DAYS?: string;
+  AUDIT_RETENTION_DAYS?: string;
 };
 
 const error = (status: number, code: string, details?: unknown) =>
@@ -68,6 +71,76 @@ async function registryCall(env: AdminEnv, path: string, body?: unknown) {
 
 function usageStub(env: AdminEnv) {
   return env.USAGE.get(env.USAGE.idFromName("global"));
+}
+
+function auditStub(env: AdminEnv) {
+  return env.AUDIT.get(env.AUDIT.idFromName("global"));
+}
+
+type SafeAuditActor = {
+  kind: "operator" | "admin-user" | "anonymous" | "system";
+  userId?: string;
+};
+
+async function recordAudit(
+  env: AdminEnv,
+  actor: SafeAuditActor,
+  action: string,
+  target: { type: string; id?: string },
+  result: "success" | "failure",
+  metadata?: Record<string, unknown>,
+) {
+  try {
+    const response = await auditStub(env).fetch(new Request("https://audit.internal/record", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ actor, action, target, result, metadata }),
+    }));
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function adminActor(operatorAuthorized: boolean, browserAuth: any): SafeAuditActor {
+  if (browserAuth?.ok && browserAuth.data?.user?.id) {
+    return { kind: "admin-user", userId: String(browserAuth.data.user.id) };
+  }
+  if (operatorAuthorized) return { kind: "operator" };
+  return { kind: "anonymous" };
+}
+
+async function auditedRegistryMutation(
+  env: AdminEnv,
+  actor: SafeAuditActor,
+  action: string,
+  target: { type: string; id?: string },
+  registryPath: string,
+  body: unknown,
+  metadata?: Record<string, unknown>,
+) {
+  const response = await registryCall(env, registryPath, body);
+  await recordAudit(env, actor, action, target, response.ok ? "success" : "failure", {
+    status: response.status,
+    ...metadata,
+  });
+  return response;
+}
+
+async function internalJson(responsePromise: Promise<Response>) {
+  try {
+    const response = await responsePromise;
+    const data = await response.json<any>().catch(() => ({}));
+    return { ok: response.ok, status: response.status, data };
+  } catch (cause) {
+    return { ok: false, status: 503, data: { error: cause instanceof Error ? cause.message : "internal_unavailable" } };
+  }
+}
+
+function boundedRetention(value: unknown, fallback: number, max = 3650) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(0, Math.floor(numeric)));
 }
 
 function quotaDefaults(env: AdminEnv): QuotaPolicy {
@@ -137,6 +210,14 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       password: String(body?.password ?? ""),
     });
     const data = await response.json<any>();
+    await recordAudit(
+      env,
+      response.ok && data.user?.id ? { kind: "admin-user", userId: String(data.user.id) } : { kind: "anonymous" },
+      "admin.session.login",
+      { type: "admin_session", ...(data.user?.id ? { id: String(data.user.id) } : {}) },
+      response.ok ? "success" : "failure",
+      { status: response.status },
+    );
     if (!response.ok) return Response.json(data, { status: response.status });
     const maxAge = Math.max(1, Math.floor((Date.parse(data.expiresAt) - Date.now()) / 1000));
     return Response.json(
@@ -154,13 +235,67 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     return error(401, "unauthorized");
   }
 
+  const actor = adminActor(operatorAuthorized, browserAuth);
+
   if (path === "/admin/session" && request.method === "GET") {
     return Response.json({ ok: true, user: browserAuth?.ok ? browserAuth.data.user : { operator: true }, expiresAt: browserAuth?.ok ? browserAuth.data.expiresAt : null });
   }
 
   if (path === "/admin/session/logout" && request.method === "POST") {
     if (browserAuth?.ok) await registryCall(env, "/admin-session/revoke", { tokenHash: browserAuth.tokenHash });
+    await recordAudit(env, actor, "admin.session.logout", { type: "admin_session", id: actor.userId }, "success");
     return Response.json({ ok: true }, { headers: { "set-cookie": adminCookie("", 0), "cache-control": "no-store" } });
+  }
+
+  if (path === "/admin/api/audit" && request.method === "GET") {
+    const query = new URLSearchParams();
+    for (const key of ["limit", "action", "actorUserId", "targetId"]) {
+      const value = url.searchParams.get(key);
+      if (value) query.set(key, value);
+    }
+    const response = await auditStub(env).fetch("https://audit.internal/query" + (query.size ? "?" + query : ""));
+    return new Response(response.body, { status: response.status, headers: response.headers });
+  }
+
+  if (path === "/admin/api/operations" && request.method === "GET") {
+    const [registry, usage, audit] = await Promise.all([
+      internalJson(registryStub(env).fetch("https://registry.internal/ops/status")),
+      internalJson(usageStub(env).fetch("https://usage.internal/ops/status")),
+      internalJson(auditStub(env).fetch("https://audit.internal/ops/status")),
+    ]);
+    return Response.json({
+      ok: registry.ok && usage.ok && audit.ok,
+      components: { registry, usage, audit },
+      retention: {
+        rawUsageDays: boundedRetention(env.USAGE_RAW_RETENTION_DAYS, 30),
+        auditDays: boundedRetention(env.AUDIT_RETENTION_DAYS, 180),
+      },
+    });
+  }
+
+  if (path === "/admin/api/operations/cleanup" && request.method === "POST") {
+    const rawUsageDays = boundedRetention(body?.usageRawRetentionDays, boundedRetention(env.USAGE_RAW_RETENTION_DAYS, 30));
+    const auditDays = boundedRetention(body?.auditRetentionDays, boundedRetention(env.AUDIT_RETENTION_DAYS, 180));
+    const limit = Math.min(1000, Math.max(1, Math.floor(Number(body?.limit) || 250)));
+    const [registry, usage, audit] = await Promise.all([
+      internalJson(registryStub(env).fetch(new Request("https://registry.internal/ops/cleanup", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit }),
+      }))),
+      internalJson(usageStub(env).fetch(new Request("https://usage.internal/cleanup", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ retentionDays: rawUsageDays, limit }),
+      }))),
+      internalJson(auditStub(env).fetch(new Request("https://audit.internal/cleanup", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ retentionDays: auditDays, limit }),
+      }))),
+    ]);
+    const ok = registry.ok && usage.ok && audit.ok;
+    await recordAudit(env, actor, "operations.cleanup", { type: "operations", id: "retention" }, ok ? "success" : "failure", {
+      registryDeleted: Number(registry.data?.deletedRecords || 0),
+      usageDeleted: Number(usage.data?.deleted || 0),
+      auditDeleted: Number(audit.data?.deleted || 0),
+      status: ok ? 200 : 502,
+    });
+    return Response.json({ ok, registry, usage, audit }, { status: ok ? 200 : 502 });
   }
 
   if (path === "/admin/api/limits" && request.method === "GET") {
@@ -178,6 +313,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       const response = await usageStub(env).fetch(new Request("https://usage.internal/quota/policy", { method: "DELETE" }));
       if (!response.ok) return error(502, "quota_policy_update_failed");
       const current = await quotaPolicy(env);
+      await recordAudit(env, actor, "policy.quota.reset", { type: "quota_policy", id: "global" }, "success");
       return Response.json({ ok: true, ...current });
     }
     const rateLimit = Number(body?.rateLimit);
@@ -193,6 +329,12 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       body: JSON.stringify(policy),
     }));
     const data = await response.json<any>();
+    await recordAudit(env, actor, "policy.quota.set", { type: "quota_policy", id: "global" }, response.ok ? "success" : "failure", {
+      rateLimit: policy.rateLimit,
+      rateWindowSeconds: policy.rateWindowSeconds,
+      dailyCallQuota: policy.dailyCallQuota,
+      status: response.status,
+    });
     return Response.json(response.ok ? { ...data, source: "admin" } : data, { status: response.status });
   }
 
@@ -274,24 +416,26 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   if (path === "/admin/api/users/admin" && request.method === "POST") {
     const userId = String(body?.userId ?? "");
     if (!userId) return error(400, "user_id_required");
-    return registryCall(env, "/users/set-admin", { userId, admin: body?.admin === true });
+    return auditedRegistryMutation(env, actor, "user.admin.set", { type: "user", id: userId }, "/users/set-admin", {
+      userId, admin: body?.admin === true,
+    }, { admin: body?.admin === true });
   }
 
   if (path === "/admin/api/admin-sessions/revoke" && request.method === "POST") {
     const userId = String(body?.userId ?? "");
     if (!userId) return error(400, "user_id_required");
-    return registryCall(env, "/admin-session/revoke-user", { userId });
+    return auditedRegistryMutation(env, actor, "admin.sessions.revoke", { type: "user", id: userId }, "/admin-session/revoke-user", { userId });
   }
 
   if (path === "/admin/api/sessions/revoke" && request.method === "POST") {
     const userId = String(body?.userId ?? "");
     if (!userId) return error(400, "user_id_required");
-    return registryCall(env, "/sessions/revoke-user", { userId });
+    return auditedRegistryMutation(env, actor, "user.sessions.revoke", { type: "user", id: userId }, "/sessions/revoke-user", { userId });
   }
 
   if (path === "/admin/bootstrap" && request.method === "POST") {
     if (!env.CALLER_TOKEN || !env.AGENT_TOKEN) return error(503, "legacy_tokens_missing");
-    return registryCall(env, "/bootstrap", {
+    return auditedRegistryMutation(env, actor, "registry.bootstrap", { type: "registry", id: "global" }, "/bootstrap", {
       userTokenHash: await hashToken(env.CALLER_TOKEN),
       agentTokenHash: await hashToken(env.AGENT_TOKEN),
       userName: body?.userName || "Owner",
@@ -307,6 +451,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const token = newToken("usr");
     const response = await registryCall(env, "/users/create", { id, name, tokenHash: await hashToken(token) });
     const data = await response.json<any>();
+    await recordAudit(env, actor, "user.create", { type: "user", id }, response.ok ? "success" : "failure", { status: response.status });
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
   }
 
@@ -319,31 +464,39 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const token = newToken("agt");
     const response = await registryCall(env, "/agents/create", { id, name, tokenHash: await hashToken(token) });
     const data = await response.json<any>();
+    await recordAudit(env, actor, "agent.create", { type: "agent", id }, response.ok ? "success" : "failure", { status: response.status });
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
   }
 
   if (path === "/admin/grants" && request.method === "POST") {
-    return registryCall(env, "/grants/upsert", {
-      userId: String(body?.userId ?? ""),
-      agentId: String(body?.agentId ?? ""),
-      scopes: Array.isArray(body?.scopes) ? body.scopes : [],
-    });
+    const userId = String(body?.userId ?? "");
+    const agentId = String(body?.agentId ?? "");
+    const scopes = Array.isArray(body?.scopes) ? body.scopes : [];
+    return auditedRegistryMutation(env, actor, "grant.upsert", { type: "grant", id: userId + ":" + agentId }, "/grants/upsert", {
+      userId, agentId, scopes,
+    }, { scopeCount: scopes.length });
   }
   if (path === "/admin/grants/delete" && request.method === "POST") {
-    return registryCall(env, "/grants/delete", { userId: String(body?.userId ?? ""), agentId: String(body?.agentId ?? "") });
+    const userId = String(body?.userId ?? "");
+    const agentId = String(body?.agentId ?? "");
+    return auditedRegistryMutation(env, actor, "grant.delete", { type: "grant", id: userId + ":" + agentId }, "/grants/delete", { userId, agentId });
   }
   if (path === "/admin/users/login" && request.method === "POST") {
     const userId = String(body?.userId ?? "");
     const login = String(body?.login ?? "");
     const password = String(body?.password ?? "");
     if (!userId || !login || !password) return error(400, "credentials_required");
-    return registryCall(env, "/users/set-login", { userId, login, password });
+    return auditedRegistryMutation(env, actor, "user.credentials.set", { type: "user", id: userId }, "/users/set-login", { userId, login, password });
   }
   if (path === "/admin/users/enabled" && request.method === "POST") {
-    return registryCall(env, "/users/set-enabled", { userId: String(body?.userId ?? ""), enabled: Boolean(body?.enabled) });
+    const userId = String(body?.userId ?? "");
+    const enabled = Boolean(body?.enabled);
+    return auditedRegistryMutation(env, actor, enabled ? "user.enable" : "user.disable", { type: "user", id: userId }, "/users/set-enabled", { userId, enabled }, { enabled });
   }
   if (path === "/admin/agents/enabled" && request.method === "POST") {
-    return registryCall(env, "/agents/set-enabled", { agentId: String(body?.agentId ?? ""), enabled: Boolean(body?.enabled) });
+    const agentId = String(body?.agentId ?? "");
+    const enabled = Boolean(body?.enabled);
+    return auditedRegistryMutation(env, actor, enabled ? "agent.enable" : "agent.disable", { type: "agent", id: agentId }, "/agents/set-enabled", { agentId, enabled }, { enabled });
   }
   if (path === "/admin/users/rotate" && request.method === "POST") {
     const userId = String(body?.userId ?? "");
@@ -351,6 +504,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const token = newToken("usr");
     const response = await registryCall(env, "/users/rotate", { userId, tokenHash: await hashToken(token) });
     const data = await response.json<any>();
+    await recordAudit(env, actor, "user.token.rotate", { type: "user", id: userId }, response.ok ? "success" : "failure", { status: response.status });
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
   }
   if (path === "/admin/agents/rotate" && request.method === "POST") {
@@ -359,6 +513,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const token = newToken("agt");
     const response = await registryCall(env, "/agents/rotate", { agentId, tokenHash: await hashToken(token) });
     const data = await response.json<any>();
+    await recordAudit(env, actor, "agent.token.rotate", { type: "agent", id: agentId }, response.ok ? "success" : "failure", { status: response.status });
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
   }
   if (path === "/admin/usage" && request.method === "GET") return usageQuery(env, url);

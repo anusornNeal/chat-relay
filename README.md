@@ -194,6 +194,15 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 - Search skips common heavy directories such as `.git`, `node_modules`, `.gradle`, `.idea`, and `.wrangler`.
 - The agent blocks a small set of high-risk system-management commands. This is defense in depth, not a security sandbox.
 
+## Audit, retention, and recovery
+
+- Security/admin mutations are recorded in a dedicated `Audit` Durable Object with actor, action, target, result, and sanitized scalar metadata only. Passwords, tokens, cookies, CSRF values, commands, file content, and raw tool payloads are excluded.
+- Raw usage events default to 30-day retention while daily usage aggregates are preserved independently. Set `USAGE_RAW_RETENTION_DAYS` to change raw-event retention.
+- Audit events default to 180-day retention. Set `AUDIT_RETENTION_DAYS` to change that window.
+- `GET /admin/api/audit` returns bounded audit history. `GET /admin/api/operations` exposes component health and last cleanup state. `POST /admin/api/operations/cleanup` performs bounded idempotent cleanup across registry auth transients, raw usage events, and audit history.
+- Cleanup does not intentionally remove active users, grants, agents, live sessions, pending non-expired device authorization, or long-lived usage aggregates.
+- Durable Object state is the production source of truth. Git/npm artifacts do not back it up. Before destructive migration or account transfer, export any operator-required identity/config state separately and treat Cloudflare account/Durable Object recovery controls as the infrastructure recovery boundary.
+- Cleanup failures are surfaced through the operations endpoint and audit result instead of being silently treated as success.
 ## Tests
 
 The legacy relay integration test remains available:

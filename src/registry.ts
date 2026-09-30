@@ -215,6 +215,8 @@ export class Registry extends DurableObject {
       case "/auth/agent": return this.authAgent(body);
       case "/resolve": return this.resolveAgent(body);
       case "/list-agents": return this.listAgents(body);
+      case "/ops/cleanup": return json({ ok: true, ...(await this.cleanupExpiredAuthArtifacts(body?.limit)) });
+      case "/ops/status": return json({ ok: true, lastCleanup: (await this.ctx.storage.get("ops:cleanup:last")) ?? null });
       case "/state": return this.state();
       default: return json({ error: "not_found" }, 404);
     }
@@ -450,34 +452,49 @@ export class Registry extends DurableObject {
     return true;
   }
 
-  private async cleanupExpiredAuthArtifacts(): Promise<void> {
+  private async cleanupExpiredAuthArtifacts(limitValue: unknown = 250) {
+    const maxDeletes = Math.min(1000, Math.max(1, Math.floor(Number(limitValue) || 250)));
     const now = Date.now();
-    const [devices, sessions, codes, accessTokens, refreshTokens] = await Promise.all([
-      this.ctx.storage.list<DeviceAuthRecord>({ prefix: "device:" }),
-      this.ctx.storage.list<UserSessionRecord>({ prefix: "us:" }),
-      this.ctx.storage.list<OAuthCodeRecord>({ prefix: "oauth-code:" }),
-      this.ctx.storage.list<OAuthTokenRecord>({ prefix: "oauth-access:" }),
-      this.ctx.storage.list<OAuthTokenRecord>({ prefix: "oauth-refresh:" }),
-    ]);
+    const sources = [
+      { prefix: "device:", device: true },
+      { prefix: "us:", device: false },
+      { prefix: "admin-session:", device: false },
+      { prefix: "oauth-code:", device: false },
+      { prefix: "oauth-access:", device: false },
+      { prefix: "oauth-refresh:", device: false },
+    ];
+    let scanned = 0;
+    let deletedRecords = 0;
+    let deletedKeys = 0;
 
-    const keys: string[] = [];
-    for (const [storageKey, device] of devices) {
-      if (Date.parse(device.expiresAt) <= now) {
-        keys.push(storageKey, key.deviceUserCode(device.userCode));
-      }
-    }
-    for (const [storageKey, session] of sessions) {
-      if (Date.parse(session.expiresAt) <= now) keys.push(storageKey);
-    }
-    for (const records of [codes, accessTokens, refreshTokens]) {
+    for (const source of sources) {
+      if (deletedRecords >= maxDeletes) break;
+      const records = await this.ctx.storage.list<any>({
+        prefix: source.prefix,
+        limit: 1000,
+      });
       for (const [storageKey, record] of records) {
-        if (Date.parse(record.expiresAt) <= now) keys.push(storageKey);
+        scanned++;
+        if (!record?.expiresAt || Date.parse(String(record.expiresAt)) > now) continue;
+        const keys = [storageKey];
+        if (source.device && record.userCode) keys.push(key.deviceUserCode(String(record.userCode)));
+        await this.ctx.storage.delete(keys);
+        deletedRecords++;
+        deletedKeys += keys.length;
+        if (deletedRecords >= maxDeletes) break;
       }
     }
 
-    for (let index = 0; index < keys.length; index += 128) {
-      await this.ctx.storage.delete(keys.slice(index, index + 128));
-    }
+    const status = {
+      ranAt: new Date().toISOString(),
+      scanned,
+      deletedRecords,
+      deletedKeys,
+      maxDeletes,
+      bounded: true,
+    };
+    await this.ctx.storage.put("ops:cleanup:last", status);
+    return status;
   }
 
   private async startDevice(body: any): Promise<Response> {
