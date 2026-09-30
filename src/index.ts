@@ -836,13 +836,16 @@ function createMcpServer(env: Env, user: AuthUser) {
 
   register(
     "list_directory",
-    "List a directory. Depth is limited to 0-3.",
+    "List a directory with bounded pagination. Depth is limited to 0-3; use nextOffset to continue.",
     "read",
     {
       path: z.string().min(1).max(2048),
       depth: z.number().int().min(0).max(3).optional(),
+      offset: z.number().int().min(0).optional(),
+      limit: z.number().int().min(1).max(500).optional(),
+      maxBytes: z.number().int().min(4096).max(49152).optional(),
     },
-    ({ path, depth }) => ({ action: "fs.list", path, depth }),
+    ({ path, depth, offset, limit, maxBytes }) => ({ action: "fs.list", path, depth, offset, limit, maxBytes }),
   );
 
   register(

@@ -9,7 +9,15 @@ const MAX_READ_RESPONSE_BYTES = 48 * 1024;
 const MIN_READ_RESPONSE_BYTES = 1024;
 const MAX_WRITE_BYTES = 256 * 1024;
 const MAX_SEARCH_FILES = 5000;
+const DEFAULT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = 500;
+const DEFAULT_LIST_RESPONSE_BYTES = 48 * 1024;
 const SKIP_DIRS = new Set([".git", "node_modules", ".gradle", ".idea", ".wrangler"]);
+const ALLOWED_DOT_DIRS = new Set([".github"]);
+
+function skipWalkDirectory(name) {
+  return SKIP_DIRS.has(name) || (name.startsWith(".") && !ALLOWED_DOT_DIRS.has(name));
+}
 
 function splitRoots(spec) {
   if (!spec) return [process.cwd()];
@@ -82,31 +90,37 @@ export class FileManager {
     };
   }
 
-  async list(input, depth = 1) {
+  async list(input, depth = 1, offset = 0, limit = DEFAULT_LIST_LIMIT, maxBytes = DEFAULT_LIST_RESPONSE_BYTES) {
     const target = await this.#resolveExisting(input);
-    const maxDepth = Math.min(Math.max(Number(depth) || 1, 0), 3);
+    const numericDepth = Number(depth);
+    const maxDepth = Number.isFinite(numericDepth) ? Math.min(Math.max(Math.trunc(numericDepth), 0), 3) : 1;
+    const start = Math.max(Math.trunc(Number(offset) || 0), 0);
+    const pageLimit = Math.min(Math.max(Math.trunc(Number(limit) || DEFAULT_LIST_LIMIT), 1), MAX_LIST_LIMIT);
+    const responseBudget = boundedReadBytes(maxBytes, DEFAULT_LIST_RESPONSE_BYTES, 4 * 1024);
     const entries = [];
-    await this.#walkList(target, 0, maxDepth, entries);
-    return { path: target, entries };
+    await this.#walkList(target, 0, maxDepth, entries, start + pageLimit + 1);
+
+    const selected = entries.slice(start, start + pageLimit);
+    while (selected.length > 1 && byteSize({ path: target, entries: selected, offset: start }) > responseBudget) selected.pop();
+    if (selected.length === 1 && byteSize({ path: target, entries: selected, offset: start }) > responseBudget) throw new Error("list_entry_too_large");
+
+    const nextOffset = start + selected.length;
+    const hasMore = nextOffset < entries.length;
+    return { path: target, entries: selected, offset: start, limit: pageLimit, maxBytes: responseBudget, truncated: hasMore, nextOffset: hasMore ? nextOffset : null };
   }
 
-  async #walkList(current, level, maxDepth, output) {
+  async #walkList(current, level, maxDepth, output, stopAfter = 1001) {
     const items = await fs.readdir(current, { withFileTypes: true });
     items.sort((a, b) => a.name.localeCompare(b.name));
     for (const item of items) {
       const fullPath = path.join(current, item.name);
       let size = null;
       if (item.isFile()) size = (await fs.stat(fullPath)).size;
-      output.push({
-        path: fullPath,
-        name: item.name,
-        type: item.isDirectory() ? "directory" : item.isFile() ? "file" : "other",
-        size,
-      });
-      if (output.length >= 1000) return;
-      if (item.isDirectory() && level < maxDepth && !SKIP_DIRS.has(item.name)) {
-        await this.#walkList(fullPath, level + 1, maxDepth, output);
-        if (output.length >= 1000) return;
+      output.push({ path: fullPath, name: item.name, type: item.isDirectory() ? "directory" : item.isFile() ? "file" : "other", size });
+      if (output.length >= stopAfter) return;
+      if (item.isDirectory() && level < maxDepth && !skipWalkDirectory(item.name)) {
+        await this.#walkList(fullPath, level + 1, maxDepth, output, stopAfter);
+        if (output.length >= stopAfter) return;
       }
     }
   }
@@ -305,12 +319,14 @@ export class FileManager {
       const needle = pattern.toLowerCase();
       let scanned = 0;
 
-      const walk = async (current) => {
-        if (session.results.length >= limit || scanned >= MAX_SEARCH_FILES) return;
+      const queue = [target];
+      while (queue.length > 0 && session.results.length < limit && scanned < MAX_SEARCH_FILES) {
+        const current = queue.shift();
         const items = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
+        items.sort((a, b) => a.name.localeCompare(b.name));
         for (const item of items) {
           if (session.results.length >= limit || scanned >= MAX_SEARCH_FILES) break;
-          if (item.isDirectory() && SKIP_DIRS.has(item.name)) continue;
+          if (item.isDirectory() && skipWalkDirectory(item.name)) continue;
           const fullPath = path.join(current, item.name);
           scanned++;
 
@@ -330,12 +346,9 @@ export class FileManager {
               }
             }
           }
-
-          if (item.isDirectory()) await walk(fullPath);
+          if (item.isDirectory()) queue.push(fullPath);
         }
-      };
-
-      await walk(target);
+      }
       session.status = "COMPLETED";
       session.scanned = scanned;
     } catch (error) {

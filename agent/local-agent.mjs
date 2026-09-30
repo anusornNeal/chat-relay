@@ -66,7 +66,7 @@ async function handlePayload(payload) {
     case "fs.stat":
       return files.stat(payload.path);
     case "fs.list":
-      return files.list(payload.path, payload.depth);
+      return files.list(payload.path, payload.depth, payload.offset, payload.limit, payload.maxBytes);
     case "fs.read":
       return files.read(payload.path, payload.offset, payload.length, payload.maxBytes);
     case "fs.readMany":

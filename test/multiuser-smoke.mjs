@@ -182,6 +182,12 @@ if (Buffer.byteLength(JSON.stringify(tinyMany.payload), "utf8") > 4096) {
 }
 console.log("bounded file read continuation ok");
 
+const hiddenNoise = path.join(root, ".generated-noise");
+fs.mkdirSync(hiddenNoise, { recursive: true });
+for (let index = 0; index < 5001; index++) {
+  fs.writeFileSync(path.join(hiddenNoise, `noise-${index}.txt`), "no-match");
+}
+
 const search = await tool(ownerToken, 10, "start_search", {
   path: root,
   pattern: "gamma",
@@ -212,11 +218,24 @@ for (let index = 0; index < 1000; index++) {
 const oversizeList = await tool(ownerToken, 93, "list_directory", {
   path: oversizeDir,
   depth: 0,
-}, true);
-if (oversizeList.payload?.error !== "response_too_large") {
-  throw new Error(`oversize response did not fail safely: ${JSON.stringify(oversizeList)}`);
+  limit: 500,
+  maxBytes: 16384,
+});
+if (!oversizeList.payload?.truncated || !Number.isInteger(oversizeList.payload.nextOffset)) {
+  throw new Error(`oversize list did not return continuation: ${JSON.stringify(oversizeList)}`);
 }
-console.log("oversize response fail-safe ok");
+if (Buffer.byteLength(JSON.stringify(oversizeList.payload), "utf8") > 16384) {
+  throw new Error("list_directory exceeded response budget");
+}
+const oversizeListPage2 = await tool(ownerToken, 94, "list_directory", {
+  path: oversizeDir,
+  depth: 0,
+  offset: oversizeList.payload.nextOffset,
+  limit: 500,
+  maxBytes: 16384,
+});
+if (!oversizeListPage2.payload.entries?.length) throw new Error("list_directory continuation returned no entries");
+console.log("bounded directory continuation ok");
 
 const execResult = await tool(ownerToken, 13, "terminal_exec", { command: "Get-Location" });
 if (!execResult.payload.ok || execResult.payload.exitCode !== 0) throw new Error("terminal_exec failed");
