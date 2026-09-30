@@ -537,7 +537,7 @@ function annotationsForTool(name: string, override: Record<string, boolean> = {}
 }
 
 function createMcpServer(env: Env, user: AuthUser) {
-  const server = new McpServer({ name: "chat-relay", version: "0.6.0" });
+  const server = new McpServer({ name: "chat-relay", version: "0.7.0" });
 
   server.registerTool(
     "whoami",
@@ -1009,7 +1009,7 @@ export default {
 
     if (path === "/health") {
       return request.method === "GET"
-        ? Response.json({ status: "ok", service: "chat-relay", version: "0.6.0" })
+        ? Response.json({ status: "ok", service: "chat-relay", version: "0.7.0" })
         : error(405, "method_not_allowed");
     }
 
