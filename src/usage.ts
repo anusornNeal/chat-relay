@@ -37,9 +37,9 @@ type QuotaState = {
 };
 
 export const DEFAULT_QUOTA_POLICY: QuotaPolicy = {
-  rateLimit: 120,
+  rateLimit: 0,
   rateWindowSeconds: 60,
-  dailyCallQuota: 10000,
+  dailyCallQuota: 0,
 };
 
 const CLEANUP_STATUS_KEY = "ops:cleanup:last";

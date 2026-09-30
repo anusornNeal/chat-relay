@@ -219,7 +219,7 @@ Public ChatGPT onboarding uses the plain production `/mcp` URL and OAuth; the le
 The OpenAI domain verification token is served at `/.well-known/openai-apps-challenge` when `OPENAI_APPS_CHALLENGE` is configured. Keep reviewer credentials and challenge values separate from production administrator secrets.
 ## Runtime limits and controls
 
-- MCP tool calls are protected by per-user durable limits before local-agent dispatch. Defaults are 120 calls per 60-second window and 10,000 calls per UTC day. Set `USER_RATE_LIMIT_PER_WINDOW=0` or `USER_DAILY_CALL_QUOTA=0` to disable that limit; `USER_RATE_WINDOW_SECONDS` controls the rate window (1-3600 seconds).
+- Per-user durable rate/quota controls are available before local-agent dispatch, but both are disabled by default (`rateLimit=0`, `dailyCallQuota=0`). Set `USER_RATE_LIMIT_PER_WINDOW` and/or `USER_DAILY_CALL_QUOTA` to a positive value to enable them; `USER_RATE_WINDOW_SECONDS` controls the rate window (1-3600 seconds).
 - Admins can inspect or override the effective policy with `GET/POST /admin/api/limits`; POST `{ "resetToDefaults": true }` returns to environment defaults. Rejections return HTTP 429 with `rate_limited` or `quota_exceeded`, `Retry-After`, and reset metadata, and are recorded as bounded usage events without dispatching agent work.
 - Relay request/response message: 64 KiB. The local agent caps serialized responses below that transport ceiling and returns `response_too_large` instead of allowing a silent timeout.
 - `read_file` defaults to a 32 KiB content budget (max 48 KiB) and exposes deterministic `nextOffset` continuation.
