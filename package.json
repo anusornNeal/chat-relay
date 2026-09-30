@@ -35,7 +35,8 @@
     "test:zero-checkout": "node test/zero-checkout-smoke.mjs",
     "verify:publish": "node scripts/verify-publish.mjs && npx wrangler deploy --dry-run && npm audit --omit=dev",
     "prepublishOnly": "npm run verify:publish",
-    "test:oauth": "node test/oauth-smoke.mjs"
+    "test:oauth": "node test/oauth-smoke.mjs",
+    "test:usage": "node test/usage-smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0"

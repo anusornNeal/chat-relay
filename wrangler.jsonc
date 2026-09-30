@@ -6,7 +6,8 @@
   "durable_objects": {
     "bindings": [
       { "name": "RELAY", "class_name": "Relay" },
-      { "name": "REGISTRY", "class_name": "Registry" }
+      { "name": "REGISTRY", "class_name": "Registry" },
+      { "name": "USAGE", "class_name": "Usage" }
     ]
   },
   "secrets": {
@@ -14,6 +15,7 @@
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Relay"] },
-    { "tag": "v2", "new_sqlite_classes": ["Registry"] }
+    { "tag": "v2", "new_sqlite_classes": ["Registry"] },
+    { "tag": "v3", "new_sqlite_classes": ["Usage"] }
   ]
 }

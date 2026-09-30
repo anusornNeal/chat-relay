@@ -5,12 +5,14 @@ import { z } from "zod";
 import { handleDeviceAuth } from "./device-auth";
 import { handleOAuth, oauthChallenge, oauthResource } from "./oauth";
 import { Registry, hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
+import { Usage, type UsageEvent } from "./usage";
 
-export { Registry };
+export { Registry, Usage };
 
 interface Env {
   RELAY: DurableObjectNamespace;
   REGISTRY: DurableObjectNamespace;
+  USAGE: DurableObjectNamespace;
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
   CALLER_TOKEN?: string;
@@ -185,6 +187,67 @@ async function registryJson<T = any>(env: Env, path: string, body?: unknown): Pr
   return { response, data };
 }
 
+
+function usageStub(env: Env) {
+  return env.USAGE.get(env.USAGE.idFromName("global"));
+}
+
+function byteSize(value: unknown): number {
+  try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; }
+  catch { return 0; }
+}
+
+async function recordUsage(env: Env, event: UsageEvent): Promise<void> {
+  try {
+    await usageStub(env).fetch(new Request("https://usage.internal/record", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(event),
+    }));
+  } catch {}
+}
+
+async function instrumentTool<T>(
+  env: Env,
+  user: AuthUser,
+  tool: string,
+  args: unknown,
+  run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string }>,
+): Promise<T> {
+  const started = Date.now();
+  let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string } | undefined;
+  try {
+    outcome = await run();
+    return outcome.value;
+  } catch (cause) {
+    await recordUsage(env, {
+      userId: user.id,
+      tool,
+      timestamp: new Date().toISOString(),
+      durationMs: Date.now() - started,
+      ok: false,
+      errorClass: cause instanceof Error ? cause.name.slice(0, 80) : "exception",
+      requestBytes: byteSize(args),
+      responseBytes: 0,
+    });
+    throw cause;
+  } finally {
+    if (outcome) {
+      await recordUsage(env, {
+        userId: user.id,
+        tool,
+        ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
+        timestamp: new Date().toISOString(),
+        durationMs: Date.now() - started,
+        ok: outcome.ok,
+        ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
+        requestBytes: byteSize(args),
+        responseBytes: byteSize(outcome.value),
+      });
+    }
+  }
+}
+
 function bearerToken(request: Request): string | null {
   const value = request.headers.get("authorization");
   return value?.startsWith("Bearer ") ? value.slice(7) : null;
@@ -250,7 +313,7 @@ async function callAgent(
 ) {
   const resolved = await resolveAgent(env, user.id, scope, requestedAgentId);
   if (!resolved.ok) {
-    return { ok: false, body: await resolved.response.text() };
+    return { ok: false, body: await resolved.response.text(), agentId: requestedAgentId };
   }
 
   const stub = env.RELAY.get(env.RELAY.idFromName(resolved.agentId));
@@ -267,7 +330,7 @@ async function callAgent(
     if (parsed.payload?.ok === false) ok = false;
   } catch {}
 
-  return { ok, body };
+  return { ok, body, agentId: resolved.agentId };
 }
 
 function toolResult(result: { ok: boolean; body: string }) {
@@ -298,13 +361,19 @@ function createMcpServer(env: Env, user: AuthUser) {
   server.registerTool(
     "whoami",
     { description: "Show the authenticated relay user.", inputSchema: {} },
-    async () => toolResult({ ok: true, body: JSON.stringify({ user }) }),
+    async () => instrumentTool(env, user, "whoami", {}, async () => {
+      const value = toolResult({ ok: true, body: JSON.stringify({ user }) });
+      return { value, ok: true };
+    }),
   );
 
   server.registerTool(
     "list_agents",
     { description: "List agents this user can access, including scopes and online status.", inputSchema: {} },
-    async () => toolResult(await listUserAgents(env, user)),
+    async () => instrumentTool(env, user, "list_agents", {}, async () => {
+      const call = await listUserAgents(env, user);
+      return { value: toolResult(call), ok: call.ok };
+    }),
   );
 
   server.registerTool(
@@ -313,7 +382,10 @@ function createMcpServer(env: Env, user: AuthUser) {
       description: "Check whether a permitted local agent is reachable.",
       inputSchema: { agentId: agentIdSchema },
     },
-    async ({ agentId }) => toolResult(await callAgent(env, user, "read", agentId, { action: "ping" })),
+    async ({ agentId }) => instrumentTool(env, user, "ping_agent", { agentId }, async () => {
+      const call = await callAgent(env, user, "read", agentId, { action: "ping" });
+      return { value: toolResult(call), ok: call.ok, agentId: call.agentId };
+    }),
   );
 
   const register = (
@@ -331,13 +403,15 @@ function createMcpServer(env: Env, user: AuthUser) {
         inputSchema: { agentId: agentIdSchema, ...inputSchema },
         ...(annotations ? { annotations } : {}),
       } as any,
-      async (args: any) => toolResult(await callAgent(
-        env,
-        user,
-        scope,
-        args.agentId,
-        payload(args),
-      )),
+      async (args: any) => instrumentTool(env, user, name, args, async () => {
+        const call = await callAgent(env, user, scope, args.agentId, payload(args));
+        return {
+          value: toolResult(call),
+          ok: call.ok,
+          agentId: call.agentId,
+          ...(call.ok ? {} : { errorClass: "tool_error" }),
+        };
+      }),
     );
   };
 
@@ -759,6 +833,18 @@ async function adminHandler(request: Request, env: Env): Promise<Response> {
     });
     const data = await response.json<any>();
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
+  }
+
+  if (path === "/admin/usage" && request.method === "GET") {
+    const query = new URLSearchParams();
+    for (const key of ["day", "userId", "tool", "agentId", "recentLimit"]) {
+      const value = url.searchParams.get(key);
+      if (value) query.set(key, value);
+    }
+    const response = await usageStub(env).fetch(
+      "https://usage.internal/query" + (query.size ? "?" + query.toString() : ""),
+    );
+    return new Response(response.body, { status: response.status, headers: response.headers });
   }
 
   if (path === "/admin/state" && request.method === "GET") {
