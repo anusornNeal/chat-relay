@@ -23,21 +23,35 @@ Cloudflare Worker
 
 The relay is generic and has no Devflow-specific logic.
 
+## Quick start
+
+The CLI is published on npm. You do **not** need to clone this repository or run `npm install`.
+
+From any directory:
+
+```bash
+npx @anusornneal/chat-relay@latest remote
+```
+
+On the first run, Chat Relay opens a browser-based device login. Sign in, approve the computer, then return to the terminal. The CLI saves its credentials in your user profile and connects the local agent automatically.
+
+Later, use the same command from anywhere:
+
+```bash
+npx @anusornneal/chat-relay@latest remote
+```
+
+A successful connection looks like:
+
+```text
+Chat Relay Remote
+-----------------
+Agent:      Primary PC (default)
+Terminal:   enabled
+Agent connected
+```
+
 ## Zero-checkout CLI
-
-End users do not need this repository. After the npm package is published, the normal command is:
-
-```bash
-npx @anusornneal/chat-relay@latest remote
-```
-
-First run starts a device-login flow, opens the browser, and shows a short code. The browser page signs in with a Chat Relay login/password; if that login does not exist yet, it creates the account. After approval the CLI receives scoped user-session and agent credentials, stores them outside the project, and connects the local agent.
-
-Subsequent runs reuse the local credentials:
-
-```bash
-npx @anusornneal/chat-relay@latest remote
-```
 
 Other commands:
 
