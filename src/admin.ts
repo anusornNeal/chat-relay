@@ -188,10 +188,16 @@ async function usageQuery(env: AdminEnv, source: URL) {
   return usageStub(env).fetch("https://usage.internal/query" + (query.size ? "?" + query : ""));
 }
 
+async function usageSummary(env: AdminEnv, hours: number, userId?: string) {
+  const query = new URLSearchParams({ hours: String(hours) });
+  if (userId) query.set("userId", userId);
+  const response = await usageStub(env).fetch("https://usage.internal/summary?" + query);
+  return response.json<any>();
+}
+
 async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], grants: any[] = []) {
   const userById = new Map(users.map((user) => [user.id, user]));
-  const grantsByAgent = new Map<string, any[]>();
-  for (const grant of grants) {
+  const grantsByAgent = new Map<string, any[]>();  for (const grant of grants) {
     const current = grantsByAgent.get(grant.agentId) ?? [];
     current.push({ userId: grant.userId, scopes: grant.scopes });
     grantsByAgent.set(grant.agentId, current);
@@ -216,6 +222,40 @@ async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], gra
     };
   }));
 }
+async function terminalActivity(env: AdminEnv, selfUserId?: string) {
+  const state = await registryState(env);
+  const allowed = new Set<string>();
+  for (const agent of state.agents ?? []) {
+    if (!agent.enabled || agent.retiredAt) continue;
+    if (!selfUserId || (state.grants ?? []).some((grant: any) => grant.userId === selfUserId && grant.agentId === agent.id)) {
+      allowed.add(agent.id);
+    }
+  }
+  const snapshots = await Promise.all([...allowed].map(async (agentId) => {
+    try {
+      const response = await env.RELAY.get(env.RELAY.idFromName(agentId)).fetch(new Request("https://relay.internal/relay", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ payload: { action: "terminal.observability" } }),
+      }));
+      const envelope = await response.json<any>().catch(() => null);
+      const payload = envelope?.payload;
+      if (!response.ok || !payload?.ok) return { agentId, sessions: [], batches: [] };
+      const belongs = (item: any) => !selfUserId || item.userId === selfUserId;
+      return {
+        agentId,
+        sessions: (payload.sessions ?? []).filter((item: any) => belongs(item) && item.status === "running"),
+        batches: (payload.batches ?? []).filter((item: any) =>
+          belongs(item) && (Number(item.counts?.running || 0) > 0 || Number(item.counts?.queued || 0) > 0)
+        ),
+      };
+    } catch {
+      return { agentId, sessions: [], batches: [] };
+    }
+  }));
+  return snapshots;
+}
+
 export async function handleAdmin(request: Request, env: AdminEnv): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -254,6 +294,17 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   const actor = adminActor(operatorAuthorized, browserAuth);
+  const sessionUser = browserAuth?.ok ? browserAuth.data.user : null;
+  const adminAuthorized = operatorAuthorized || sessionUser?.admin === true;
+  const selfUserId = sessionUser?.id ? String(sessionUser.id) : "";
+  const selfService = request.method === "GET" && [
+    "/admin/api/overview",
+    "/admin/api/usage",
+    "/admin/api/tool-calls",
+  ].includes(path);
+  if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService) {
+    return error(403, "admin_required");
+  }
 
   if (path === "/admin/session" && request.method === "GET") {
     return Response.json({ ok: true, user: browserAuth?.ok ? browserAuth.data.user : { operator: true }, expiresAt: browserAuth?.ok ? browserAuth.data.expiresAt : null });
@@ -347,8 +398,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       body: JSON.stringify(policy),
     }));
     const data = await response.json<any>();
-    await recordAudit(env, actor, "policy.quota.set", { type: "quota_policy", id: "global" }, response.ok ? "success" : "failure", {
-      rateLimit: policy.rateLimit,
+    await recordAudit(env, actor, "policy.quota.set", { type: "quota_policy", id: "global" }, response.ok ? "success" : "failure", {      rateLimit: policy.rateLimit,
       rateWindowSeconds: policy.rateWindowSeconds,
       dailyCallQuota: policy.dailyCallQuota,
       status: response.status,
@@ -357,16 +407,36 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   if (path === "/admin/api/overview" && request.method === "GET") {
+    const hours = 24;
+    if (!adminAuthorized) {
+      const [usage, terminals] = await Promise.all([
+        usageSummary(env, hours, selfUserId),
+        terminalActivity(env, selfUserId),
+      ]);
+      const activeTerminals = terminals.reduce((count, agent) => count +
+        agent.sessions.filter((session: any) => session.status === "running").length +
+        agent.batches.reduce((sum: number, batch: any) => sum + Number(batch.counts?.running || 0), 0), 0);
+      return Response.json({ role: "user", user: sessionUser, hours, usage: usage.metric ?? null, activeTerminals });
+    }
     const state = await registryState(env);
-    const agents = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
-    const usageResponse = await usageQuery(env, url);
-    const usage = await usageResponse.json<any>();
+    const [agents, usage, terminals] = await Promise.all([
+      onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []),
+      usageSummary(env, hours),
+      terminalActivity(env),
+    ]);
+    const activeTerminals = terminals.reduce((count, agent) => count +
+      agent.sessions.filter((session: any) => session.status === "running").length +
+      agent.batches.reduce((sum: number, batch: any) => sum + Number(batch.counts?.running || 0), 0), 0);
+    const activeUsers = new Set((state.users ?? []).filter((u: any) => u.enabled && !u.deletedAt).map((u: any) => u.id));
     return Response.json({
-      users: { total: (state.users ?? []).length, enabled: (state.users ?? []).filter((u: any) => u.enabled).length },
+      role: "admin",
+      hours,
+      users: { total: (state.users ?? []).length, enabled: activeUsers.size },
       agents: { total: agents.length, online: agents.filter((a: any) => a.online).length },
       grants: { total: (state.grants ?? []).length },
       usage: usage.metric ?? null,
-      day: usage.day,
+      activeTerminals,
+      activeUsers: activeUsers.size,
     });
   }
 
@@ -427,8 +497,84 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   if (path === "/admin/api/usage" && request.method === "GET") {
-    const response = await usageQuery(env, url);
+    const scoped = new URL(url.toString());
+    if (!adminAuthorized) scoped.searchParams.set("userId", selfUserId);
+    const response = await usageQuery(env, scoped);
     return new Response(response.body, { status: response.status, headers: response.headers });
+  }
+
+  if (path === "/admin/api/tool-calls" && request.method === "GET") {
+    const query = new URLSearchParams();
+    for (const key of ["state", "limit", "tool", "agentId", "from", "to", "activityId"]) {
+      const value = url.searchParams.get(key);
+      if (value) query.set(key, value);
+    }
+    if (adminAuthorized) {
+      const userId = url.searchParams.get("userId");
+      if (userId) query.set("userId", userId);
+    } else {
+      query.set("userId", selfUserId);
+    }
+    const response = await usageStub(env).fetch("https://usage.internal/activity/query?" + query);
+    const data = await response.json<any>().catch(() => ({}));
+    if (!response.ok) return Response.json(data, { status: response.status });
+    if (query.get("state") !== "active") return Response.json(data);
+    const terminals = await terminalActivity(env, adminAuthorized ? undefined : selfUserId);
+    return Response.json({ ...data, terminals });
+  }
+
+  if (path === "/admin/api/errors" && request.method === "GET") {
+    const query = new URLSearchParams();
+    for (const key of ["limit", "tool", "agentId", "userId", "errorClass", "from", "to"]) {
+      const value = url.searchParams.get(key);
+      if (value) query.set(key, value);
+    }
+    const response = await usageStub(env).fetch("https://usage.internal/errors/query?" + query);
+    return new Response(response.body, { status: response.status, headers: response.headers });
+  }
+
+  if (path === "/admin/api/users" && request.method === "POST") {
+    const name = String(body?.name ?? "").trim();
+    const login = String(body?.login ?? "").trim();
+    const password = String(body?.password ?? "");
+    const makeAdmin = body?.admin === true;
+    if (!name || !login || password.length < 8 || password.length > 128) return error(400, "invalid_user");
+    const id = String(body?.id || generatedId(name, "user"));
+    const token = newToken("usr");
+    const created = await registryCall(env, "/users/create", { id, name, tokenHash: await hashToken(token) });
+    const createdData = await created.json<any>();
+    if (!created.ok) {
+      await recordAudit(env, actor, "user.create", { type: "user", id }, "failure", { status: created.status });
+      return Response.json(createdData, { status: created.status });
+    }
+    const credentials = await registryCall(env, "/users/set-login", { userId: id, login, password });
+    if (!credentials.ok) {
+      await registryCall(env, "/users/soft-delete", { userId: id });
+      const data = await credentials.json<any>();
+      await recordAudit(env, actor, "user.create", { type: "user", id }, "failure", { status: credentials.status });
+      return Response.json(data, { status: credentials.status });
+    }
+    let user = (await credentials.json<any>()).user;
+    if (makeAdmin) {
+      const role = await registryCall(env, "/users/set-admin", { userId: id, admin: true });
+      if (!role.ok) return error(502, "user_role_update_failed");
+      user = (await role.json<any>()).user;
+    }
+    await recordAudit(env, actor, "user.create", { type: "user", id }, "success", { admin: makeAdmin });
+    return Response.json({ ok: true, user }, { status: 201 });
+  }
+
+  if (path === "/admin/api/users/soft-delete" && request.method === "POST") {
+    const userId = String(body?.userId ?? "");
+    if (!userId) return error(400, "user_id_required");
+    if (selfUserId && userId === selfUserId) return error(409, "cannot_delete_current_user");
+    return auditedRegistryMutation(env, actor, "user.soft-delete", { type: "user", id: userId }, "/users/soft-delete", { userId });
+  }
+
+  if (path === "/admin/api/users/restore" && request.method === "POST") {
+    const userId = String(body?.userId ?? "");
+    if (!userId) return error(400, "user_id_required");
+    return auditedRegistryMutation(env, actor, "user.restore", { type: "user", id: userId }, "/users/restore", { userId });
   }
 
   if (path === "/admin/api/agents/rename" && request.method === "POST") {
@@ -451,8 +597,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     );
   }
 
-  if (path === "/admin/api/agents/retire" && request.method === "POST") {
-    const agentId = String(body?.agentId ?? "");
+  if (path === "/admin/api/agents/retire" && request.method === "POST") {    const agentId = String(body?.agentId ?? "");
     if (!agentId) return error(400, "agent_id_required");
     const response = await registryCall(env, "/agents/retire", {
       agentId,

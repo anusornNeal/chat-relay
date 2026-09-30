@@ -51,9 +51,16 @@ const userCreds = await admin("/admin/users/login", "POST", { userId: user.data.
 if (!userCreds.response.ok) throw new Error(`user creds failed: ${userCreds.text}`);
 
 const nonAdminLogin = await browser("/admin/session/login", { method: "POST", body: { login: userLogin, password: userPassword } });
-if (nonAdminLogin.response.status !== 403 || nonAdminLogin.data.error !== "admin_required") {
-  throw new Error(`non-admin login accepted: ${nonAdminLogin.text}`);
+if (!nonAdminLogin.response.ok || !nonAdminLogin.data.csrfToken || nonAdminLogin.data.user?.admin !== false) {
+  throw new Error(`non-admin dashboard login failed: ${nonAdminLogin.text}`);
 }
+const nonAdminCookie = (nonAdminLogin.response.headers.get("set-cookie") || "").split(";")[0];
+const nonAdminOverview = await browser("/admin/api/overview", { cookie: nonAdminCookie });
+if (!nonAdminOverview.response.ok || nonAdminOverview.data.role !== "user") throw new Error(`self overview failed: ${nonAdminOverview.text}`);
+const nonAdminUsers = await browser("/admin/api/users", { cookie: nonAdminCookie });
+if (nonAdminUsers.response.status !== 403 || nonAdminUsers.data.error !== "admin_required") throw new Error("non-admin accessed Users API");
+const nonAdminErrors = await browser("/admin/api/errors", { cookie: nonAdminCookie });
+if (nonAdminErrors.response.status !== 403 || nonAdminErrors.data.error !== "admin_required") throw new Error("non-admin accessed Errors API");
 
 const bruteUser = await admin("/admin/users", "POST", { name: "Brute User", id: `brute-${suffix}` });
 const bruteLogin = `brute-${suffix}`;
@@ -90,6 +97,32 @@ if (!session.response.ok || session.data.user?.id !== "owner" || session.data.us
 const browserUsers = await browser("/admin/api/users", { cookie });
 if (!browserUsers.response.ok) throw new Error(`browser admin API read failed: ${browserUsers.text}`);
 
+const managedLogin = `managed-${suffix}`;
+const managedPassword = `Managed-${suffix}-Password!`;
+const managedCreate = await browser("/admin/api/users", {
+  method: "POST", cookie, csrf, origin: base,
+  body: { name: "Managed User", login: managedLogin, password: managedPassword, admin: false },
+});
+if (!managedCreate.response.ok || managedCreate.data.user?.admin !== false) throw new Error(`dashboard user create failed: ${managedCreate.text}`);
+const managedId = managedCreate.data.user.id;
+const managedAuth = await browser("/admin/session/login", { method: "POST", body: { login: managedLogin, password: managedPassword } });
+if (!managedAuth.response.ok) throw new Error("new user could not login");
+const managedCookie = (managedAuth.response.headers.get("set-cookie") || "").split(";")[0];
+const softDeleted = await browser("/admin/api/users/soft-delete", {
+  method: "POST", cookie, csrf, origin: base, body: { userId: managedId },
+});
+if (!softDeleted.response.ok || softDeleted.data.user?.enabled !== false || !softDeleted.data.user?.deletedAt) throw new Error(`soft delete failed: ${softDeleted.text}`);
+const revokedManagedSession = await browser("/admin/session", { cookie: managedCookie });
+if (revokedManagedSession.response.status !== 401) throw new Error("soft-deleted user session remained valid");
+const blockedManagedLogin = await browser("/admin/session/login", { method: "POST", body: { login: managedLogin, password: managedPassword } });
+if (blockedManagedLogin.response.ok) throw new Error("soft-deleted user could still login");
+const restored = await browser("/admin/api/users/restore", {
+  method: "POST", cookie, csrf, origin: base, body: { userId: managedId },
+});
+if (!restored.response.ok || restored.data.user?.enabled !== true || restored.data.user?.deletedAt) throw new Error(`restore failed: ${restored.text}`);
+const restoredLogin = await browser("/admin/session/login", { method: "POST", body: { login: managedLogin, password: managedPassword } });
+if (!restoredLogin.response.ok || restoredLogin.data.user?.id !== managedId) throw new Error("restored user could not login");
+
 const noCsrf = await browser("/admin/api/sessions/revoke", { method: "POST", cookie, body: { userId: user.data.user.id } });
 if (noCsrf.response.status !== 403 || noCsrf.data.error !== "csrf_required") throw new Error("missing CSRF was not rejected");
 const badOrigin = await browser("/admin/api/sessions/revoke", {
@@ -120,7 +153,14 @@ const login3 = await browser("/admin/session/login", { method: "POST", body: { l
 const cookie3 = (login3.response.headers.get("set-cookie") || "").split(";")[0];
 await admin("/admin/api/users/admin", "POST", { userId: "owner", admin: false });
 const deadminSession = await browser("/admin/session", { cookie: cookie3 });
-if (deadminSession.response.status !== 401) throw new Error("revoked admin entitlement kept browser session access");
+if (deadminSession.response.status !== 401) throw new Error("role downgrade did not revoke the privileged browser session");
+const userRelogin = await browser("/admin/session/login", { method: "POST", body: { login: ownerLogin, password: ownerPassword } });
+if (!userRelogin.response.ok || userRelogin.data.user?.admin !== false) throw new Error("de-admined user could not re-login for self-service");
+const userReloginCookie = (userRelogin.response.headers.get("set-cookie") || "").split(";")[0];
+const deadminOverview = await browser("/admin/api/overview", { cookie: userReloginCookie });
+if (!deadminOverview.response.ok || deadminOverview.data.role !== "user") throw new Error("de-admined user lost self overview");
+const deadminUsers = await browser("/admin/api/users", { cookie: userReloginCookie });
+if (deadminUsers.response.status !== 403 || deadminUsers.data.error !== "admin_required") throw new Error("de-admined user retained admin API access");
 await admin("/admin/api/users/admin", "POST", { userId: "owner", admin: true });
 
 const operatorState = await admin("/admin/state");
