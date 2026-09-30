@@ -80,6 +80,7 @@ const child = spawn(command.file, command.args, {
   cwd: tempDir,
   env: { ...process.env, CHAT_RELAY_HOME: configDir },
   stdio: ["ignore", "pipe", "pipe"],
+  detached: process.platform !== "win32",
 });
 
 let output = "";
@@ -113,7 +114,18 @@ try {
         execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], () => resolve());
       });
     } else {
-      child.kill("SIGTERM");
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        child.kill("SIGTERM");
+      }
+      await Promise.race([
+        new Promise((resolve) => child.once("close", resolve)),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+      if (child.exitCode === null) {
+        try { process.kill(-child.pid, "SIGKILL"); } catch {}
+      }
     }
   }
   fs.rmSync(tempDir, { recursive: true, force: true });
