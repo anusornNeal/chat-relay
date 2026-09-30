@@ -248,7 +248,7 @@ export async function handleOAuth(
     return noStoreJson({
       resource,
       authorization_servers: [origin],
-      scopes_supported: ["mcp"],
+      scopes_supported: ["mcp", "offline_access"],
       bearer_methods_supported: ["header"],
       resource_name: "Chat Relay MCP",
     });
@@ -440,7 +440,7 @@ export async function handleOAuth(
 
 export function oauthChallenge(origin: string): string {
   const metadata = `${origin}/.well-known/oauth-protected-resource`;
-  return `Bearer resource_metadata="${metadata}", scope="mcp"`;
+  return `Bearer resource_metadata="${metadata}", scope="mcp offline_access"`;
 }
 
 export function oauthResource(request: Request): string {

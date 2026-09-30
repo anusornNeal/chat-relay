@@ -63,7 +63,9 @@ async function mcpRpc(token, id, method, params = {}, queryKey = false) {
 const protectedMeta = await jsonFetch("/.well-known/oauth-protected-resource");
 if (!protectedMeta.response.ok ||
     protectedMeta.data.resource !== resource ||
-    !protectedMeta.data.authorization_servers?.includes(base)) {
+    !protectedMeta.data.authorization_servers?.includes(base) ||
+    !protectedMeta.data.scopes_supported?.includes("mcp") ||
+    !protectedMeta.data.scopes_supported?.includes("offline_access")) {
   throw new Error("protected resource metadata invalid");
 }
 console.log("protected resource metadata ok");
@@ -243,7 +245,8 @@ const unauthenticated = await fetch(`${base}/mcp`, {
 });
 const challengeHeader = unauthenticated.headers.get("www-authenticate") || "";
 if (unauthenticated.status !== 401 ||
-    !challengeHeader.includes("resource_metadata=")) {
+    !challengeHeader.includes("resource_metadata=") ||
+    !challengeHeader.includes('scope="mcp offline_access"')) {
   throw new Error("MCP OAuth challenge missing");
 }
 console.log("MCP challenge ok");
