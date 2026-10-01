@@ -44,10 +44,50 @@ type AgentSocketAttachment = {
   heartbeatEnabled?: boolean;
   heartbeatMs?: number;
   processId?: number;
+  protocolVersion?: number;
+  agentVersion?: string;
+  platform?: string;
+  arch?: string;
+  capabilities?: string[];
 };
 
 const DEFAULT_AGENT_HEARTBEAT_TTL_MS = 45_000;
 const MAX_AGENT_HEARTBEAT_TTL_MS = 180_000;
+
+const AGENT_PROTOCOL_VERSION = 1;
+const MAX_AGENT_CAPABILITIES = 64;
+
+function normalizeAgentText(value: unknown, maxLength = 80): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text ? text.slice(0, maxLength) : null;
+}
+
+function normalizeAgentCapabilities(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const capability = normalizeAgentText(item, 64);
+    if (!capability || !/^[a-z0-9._-]+$/i.test(capability) || seen.has(capability)) continue;
+    seen.add(capability);
+    output.push(capability);
+    if (output.length >= MAX_AGENT_CAPABILITIES) break;
+  }
+  return output;
+}
+
+function normalizeAgentHello(message: any) {
+  const protocolVersion = Number(message?.protocolVersion);
+  return {
+    protocolVersion: Number.isInteger(protocolVersion) ? protocolVersion : null,
+    agentVersion: normalizeAgentText(message?.agentVersion),
+    platform: normalizeAgentText(message?.platform, 32),
+    arch: normalizeAgentText(message?.arch, 32),
+    capabilities: normalizeAgentCapabilities(message?.capabilities),
+  };
+}
+
 
 function readAgentAttachment(socket: WebSocket | null): AgentSocketAttachment {
   if (!socket) return {};
@@ -76,6 +116,12 @@ function agentLiveness(socket: WebSocket | null) {
       connectedAt: null,
       lastSeenAt: null,
       heartbeatTtlMs: null,
+      processId: null,
+      protocolVersion: null,
+      agentVersion: null,
+      platform: null,
+      arch: null,
+      capabilities: [],
     };
   }
   const attachment = readAgentAttachment(socket);
@@ -97,6 +143,11 @@ function agentLiveness(socket: WebSocket | null) {
     lastSeenAt: lastSeenMs === null ? null : new Date(lastSeenMs).toISOString(),
     heartbeatTtlMs,
     processId: Number.isFinite(Number(attachment.processId)) ? Number(attachment.processId) : null,
+    protocolVersion: Number.isInteger(Number(attachment.protocolVersion)) ? Number(attachment.protocolVersion) : null,
+    agentVersion: attachment.agentVersion ?? null,
+    platform: attachment.platform ?? null,
+    arch: attachment.arch ?? null,
+    capabilities: Array.isArray(attachment.capabilities) ? attachment.capabilities : [],
   };
 }
 
@@ -326,6 +377,32 @@ export class Relay extends DurableObject {
     const control = typeof message === "object" && message !== null
       ? String((message as any).control ?? "")
       : "";
+    if (control === "agent_hello") {
+      const hello = normalizeAgentHello(message);
+      if (hello.protocolVersion !== AGENT_PROTOCOL_VERSION) {
+        try {
+          socket.send(JSON.stringify({
+            control: "protocol_incompatible",
+            expectedProtocolVersion: AGENT_PROTOCOL_VERSION,
+            receivedProtocolVersion: hello.protocolVersion,
+          }));
+        } catch {}
+        this.agent = null;
+        this.failPending(503, "agent_incompatible");
+        this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents", "calls"]));
+        try { socket.close(4002, "protocol_incompatible"); } catch {}
+        return;
+      }
+      writeAgentAttachment(socket, {
+        lastSeenAt: Date.now(),
+        protocolVersion: hello.protocolVersion,
+        ...(hello.agentVersion ? { agentVersion: hello.agentVersion } : {}),
+        ...(hello.platform ? { platform: hello.platform } : {}),
+        ...(hello.arch ? { arch: hello.arch } : {}),
+        capabilities: hello.capabilities,
+      });
+      return;
+    }
     if (control === "agent_heartbeat") {
       writeAgentAttachment(socket, {
         lastSeenAt: Date.now(),
@@ -870,7 +947,8 @@ async function listUserAgents(env: Env, user: AuthUser) {
   const agents = await Promise.all((data.agents ?? []).map(async (agent: any) => {
     const stub = env.RELAY.get(env.RELAY.idFromName(agent.id));
     const status = await stub.fetch("https://relay.internal/status").then((r) => r.json<any>()).catch(() => ({ online: false }));
-    return { ...agent, online: Boolean(status.online) };
+    const { online, ...connection } = status;
+    return { ...agent, online: Boolean(online), connection };
   }));
 
   return { ok: true, body: JSON.stringify({ user, agents }) };

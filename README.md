@@ -84,6 +84,13 @@ The published package locates its bundled local agent relative to the package it
 - Recovery after retirement does not require copying tokens: run `chat-relay login --force`, complete browser authorization, then run `chat-relay remote`.
 - A different account cannot reclaim another owner's active or retired agent id; a colliding login receives a separate device identity instead.
 
+
+## Agent protocol and capabilities
+
+Local agents send a lightweight hello handshake when their WebSocket connects. The handshake reports the protocol version, package version, platform/architecture, and the capabilities that are actually enabled on that machine. Feature routing should use the advertised capability list rather than inferring support from the package version alone.
+
+Protocol v1 keeps legacy agents backward compatible: a connected agent that does not send hello metadata can still use the pre-handshake behavior. An agent that explicitly advertises an unsupported protocol is disconnected with a clear incompatibility reason instead of failing later on an unrelated tool call or entering a restart loop.
+
 ## Dashboard administrator sessions
 
 Browser dashboard access uses the same Chat Relay username/password accounts but requires an explicit global administrator entitlement. Successful dashboard login creates a short-lived opaque server-side session; the browser receives an HttpOnly, Secure, SameSite=Strict cookie plus a CSRF token for state-changing requests. `ADMIN_TOKEN` remains an operator/CLI recovery credential and must never be embedded in dashboard JavaScript, browser storage, or URLs.

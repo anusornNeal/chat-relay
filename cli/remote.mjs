@@ -8,7 +8,7 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 let stopping = false;
 
 export function shouldRestartAgent(result, stoppingNow = false) {
-  return !stoppingNow && result?.code !== 2;
+  return !stoppingNow && result?.code !== 2 && result?.code !== 3;
 }
 
 function terminateChildTree(child) {
@@ -108,6 +108,11 @@ export async function remote(options = {}) {
     if (result.code === 2) {
       stopping = true;
       console.error("Agent authorization is no longer valid. Run chat-relay login --force, then chat-relay remote.");
+      break;
+    }
+    if (result.code === 3) {
+      stopping = true;
+      console.error("Agent protocol is incompatible with the relay. Update Chat Relay, then run chat-relay remote again.");
       break;
     }
 

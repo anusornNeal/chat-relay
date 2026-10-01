@@ -5,6 +5,7 @@ import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
 import { CapabilityScheduler } from "./capability-scheduler.mjs";
 import { AgentConnectionState } from "./connection-state.mjs";
+import { buildAgentHello } from "./protocol.mjs";
 
 const relayUrl = process.env.RELAY_URL;
 const agentToken = process.env.AGENT_TOKEN;
@@ -13,6 +14,7 @@ const agentName = process.env.AGENT_NAME || agentId;
 const reconnectMs = Number(process.env.RECONNECT_MS ?? 2000);
 const terminalEnabled = process.env.TERMINAL_ENABLED === "1";
 const desktopEnabled = process.env.DESKTOP_ENABLED === "1";
+const agentHello = buildAgentHello({ terminalEnabled, desktopEnabled });
 const MAX_RESPONSE_BYTES = 60 * 1024;
 const terminals = new TerminalManager({
   batchConcurrency: process.env.TERMINAL_BATCH_CONCURRENCY,
@@ -88,6 +90,13 @@ async function handlePayload(payload) {
         terminalContinuity: {
           processId: process.pid,
           activeSessions: terminals.list().filter((session) => session.status === "running").length,
+        },
+        protocol: {
+          protocolVersion: agentHello.protocolVersion,
+          agentVersion: agentHello.agentVersion,
+          platform: agentHello.platform,
+          arch: agentHello.arch,
+          capabilities: agentHello.capabilities,
         },
       });
     case "agent.recentCalls":
@@ -225,6 +234,23 @@ function scheduleReconnect(code, reason) {
   }, delay);
 }
 
+
+function requireProtocolUpdate(details = {}) {
+  if (stopping) return;
+  stopping = true;
+  connectionState.markStopping("protocol_incompatible");
+  clearReconnectTimer();
+  stopHeartbeat();
+  const socket = activeSocket;
+  activeSocket = null;
+  try { socket?.terminate(); } catch {}
+  desktop.close();
+  const expected = details.expectedProtocolVersion ?? "current";
+  const received = details.receivedProtocolVersion ?? agentHello.protocolVersion;
+  console.error(`Agent protocol is incompatible (local=${received}, relay=${expected}). Update Chat Relay, then reconnect.`);
+  setImmediate(() => process.exit(3));
+}
+
 function requireReauthorization(reason = "credential_revoked") {
   if (reauthorizationRequired) return;
   reauthorizationRequired = true;
@@ -255,6 +281,7 @@ function connect() {
 
   socket.on("open", () => {
     if (socket !== activeSocket) return;
+    socket.send(JSON.stringify(agentHello));
     connectionState.markConnected();
     startHeartbeat(socket);
     console.log("Agent connected");
@@ -271,6 +298,10 @@ function connect() {
 
     if (message?.control === "credential_revoked") {
       requireReauthorization("credential_revoked");
+      return;
+    }
+    if (message?.control === "protocol_incompatible") {
+      requireProtocolUpdate(message);
       return;
     }
 
@@ -321,6 +352,10 @@ function connect() {
     console.log("Agent disconnected (" + code + ") " + reasonText);
     if (code === 4001 || reasonText === "credential_revoked") {
       requireReauthorization("credential_revoked");
+      return;
+    }
+    if (code === 4002 || reasonText === "protocol_incompatible") {
+      requireProtocolUpdate({ receivedProtocolVersion: agentHello.protocolVersion });
       return;
     }
     scheduleReconnect(code, reasonText || "socket_closed");

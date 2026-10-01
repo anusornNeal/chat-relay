@@ -1,6 +1,45 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import WebSocket from "ws";
+import { AGENT_PROTOCOL_VERSION, buildAgentHello } from "../agent/protocol.mjs";
+import { shouldRestartAgent } from "../cli/remote.mjs";
+
+function protocolContractTests() {
+  const windows = buildAgentHello({
+    agentVersion: "test-version",
+    platform: "win32",
+    arch: "x64",
+    terminalEnabled: true,
+    desktopEnabled: true,
+  });
+  if (windows.protocolVersion !== AGENT_PROTOCOL_VERSION || windows.agentVersion !== "test-version") {
+    throw new Error("agent hello identity failed");
+  }
+  for (const capability of ["filesystem.batch", "terminal.batch", "desktop.control"]) {
+    if (!windows.capabilities.includes(capability)) throw new Error(`missing capability: ${capability}`);
+  }
+
+  const linux = buildAgentHello({
+    agentVersion: "test-version",
+    platform: "linux",
+    arch: "x64",
+    terminalEnabled: false,
+    desktopEnabled: true,
+  });
+  if (linux.capabilities.some((item) => item.startsWith("desktop."))) {
+    throw new Error("unsupported desktop capability was advertised");
+  }
+  if (linux.capabilities.some((item) => item.startsWith("terminal."))) {
+    throw new Error("disabled terminal capability was advertised");
+  }
+  if (shouldRestartAgent({ code: 3 }) !== false) {
+    throw new Error("protocol incompatibility would restart the CLI loop");
+  }
+}
+
+protocolContractTests();
+
 import { FileManager } from "../agent/file-manager.mjs";
 
 async function fsBatchBoundaryTests() {
@@ -70,6 +109,43 @@ async function tool(token, id, name, args = {}, expectError = false) {
   return JSON.parse(text);
 }
 
+async function expectProtocolMismatch(agent) {
+  const wsBase = base.replace(/^http/, "ws");
+  return await new Promise((resolve, reject) => {
+    const socket = new WebSocket(
+      `${wsBase}/agent?agentId=${encodeURIComponent(agent.agent.id)}`,
+      { headers: { authorization: `Bearer ${agent.token}` } },
+    );
+    let response = null;
+    const timer = setTimeout(() => {
+      try { socket.terminate(); } catch {}
+      reject(new Error("protocol mismatch socket timed out"));
+    }, 3000);
+
+    socket.once("open", () => {
+      socket.send(JSON.stringify({
+        control: "agent_hello",
+        protocolVersion: 999,
+        agentVersion: "future-test",
+        platform: "win32",
+        arch: "x64",
+        capabilities: ["filesystem.read"],
+      }));
+    });
+    socket.on("message", (raw) => {
+      try { response = JSON.parse(raw.toString()); } catch {}
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    socket.once("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, response });
+    });
+  });
+}
+
 async function waitForText(token, sessionId, expected, timeoutMs = 4000) {
   const deadline = Date.now() + timeoutMs;
   let text = "";
@@ -100,12 +176,23 @@ const agents = await tool(ownerToken, 2, "list_agents");
 if (!agents.agents?.some((agent) => agent.id === "default" && agent.online)) {
   throw new Error(`default agent not online: ${JSON.stringify(agents)}`);
 }
+const negotiatedAgent = agents.agents.find((agent) => agent.id === "default");
+if (negotiatedAgent?.connection?.protocolVersion !== AGENT_PROTOCOL_VERSION) {
+  throw new Error(`negotiated protocol missing from list_agents: ${JSON.stringify(negotiatedAgent)}`);
+}
+if (!negotiatedAgent.connection.capabilities?.includes("filesystem.batch")) {
+  throw new Error("negotiated capabilities missing filesystem.batch");
+}
 console.log("agent routing ok");
 
 const config = await tool(ownerToken, 3, "get_config");
 const configPayload = config.payload;
 if (!configPayload?.allowedRoots?.length) throw new Error("missing allowed roots");
 if (configPayload?.desktop?.enabled !== false) throw new Error("desktop should be disabled by default");
+if (configPayload?.protocol?.protocolVersion !== AGENT_PROTOCOL_VERSION) throw new Error("agent protocol version missing from config");
+if (!configPayload?.protocol?.agentVersion) throw new Error("agent package version missing from config");
+if (!configPayload?.protocol?.capabilities?.includes("filesystem.batch")) throw new Error("filesystem batch capability missing from config");
+if (configPayload.protocol.capabilities.includes("desktop.control")) throw new Error("disabled desktop capability advertised");
 
 const disabledShot = await tool(ownerToken, 30, "screenshot", {}, true);
 if (disabledShot.payload?.error !== "desktop_disabled") throw new Error("screenshot did not honor desktop opt-in gate");
@@ -348,6 +435,13 @@ const secondary = await admin("/admin/agents", "POST", {
   name: "Secondary Test",
   id: `secondary-${suffix}`,
 });
+const protocolMismatch = await expectProtocolMismatch(secondary);
+if (protocolMismatch.code !== 4002 ||
+    protocolMismatch.response?.control !== "protocol_incompatible" ||
+    protocolMismatch.response?.expectedProtocolVersion !== AGENT_PROTOCOL_VERSION) {
+  throw new Error(`protocol mismatch negotiation failed: ${JSON.stringify(protocolMismatch)}`);
+}
+console.log("protocol mismatch rejection ok");
 await admin("/admin/grants", "POST", {
   userId: readerUser.user.id,
   agentId: secondary.agent.id,
