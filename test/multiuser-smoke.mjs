@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 import WebSocket from "ws";
 import { AGENT_PROTOCOL_VERSION, buildAgentHello } from "../agent/protocol.mjs";
@@ -78,7 +79,32 @@ async function fsBatchBoundaryTests() {
   if (!rejected) throw new Error("fs batch item cap was not enforced");
 }
 
+async function allowedRootBoundaryTests() {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "chat-relay-boundary-"));
+  const allowed = path.join(sandbox, "allowed");
+  const outside = path.join(sandbox, "outside");
+  fs.mkdirSync(allowed, { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(path.join(outside, "secret.txt"), "outside-secret", "utf8");
+  const escape = path.join(allowed, "escape");
+  fs.symlinkSync(outside, escape, process.platform === "win32" ? "junction" : "dir");
+  const manager = new FileManager(allowed);
+  const expectBlocked = async (operation, label) => {
+    let code = "";
+    try { await operation(); } catch (error) { code = error instanceof Error ? error.message : String(error); }
+    if (code !== "path_not_allowed") throw new Error(label + " escaped allowedRoots: " + code);
+  };
+  try {
+    await expectBlocked(() => manager.read(path.join(allowed, "..", "outside", "secret.txt")), "path traversal");
+    await expectBlocked(() => manager.read(path.join(escape, "secret.txt")), "symlink read");
+    await expectBlocked(() => manager.write(path.join(escape, "new.txt"), "blocked"), "symlink write");
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
 await fsBatchBoundaryTests();
+await allowedRootBoundaryTests();
 
 const vars = Object.fromEntries(
   fs.readFileSync(".dev.vars", "utf8").split(/\r?\n/)

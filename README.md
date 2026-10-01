@@ -334,3 +334,17 @@ Agent updates remain explicit and user-controlled. Check the current agent versi
 Before restarting an active remote, run `chat-relay drain`. Drain mode rejects new long-running work while existing terminal/session control remains available so bounded work can finish or be stopped safely. When `status` reports the lifecycle is ready to restart, run `chat-relay restart`. Use `chat-relay resume` to cancel a drain before restart.
 
 To install a newer package, stop/restart the wrapper with the desired npm version (for example `npx @anusornneal/chat-relay@latest remote --desktop`). The agent does not self-modify or automatically cross an incompatible protocol version.
+
+
+### Trusted-team security baseline
+
+Chat Relay is currently designed for a small trusted internal team, not as an enterprise zero-trust control plane. The intentionally small baseline is:
+
+- Filesystem access is constrained to configured `allowedRoots`; canonical real paths are checked so `..` traversal and symlink/junction escapes are rejected.
+- Agent grants continue to enforce the existing read/write/process/terminal/desktop scopes. User and agent credentials can be revoked or rotated without retaining raw tokens server-side.
+- Persisted usage/audit/dashboard telemetry is metadata-only. Commands, tool arguments, payloads, stdout/stderr, file contents, clipboard contents, screenshots, credentials, and arbitrary remote messages are excluded.
+- Accidental runaway use is bounded by request/response size limits, rate/quota controls, per-capability queues, queue timeouts, terminal batch limits, and bounded history/query windows.
+
+Regression coverage is provided by the filesystem boundary checks in `test/multiuser-smoke.mjs`, credential/scope tests in the device/admin/multi-user smoke suites, telemetry privacy checks in `test/ops-smoke.mjs`, and queue/size tests in the terminal and filesystem smoke suites.
+
+Deferred by design: enterprise role hierarchies, approval workflows, device-attestation/trust frameworks, and a general policy engine. Add those only if the deployment threat model changes.
