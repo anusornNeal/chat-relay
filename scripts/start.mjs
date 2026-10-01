@@ -1,4 +1,0 @@
-import { runCli } from "../cli/index.mjs";
-
-const code = await runCli(["remote", ...process.argv.slice(2)]);
-if (Number.isInteger(code) && code !== 0) process.exitCode = code;

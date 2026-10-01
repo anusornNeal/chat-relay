@@ -5,6 +5,9 @@ import {
   randomSalt,
   secureEqual,
 } from "./auth-crypto";
+import { hashToken, newToken, normalizeAgentId } from "./token-utils";
+
+export { hashToken, newToken, normalizeAgentId } from "./token-utils";
 
 export type Scope = "read" | "write" | "terminal" | "process" | "desktop_read" | "desktop_control" | "admin";
 export type UserRecord = {
@@ -130,26 +133,6 @@ const key = {
   oauthRefresh: (hash: string) => `oauth-refresh:${hash}`,
   oauthRegisterRate: (sourceHash: string) => `oauth-register-rate:${sourceHash}`,
 };
-
-export async function hashToken(token: string): Promise<string> {
-  const bytes = new TextEncoder().encode(token);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export function newToken(prefix: string): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let binary = "";
-  for (const value of bytes) binary += String.fromCharCode(value);
-  return `${prefix}_${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
-}
-
-export function normalizeAgentId(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-  if (!normalized || normalized.length > 64) throw new Error("invalid_agent_id");
-  return normalized;
-}
 
 function hasScope(grant: GrantRecord, scope: string): boolean {
   return grant.scopes.includes("*") || grant.scopes.includes(scope);
