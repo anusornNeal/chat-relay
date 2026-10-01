@@ -74,6 +74,8 @@ const ICONS = {
   external: '<path d="M14 3h7v7M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
   server: '<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/>',
   terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/>',
+  mouse: '<rect x="7" y="2" width="10" height="20" rx="5"/><path d="M12 2v6"/>',
+  monitor: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
@@ -83,6 +85,14 @@ const ICONS = {
 function icon(name, cls = "") {
   return '<svg class="icon ' + cls + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' + (ICONS[name] || ICONS.info) + "</svg>";
 }
+
+const toolIconName = (tool) => {
+  const name = String(tool || "");
+  if (name.startsWith("terminal")) return "terminal";
+  if (name === "screenshot") return "monitor";
+  if (["desktop_step", "mouse_click", "keyboard_input", "focus_window"].includes(name)) return "mouse";
+  return "activity";
+};
 
 const humanTool = (tool) => ({
   terminal_exec: "One-shot command",
@@ -743,7 +753,7 @@ function callRowMarkup(event) {
   return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Tool call detail">' +
     '<td class="time-cell"><strong>' + esc(when ? bkkTime(when) : "-") + "</strong></td>" +
     (isAdmin() ? '<td><span class="user-cell">' + esc(event.userId || "-") + "</span></td>" : "") +
-    '<td><div class="tool-cell"><span class="tool-icon">' + icon(event.tool?.startsWith("terminal") ? "terminal" : "activity") + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
+    '<td><div class="tool-cell"><span class="tool-icon">' + icon(toolIconName(event.tool)) + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
     '<td><div class="agent-cell"><strong>' + esc(callAgentName(event)) + "</strong></div></td>" +
     '<td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
     "<td>" + duration + "</td>" +
