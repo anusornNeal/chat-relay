@@ -211,6 +211,7 @@ const MAX_BYTES = 64 * 1024;
 const TIMEOUT_MS = 30_000;
 const TEMP_ARTIFACT_DEFAULT_TTL_SECONDS = 300;
 const TEMP_ARTIFACT_MAX_TTL_SECONDS = 900;
+const TEMP_ARTIFACT_EXPIRED_TOMBSTONE_MS = 60_000;
 const TEMP_ARTIFACT_MIME_TYPES = new Set([
   "text/plain; charset=utf-8",
   "text/markdown; charset=utf-8",
@@ -367,7 +368,7 @@ export class Relay extends DurableObject {
     const artifact = await this.ctx.storage.get<any>(key);
     if (!artifact) return error(404, "not_found");
 
-    if (typeof artifact.expiresAt !== "number" || Date.now() >= artifact.expiresAt) {
+    if (artifact.expired === true || typeof artifact.expiresAt !== "number" || Date.now() >= artifact.expiresAt) {
       await this.ctx.storage.delete(key);
       return error(410, "expired");
     }
@@ -401,8 +402,25 @@ export class Relay extends DurableObject {
     for (const entries of [shots, artifacts]) {
       for (const [key, artifact] of entries) {
         const expiresAt = typeof artifact?.expiresAt === "number" ? artifact.expiresAt : 0;
+        const deleteAfter = artifact?.expired === true && typeof artifact?.deleteAfter === "number"
+          ? artifact.deleteAfter
+          : null;
+        if (deleteAfter !== null) {
+          if (deleteAfter <= now) {
+            await this.ctx.storage.delete(key);
+          } else if (nextExpiry === null || deleteAfter < nextExpiry) {
+            nextExpiry = deleteAfter;
+          }
+          continue;
+        }
         if (expiresAt <= now) {
-          await this.ctx.storage.delete(key);
+          const tombstoneUntil = now + TEMP_ARTIFACT_EXPIRED_TOMBSTONE_MS;
+          await this.ctx.storage.put(key, {
+            expired: true,
+            expiresAt,
+            deleteAfter: tombstoneUntil,
+          });
+          if (nextExpiry === null || tombstoneUntil < nextExpiry) nextExpiry = tombstoneUntil;
         } else if (nextExpiry === null || expiresAt < nextExpiry) {
           nextExpiry = expiresAt;
         }
