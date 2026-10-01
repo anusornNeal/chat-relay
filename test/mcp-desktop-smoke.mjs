@@ -25,7 +25,7 @@ async function managerTests() {
   let runnerCalls = [];
   const runner = async (operation, args) => {
     runnerCalls.push({ operation, args });
-    if (operation === "screenshot" || (operation === "step" && args.captureAfter !== false)) {
+    if (operation === "screenshot" || (operation === "step" && args.captureAfter === true)) {
       return {
         ok: true,
         mimeType: "image/jpeg",
@@ -106,8 +106,21 @@ async function managerTests() {
   assert(step.ok, "desktop step failed");
   const stepCall = runnerCalls.find((item) => item.operation === "step");
   assert(stepCall?.args.actions.length === 4, "desktop step actions were not batched");
+  assert(stepCall?.args.actions[0]?.settleAfterMs === 25, "adaptive click settle was not applied");
   assert(stepCall?.args.monitor === "secondary", "desktop step monitor was not forwarded");
   assert(stepCall?.args.maxWidth === 640 && stepCall?.args.quality === 45, "desktop step capture options were not forwarded");
+
+  const fastStep = await manager.step({ actions: [
+    { type: "text", text: "a" },
+    { type: "text", text: "b" },
+    { type: "wait", ms: 0 },
+  ] });
+  assert(fastStep.ok, "default no-capture step failed");
+  const fastStepCall = runnerCalls.filter((item) => item.operation === "step").at(-1);
+  assert(fastStepCall?.args.captureAfter === false, "desktop step captured by default");
+  assert(fastStepCall?.args.actions.length === 1 && fastStepCall.args.actions[0]?.text === "ab", "desktop step compaction failed");
+  assert(fastStepCall?.args.settleMs === 0, "no-capture step added final settle");
+  assert(fastStep.timing?.requestedActions === 3 && fastStep.timing?.executedActions === 1, "step timing action counts missing");
 
   let activeControls = 0;
   let maxActiveControls = 0;
@@ -245,7 +258,7 @@ async function mcpTests() {
         byteLength: Buffer.from(tinyJpeg, "base64").byteLength,
       };
     } else if (action === "desktop.step") {
-      if (message.payload?.captureAfter === false) {
+      if (message.payload?.captureAfter !== true) {
         payload = { ok: true, action, actionsCompleted: message.payload?.actions?.length || 0 };
       } else {
         payload = {
@@ -380,10 +393,9 @@ async function mcpTests() {
     arguments: {
       agentId,
       actions: [{ type: "click", x: 10, y: 10 }],
-      captureAfter: false,
     },
   });
-  assert(!controllerStepNoCapture.result?.isError, "desktop_control step without capture failed");
+  assert(!controllerStepNoCapture.result?.isError, "desktop_control default no-capture step failed");
 
   const controllerStepWithCapture = await rpc(controller.token, 8, "tools/call", {
     name: "desktop_step",

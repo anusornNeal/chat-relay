@@ -49,6 +49,16 @@ const desktop = new DesktopManager({
   controlQueueTimeoutMs: process.env.AGENT_QUEUE_TIMEOUT_MS,
 });
 const recentCalls = [];
+const RECENT_TIMING_KEYS = ["queueWaitMs", "inputMs", "explicitWaitMs", "settleMs", "captureMs", "encodeMs", "workerMs", "managerMs", "totalMs", "requestedActions", "executedActions"];
+function recentTiming(value) {
+  if (!value || typeof value !== "object") return null;
+  const output = {};
+  for (const key of RECENT_TIMING_KEYS) {
+    const number = Number(value[key]);
+    if (Number.isFinite(number) && number >= 0) output[key] = Math.round(number);
+  }
+  return Object.keys(output).length > 0 ? output : null;
+}
 let reauthorizationRequired = false;
 let activeSocket = null;
 let reconnectTimer = null;
@@ -377,6 +387,7 @@ function connect() {
           handlerDurationMs = Math.max(0, Date.now() - handlerStartedAt);
         }
       });
+      const timing = recentTiming(result?.timing);
       recentCalls.push({
         at: new Date().toISOString(),
         action,
@@ -384,6 +395,7 @@ function connect() {
         queueWaitMs: scheduleMeta.queueWaitMs,
         handlerDurationMs,
         lane: scheduleMeta.lane,
+        ...(timing ? { timing } : {}),
         ok: !(result && typeof result === "object" && result.ok === false),
       });
       if (recentCalls.length > 100) recentCalls.shift();

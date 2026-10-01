@@ -219,6 +219,7 @@ Desktop interaction is disabled by default and requires two independent gates:
 - `screenshot` captures the selected interactive display on Windows or macOS, scales/compresses it to a bounded JPEG, and returns it as an MCP image block. The accompanying metadata contains image size, desktop origin/size, and scale factors for converting screenshot pixels to desktop coordinates.
 - `mouse_click` accepts integer desktop x/y coordinates, button `left|right|middle`, and click count 1 or 2. Invalid/out-of-bounds input is rejected rather than coerced.
 - `keyboard_input` accepts either Unicode `text` or one named `key` with optional Ctrl/Alt/Shift/Win modifiers. Text and key cannot be supplied together.
+- `desktop_step` batches 1-20 actions in one local round trip, compacts adjacent text/waits, and uses adaptive settle delays. It does not capture by default; set `captureAfter: true` when a post-action screenshot is required. Timing metadata separates local queue, input, wait/settle, capture, and encode costs.
 - Windows uses the persistent PowerShell desktop worker. macOS uses built-in `screencapture`, `sips`, `osascript`/JXA, CoreGraphics, and System Events; no extra npm/native dependency is required.
 - macOS desktop capture requires Screen Recording permission for the terminal/Node process, while mouse, keyboard, and window control require Accessibility permission. Missing permissions return controlled errors instead of crashing the reconnect loop.
 - Linux desktop control is not implemented yet and returns `unsupported_platform`.

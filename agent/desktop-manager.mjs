@@ -66,6 +66,54 @@ function normalizeKeyboardInput(input = {}) {
   };
 }
 
+function compactStepActions(actions) {
+  const compacted = [];
+  for (const action of actions) {
+    const previous = compacted.at(-1);
+    if (action.type === "wait" && action.ms === 0) continue;
+    if (action.type === "text" && previous?.type === "text" &&
+        previous.text.length + action.text.length <= MAX_TEXT_LENGTH) {
+      previous.text += action.text;
+      continue;
+    }
+    if (action.type === "wait" && previous?.type === "wait" && previous.ms + action.ms <= 5000) {
+      previous.ms += action.ms;
+      continue;
+    }
+    compacted.push({ ...action });
+  }
+  return compacted.length > 0 ? compacted : actions.map((action) => ({ ...action }));
+}
+
+function adaptiveActionSettleMs(action, nextAction) {
+  if (!nextAction || action.type === "wait") return 0;
+  if (action.type === "click") {
+    if (action.clicks === 2) return 45;
+    return nextAction.type === "text" || nextAction.type === "key" ? 25 : 15;
+  }
+  if (action.type === "text") return 0;
+  if (action.type === "key") {
+    if ((action.alt && action.key === "tab") || action.win) return 120;
+    if (["enter", "tab", "escape"].includes(action.key)) return 25;
+    return 5;
+  }
+  return 0;
+}
+
+function adaptiveFinalSettleMs(actions, wantsCapture) {
+  if (!wantsCapture || actions.length === 0) return 0;
+  const action = actions.at(-1);
+  if (action.type === "wait") return 0;
+  if (action.type === "click") return action.clicks === 2 ? 60 : 35;
+  if (action.type === "text") return 10;
+  if (action.type === "key") {
+    if ((action.alt && action.key === "tab") || action.win) return 180;
+    if (["enter", "tab", "escape"].includes(action.key)) return 50;
+    return 15;
+  }
+  return 0;
+}
+
 export function createDesktopPlatformAdapter(options = {}) {
   const platform = options.platform ?? process.platform;
   const customRunner = typeof options.runner === "function" ? options.runner : null;
@@ -309,15 +357,23 @@ export class DesktopManager {
       return { ok: false, error: "invalid_step_action" };
     }
 
+    const compactedActions = compactStepActions(normalizedActions);
+    const optimizedActions = compactedActions.map((action, index) => {
+      const settleAfterMs = adaptiveActionSettleMs(action, compactedActions[index + 1]);
+      return settleAfterMs > 0 ? { ...action, settleAfterMs } : action;
+    });
+
     const monitor = input.monitor ?? "primary";
     if (!(monitor === "primary" || monitor === "secondary" || (Number.isInteger(monitor) && monitor >= 0 && monitor <= 15))) {
       return { ok: false, error: "invalid_monitor" };
     }
 
-    const settleMs = input.settleMs === undefined ? 120 : Number(input.settleMs);
+    const wantsCapture = input.captureAfter === true;
+    const settleMs = input.settleMs === undefined
+      ? adaptiveFinalSettleMs(compactedActions, wantsCapture)
+      : Number(input.settleMs);
     if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 5000) return { ok: false, error: "invalid_settle_ms" };
 
-    const wantsCapture = input.captureAfter !== false;
     const maxWidth = input.maxWidth === undefined ? 960 : Number(input.maxWidth);
     const quality = input.quality === undefined ? 58 : Number(input.quality);
     if (wantsCapture && (!Number.isInteger(maxWidth) || maxWidth < MIN_SCREENSHOT_WIDTH || maxWidth > MAX_SCREENSHOT_WIDTH)) {
@@ -327,15 +383,36 @@ export class DesktopManager {
       return { ok: false, error: "invalid_quality" };
     }
 
-    const result = await this.runControl(() => this.runner("step", {
-      actions: normalizedActions,
-      captureAfter: wantsCapture,
-      settleMs,
-      monitor,
-      ...(wantsCapture ? { maxWidth, quality } : {}),
-    }));
+    const managerStartedAt = Date.now();
+    const result = await this.runControl(async (queueMeta = {}) => {
+      const handlerStartedAt = Date.now();
+      const workerResult = await this.runner("step", {
+        actions: optimizedActions,
+        captureAfter: wantsCapture,
+        settleMs,
+        monitor,
+        ...(wantsCapture ? { maxWidth, quality } : {}),
+      });
+      if (!workerResult || typeof workerResult !== "object") return workerResult;
+      return {
+        ...workerResult,
+        timing: {
+          ...(workerResult.timing && typeof workerResult.timing === "object" ? workerResult.timing : {}),
+          queueWaitMs: Math.max(0, Number(queueMeta.queueWaitMs) || 0),
+          managerMs: Math.max(0, Date.now() - handlerStartedAt),
+          requestedActions: normalizedActions.length,
+          executedActions: optimizedActions.length,
+        },
+      };
+    });
+    if (result && typeof result === "object") {
+      result.timing = {
+        ...(result.timing && typeof result.timing === "object" ? result.timing : {}),
+        totalMs: Math.max(0, Date.now() - managerStartedAt),
+      };
+    }
 
-    if (input.captureAfter === false) return result;
+    if (!wantsCapture) return result;
     return this.normalizeScreenshotResult(result);
   }
 

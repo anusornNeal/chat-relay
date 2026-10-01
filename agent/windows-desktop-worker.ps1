@@ -195,6 +195,7 @@ function Resolve-Screen($Monitor) {
 }
 
 function Invoke-Screenshot($Payload) {
+  $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
   if (-not [System.Windows.Forms.SystemInformation]::UserInteractive) {
     return Result-Error "session_unavailable"
   }
@@ -212,11 +213,15 @@ function Invoke-Screenshot($Payload) {
   try {
     $source = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
     $graphics = [System.Drawing.Graphics]::FromImage($source)
+    $captureTimer = [System.Diagnostics.Stopwatch]::StartNew()
     try {
       $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bounds.Size)
     } finally {
+      $captureTimer.Stop()
       $graphics.Dispose()
     }
+    $captureMs = [int][Math]::Round($captureTimer.Elapsed.TotalMilliseconds)
+    $encodeTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
     $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
       Where-Object { $_.MimeType -eq "image/jpeg" } |
@@ -282,13 +287,16 @@ function Invoke-Screenshot($Payload) {
     }
 
     if ($null -eq $bytes) { return Result-Error "screenshot_too_large" }
+    $base64 = [Convert]::ToBase64String($bytes)
+    $encodeTimer.Stop()
+    $totalTimer.Stop()
     $virtualBounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
     $monitorCount = @([System.Windows.Forms.Screen]::AllScreens).Count
 
     return [pscustomobject]@{
       ok = $true
       mimeType = "image/jpeg"
-      data = [Convert]::ToBase64String($bytes)
+      data = $base64
       width = $finalWidth
       height = $finalHeight
       virtualDesktopOriginX = $virtualBounds.Left
@@ -307,6 +315,11 @@ function Invoke-Screenshot($Payload) {
       isPrimary = [bool]$screen.Primary
       deviceName = [string]$screen.DeviceName
       byteLength = $bytes.Length
+      timing = [pscustomobject]@{
+        captureMs = $captureMs
+        encodeMs = [int][Math]::Round($encodeTimer.Elapsed.TotalMilliseconds)
+        screenshotTotalMs = [int][Math]::Round($totalTimer.Elapsed.TotalMilliseconds)
+      }
     }
   } catch {
     return Result-Error "capture_failed"
@@ -420,54 +433,115 @@ function Invoke-WindowFocus($Payload) {
 }
 
 function Invoke-Step($Payload) {
+  $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
   $completed = 0
+  $inputMs = 0
+  $explicitWaitMs = 0
+  $settleMs = 0
+
   foreach ($action in @($Payload.actions)) {
     $result = $null
-    switch ([string]$action.type) {
-      "click" { $result = Invoke-MouseClick $action }
-      "text" { $result = Invoke-KeyboardInput $action }
-      "key" { $result = Invoke-KeyboardInput $action }
-      "wait" {
-        Start-Sleep -Milliseconds ([int]$action.ms)
-        $result = [pscustomobject]@{ ok = $true; action = "wait" }
+    if ([string]$action.type -eq "wait") {
+      $waitTimer = [System.Diagnostics.Stopwatch]::StartNew()
+      Start-Sleep -Milliseconds ([int]$action.ms)
+      $waitTimer.Stop()
+      $explicitWaitMs += [int][Math]::Round($waitTimer.Elapsed.TotalMilliseconds)
+      $result = [pscustomobject]@{ ok = $true; action = "wait" }
+    } else {
+      $inputTimer = [System.Diagnostics.Stopwatch]::StartNew()
+      switch ([string]$action.type) {
+        "click" { $result = Invoke-MouseClick $action }
+        "text" { $result = Invoke-KeyboardInput $action }
+        "key" { $result = Invoke-KeyboardInput $action }
+        default { $result = Result-Error "invalid_step_action" }
       }
-      default { $result = Result-Error "invalid_step_action" }
+      $inputTimer.Stop()
+      $inputMs += [int][Math]::Round($inputTimer.Elapsed.TotalMilliseconds)
     }
 
     if (-not $result.ok) {
+      $totalTimer.Stop()
       return [pscustomobject]@{
         ok = $false
         error = $result.error
         actionsCompleted = $completed
+        timing = [pscustomobject]@{
+          inputMs = $inputMs
+          explicitWaitMs = $explicitWaitMs
+          settleMs = $settleMs
+          captureMs = 0
+          encodeMs = 0
+          workerMs = [int][Math]::Round($totalTimer.Elapsed.TotalMilliseconds)
+        }
       }
     }
+
     $completed++
+    $actionSettleMs = [int]$action.settleAfterMs
+    if ($actionSettleMs -gt 0) {
+      $settleTimer = [System.Diagnostics.Stopwatch]::StartNew()
+      Start-Sleep -Milliseconds $actionSettleMs
+      $settleTimer.Stop()
+      $settleMs += [int][Math]::Round($settleTimer.Elapsed.TotalMilliseconds)
+    }
   }
 
   if ([int]$Payload.settleMs -gt 0) {
+    $finalSettleTimer = [System.Diagnostics.Stopwatch]::StartNew()
     Start-Sleep -Milliseconds ([int]$Payload.settleMs)
+    $finalSettleTimer.Stop()
+    $settleMs += [int][Math]::Round($finalSettleTimer.Elapsed.TotalMilliseconds)
   }
 
-  if ($Payload.captureAfter -eq $false) {
+  if ($Payload.captureAfter -ne $true) {
+    $totalTimer.Stop()
     return [pscustomobject]@{
       ok = $true
       action = "step"
       actionsCompleted = $completed
+      timing = [pscustomobject]@{
+        inputMs = $inputMs
+        explicitWaitMs = $explicitWaitMs
+        settleMs = $settleMs
+        captureMs = 0
+        encodeMs = 0
+        workerMs = [int][Math]::Round($totalTimer.Elapsed.TotalMilliseconds)
+      }
     }
   }
 
   $shotPayload = [pscustomobject]@{ monitor = $Payload.monitor; maxWidth = $Payload.maxWidth; quality = $Payload.quality }
   $shot = Invoke-Screenshot $shotPayload
   if (-not $shot.ok) {
+    $totalTimer.Stop()
     return [pscustomobject]@{
       ok = $false
       error = $shot.error
       actionsCompleted = $completed
+      timing = [pscustomobject]@{
+        inputMs = $inputMs
+        explicitWaitMs = $explicitWaitMs
+        settleMs = $settleMs
+        captureMs = 0
+        encodeMs = 0
+        workerMs = [int][Math]::Round($totalTimer.Elapsed.TotalMilliseconds)
+      }
     }
   }
 
+  $totalTimer.Stop()
+  $captureMs = if ($null -ne $shot.timing) { [int]$shot.timing.captureMs } else { 0 }
+  $encodeMs = if ($null -ne $shot.timing) { [int]$shot.timing.encodeMs } else { 0 }
   $shot | Add-Member -NotePropertyName action -NotePropertyValue "step" -Force
   $shot | Add-Member -NotePropertyName actionsCompleted -NotePropertyValue $completed -Force
+  $shot | Add-Member -NotePropertyName timing -NotePropertyValue ([pscustomobject]@{
+    inputMs = $inputMs
+    explicitWaitMs = $explicitWaitMs
+    settleMs = $settleMs
+    captureMs = $captureMs
+    encodeMs = $encodeMs
+    workerMs = [int][Math]::Round($totalTimer.Elapsed.TotalMilliseconds)
+  }) -Force
   return $shot
 }
 

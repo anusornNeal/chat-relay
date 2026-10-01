@@ -499,6 +499,15 @@ type SafeTiming = {
   transportMs?: number;
   agentQueueWaitMs?: number;
   agentHandlerMs?: number;
+  desktopQueueWaitMs?: number;
+  desktopInputMs?: number;
+  desktopExplicitWaitMs?: number;
+  desktopSettleMs?: number;
+  desktopCaptureMs?: number;
+  desktopEncodeMs?: number;
+  desktopWorkerMs?: number;
+  desktopManagerMs?: number;
+  desktopTotalMs?: number;
 };
 
 function safeTimingMs(value: unknown): number | undefined {
@@ -856,12 +865,30 @@ async function callAgent(
     const transportMs = safeTimingMs(parsed?.meta?.transportMs);
     const agentQueueWaitMs = safeTimingMs(parsed?.meta?.agentQueueWaitMs);
     const agentHandlerMs = safeTimingMs(parsed?.meta?.agentHandlerMs);
+    const desktopQueueWaitMs = safeTimingMs(payload?.timing?.queueWaitMs);
+    const desktopInputMs = safeTimingMs(payload?.timing?.inputMs);
+    const desktopExplicitWaitMs = safeTimingMs(payload?.timing?.explicitWaitMs);
+    const desktopSettleMs = safeTimingMs(payload?.timing?.settleMs);
+    const desktopCaptureMs = safeTimingMs(payload?.timing?.captureMs);
+    const desktopEncodeMs = safeTimingMs(payload?.timing?.encodeMs);
+    const desktopWorkerMs = safeTimingMs(payload?.timing?.workerMs);
+    const desktopManagerMs = safeTimingMs(payload?.timing?.managerMs);
+    const desktopTotalMs = safeTimingMs(payload?.timing?.totalMs);
     const workerTotalMs = Math.max(0, Date.now() - workerStartedAt);
     timing = {
       ...(relayRoundTripMs === undefined ? {} : { relayRoundTripMs }),
       ...(transportMs === undefined ? {} : { transportMs }),
       ...(agentQueueWaitMs === undefined ? {} : { agentQueueWaitMs }),
       ...(agentHandlerMs === undefined ? {} : { agentHandlerMs }),
+      ...(desktopQueueWaitMs === undefined ? {} : { desktopQueueWaitMs }),
+      ...(desktopInputMs === undefined ? {} : { desktopInputMs }),
+      ...(desktopExplicitWaitMs === undefined ? {} : { desktopExplicitWaitMs }),
+      ...(desktopSettleMs === undefined ? {} : { desktopSettleMs }),
+      ...(desktopCaptureMs === undefined ? {} : { desktopCaptureMs }),
+      ...(desktopEncodeMs === undefined ? {} : { desktopEncodeMs }),
+      ...(desktopWorkerMs === undefined ? {} : { desktopWorkerMs }),
+      ...(desktopManagerMs === undefined ? {} : { desktopManagerMs }),
+      ...(desktopTotalMs === undefined ? {} : { desktopTotalMs }),
       ...(relayRoundTripMs === undefined ? {} : { workerOverheadMs: Math.max(0, workerTotalMs - relayRoundTripMs) }),
     };
     if (payload?.ok === false) ok = false;
@@ -940,6 +967,7 @@ async function screenshotToolResult(env: Env, agentId: string | undefined, resul
       tempUrl: baseUrl ? baseUrl + tempPath : tempPath,
       expiresAt: new Date(temp.expiresAt).toISOString(),
       expiresInSeconds: 300,
+      ...(payload.timing && typeof payload.timing === "object" ? { timing: payload.timing } : {}),
     };
 
     return {
@@ -1369,6 +1397,7 @@ function createMcpServer(env: Env, user: AuthUser) {
         value: await screenshotToolResult(env, call.agentId, call),
         ok: call.ok,
         agentId: call.agentId,
+        ...(call.timing ? { timing: call.timing } : {}),
         ...failureMetadata(call),
       };
     }),
@@ -1449,7 +1478,7 @@ function createMcpServer(env: Env, user: AuthUser) {
   server.registerTool(
     "desktop_step",
     {
-      description: "Run 1-20 desktop actions in one local round trip and optionally capture the target monitor afterward. Use this for fast computer-use loops. captureAfter defaults to true and requires both desktop_control and desktop_read permission.",
+      description: "Run 1-20 desktop actions in one local round trip and optionally capture the target monitor afterward. Use this for fast computer-use loops. captureAfter defaults to false; set captureAfter=true when you need a screenshot afterward. Capturing requires both desktop_control and desktop_read permission.",
       inputSchema: {
         agentId: agentIdSchema,
         actions: z.array(z.union([
@@ -1499,7 +1528,7 @@ function createMcpServer(env: Env, user: AuthUser) {
       "desktop_step",
       { agentId, actions, captureAfter, settleMs, monitor, maxWidth, quality },
       async () => {
-        const wantsCapture = captureAfter !== false;
+        const wantsCapture = captureAfter === true;
         const call = await callAgent(
           env,
           user,
@@ -1511,6 +1540,7 @@ function createMcpServer(env: Env, user: AuthUser) {
           value: wantsCapture ? await screenshotToolResult(env, call.agentId, call) : toolResult(call),
           ok: call.ok,
           agentId: call.agentId,
+          ...(call.timing ? { timing: call.timing } : {}),
           ...failureMetadata(call),
         };
       },
@@ -1715,7 +1745,7 @@ async function handleDirectRelay(request: Request, env: Env, user: AuthUser): Pr
   const action = typeof body.payload === "object" && body.payload !== null
     ? String((body.payload as any).action ?? "")
     : "";
-  const requestedScopes: Scope[] = action === "desktop.step" && (body.payload as any)?.captureAfter !== false
+  const requestedScopes: Scope[] = action === "desktop.step" && (body.payload as any)?.captureAfter === true
     ? ["desktop_control", "desktop_read"]
     : [scopeForAction(action)];
   const resolved = await resolveAgentForScopes(env, user.id, requestedScopes, agentId);

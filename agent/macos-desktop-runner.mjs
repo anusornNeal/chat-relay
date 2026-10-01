@@ -86,6 +86,7 @@ export class MacOSDesktopRunner {
   }
 
   async #screenshot(args = {}) {
+    const screenshotStartedAt = Date.now();
     const info = await this.#screenInfo();
     if (!info?.ok || !Array.isArray(info.screens) || info.screens.length === 0) {
       return info?.ok === false ? info : { ok: false, error: "capture_failed" };
@@ -105,6 +106,7 @@ export class MacOSDesktopRunner {
     const source = path.join(dir, "source.jpg");
     const output = path.join(dir, "output.jpg");
     try {
+      const captureStartedAt = Date.now();
       await execNative("/usr/sbin/screencapture", ["-x", "-D", String(index + 1), "-t", "jpg", source], {
         timeoutMs: this.timeoutMs,
       }).catch((error) => {
@@ -112,6 +114,8 @@ export class MacOSDesktopRunner {
         if (/screen recording|permission|not authorized/i.test(message)) throw new Error("screen_recording_permission_required");
         throw error;
       });
+      const captureMs = Math.max(0, Date.now() - captureStartedAt);
+      const encodeStartedAt = Date.now();
 
       const originalInfo = parseSipsSize(await execNative("/usr/bin/sips", [
         "-g", "pixelWidth", "-g", "pixelHeight", source,
@@ -177,6 +181,11 @@ export class MacOSDesktopRunner {
         virtualDesktopHeight: Number(info.virtualDesktopHeight),
         monitorCount: info.screens.length,
         jpegQuality: finalQuality,
+        timing: {
+          captureMs,
+          encodeMs: Math.max(0, Date.now() - encodeStartedAt),
+          screenshotTotalMs: Math.max(0, Date.now() - screenshotStartedAt),
+        },
       };
     } catch (error) {
       if (error instanceof Error && error.message === "screen_recording_permission_required") {
@@ -207,21 +216,63 @@ export class MacOSDesktopRunner {
   }
 
   async #step(args = {}) {
+    const startedAt = Date.now();
+    let inputMs = 0;
+    let explicitWaitMs = 0;
+    let settleMs = 0;
+
     for (const action of args.actions || []) {
       if (action.type === "wait") {
+        const waitStartedAt = Date.now();
         await new Promise((resolve) => setTimeout(resolve, action.ms));
+        explicitWaitMs += Math.max(0, Date.now() - waitStartedAt);
         continue;
       }
+
+      const inputStartedAt = Date.now();
       const result = action.type === "click"
         ? await this.#jxa("mouse_click", action)
         : await this.#jxa("keyboard_input", action);
-      if (!result?.ok) return result || { ok: false, error: "input_failed" };
+      inputMs += Math.max(0, Date.now() - inputStartedAt);
+      if (!result?.ok) {
+        return {
+          ...(result || { ok: false, error: "input_failed" }),
+          timing: { inputMs, explicitWaitMs, settleMs, captureMs: 0, encodeMs: 0, workerMs: Math.max(0, Date.now() - startedAt) },
+        };
+      }
+
+      if (Number(action.settleAfterMs) > 0) {
+        const settleStartedAt = Date.now();
+        await new Promise((resolve) => setTimeout(resolve, Number(action.settleAfterMs)));
+        settleMs += Math.max(0, Date.now() - settleStartedAt);
+      }
     }
+
     if (Number(args.settleMs) > 0) {
+      const settleStartedAt = Date.now();
       await new Promise((resolve) => setTimeout(resolve, Number(args.settleMs)));
+      settleMs += Math.max(0, Date.now() - settleStartedAt);
     }
-    if (args.captureAfter === false) return { ok: true };
-    return this.#screenshot(args);
+
+    if (args.captureAfter !== true) {
+      return {
+        ok: true,
+        timing: { inputMs, explicitWaitMs, settleMs, captureMs: 0, encodeMs: 0, workerMs: Math.max(0, Date.now() - startedAt) },
+      };
+    }
+
+    const screenshot = await this.#screenshot(args);
+    return {
+      ...screenshot,
+      timing: {
+        inputMs,
+        explicitWaitMs,
+        settleMs,
+        captureMs: Number(screenshot?.timing?.captureMs) || 0,
+        encodeMs: Number(screenshot?.timing?.encodeMs) || 0,
+        workerMs: Math.max(0, Date.now() - startedAt),
+      },
+    };
   }
 
   async run(operation, args = {}) {
