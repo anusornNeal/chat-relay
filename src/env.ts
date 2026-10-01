@@ -15,6 +15,9 @@ export interface Env {
   AUDIT_RETENTION_DAYS?: string;
   OPENAI_APPS_CHALLENGE?: string;
   PUBLIC_BASE_URL?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  GOOGLE_REDIRECT_URI?: string;
 }
 
 export type AuthUser = { id: string; name: string };

@@ -15,6 +15,8 @@ export type UserRecord = {
   name: string;
   tokenHash?: string;
   login?: string;
+  email?: string;
+  googleSub?: string;
   passwordSalt?: string;
   passwordHash?: string;
   passwordIterations?: number;
@@ -116,6 +118,8 @@ const json = (value: unknown, status = 200) => Response.json(value, { status });
 const key = {
   user: (id: string) => `user:${id}`,
   userLogin: (login: string) => `ul:${login}`,
+  userEmail: (email: string) => `ue:${email}`,
+  userGoogleSub: (sub: string) => `ugs:${sub}`,
   userToken: (hash: string) => `ut:${hash}`,
   userSession: (hash: string) => `us:${hash}`,
   adminSession: (hash: string) => `admin-session:${hash}`,
@@ -146,11 +150,21 @@ function normalizeLogin(value: string): string {
   return login;
 }
 
+function normalizeEmail(value: string): string {
+  const email = value.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+    throw new Error("invalid_email");
+  }
+  return email;
+}
+
 function publicUser(user: UserRecord) {
   return {
     id: user.id,
     name: user.name,
     login: user.login ?? null,
+    email: user.email ?? null,
+    authProvider: user.googleSub ? "google" : "legacy",
     enabled: user.enabled,
     admin: user.admin === true,
     deletedAt: user.deletedAt ?? null,
@@ -189,11 +203,13 @@ export class Registry extends DurableObject {
       case "/oauth/client/register": return this.registerOAuthClient(body);
       case "/oauth/client/get": return this.getOAuthClient(body);
       case "/oauth/password": return this.oauthPassword(body);
+      case "/google/upsert": return this.upsertGoogleUser(body);
       case "/oauth/code/create": return this.createOAuthCode(body);
       case "/oauth/code/exchange": return this.exchangeOAuthCode(body);
       case "/oauth/refresh/exchange": return this.exchangeOAuthRefresh(body);
       case "/session/revoke": return this.revokeSession(body);
       case "/admin-session/create": return this.createAdminSession(body);
+      case "/admin-session/create-for-user": return this.createAdminSessionForUser(body);
       case "/admin-session/auth": return this.authAdminSession(body);
       case "/admin-session/revoke": return this.revokeAdminSession(body);
       case "/admin-session/revoke-user": return this.revokeAdminUserSessions(body);
@@ -905,6 +921,82 @@ export class Registry extends DurableObject {
     return json({ ok: true, user: publicUser(user) });
   }
 
+  private async upsertGoogleUser(body: any): Promise<Response> {
+    const googleSub = String(body?.googleSub ?? "").trim();
+    const name = String(body?.name ?? "").trim().slice(0, 120);
+    let email: string;
+    try { email = normalizeEmail(String(body?.email ?? "")); }
+    catch { return json({ error: "invalid_google_identity" }, 400); }
+    if (!googleSub || googleSub.length > 255) {
+      return json({ error: "invalid_google_identity" }, 400);
+    }
+
+    const bySubId = await this.ctx.storage.get<string>(key.userGoogleSub(googleSub));
+    if (bySubId) {
+      const existing = await this.ctx.storage.get<UserRecord>(key.user(bySubId));
+      if (!existing?.enabled || existing.deletedAt) return json({ error: "account_unavailable" }, 403);
+      if (existing.email && existing.email !== email) return json({ error: "google_identity_conflict" }, 409);
+      existing.email = email;
+      existing.login = email;
+      if (name) existing.name = name;
+      await this.ctx.storage.put({
+        [key.user(existing.id)]: existing,
+        [key.userEmail(email)]: existing.id,
+        [key.userLogin(email)]: existing.id,
+      });
+      return json({ ok: true, user: publicUser(existing), created: false });
+    }
+
+    const emailUserId =
+      await this.ctx.storage.get<string>(key.userEmail(email)) ??
+      await this.ctx.storage.get<string>(key.userLogin(email));
+    if (emailUserId) {
+      const existing = await this.ctx.storage.get<UserRecord>(key.user(emailUserId));
+      if (!existing) return json({ error: "google_identity_conflict" }, 409);
+      if (existing.id === "owner" || existing.admin === true) {
+        return json({ error: "privileged_account_link_forbidden" }, 409);
+      }
+      if (!existing.enabled || existing.deletedAt) return json({ error: "account_unavailable" }, 403);
+      if (existing.googleSub && existing.googleSub !== googleSub) {
+        return json({ error: "google_identity_conflict" }, 409);
+      }
+      const oldLogin = existing.login;
+      existing.googleSub = googleSub;
+      existing.email = email;
+      existing.login = email;
+      if (name) existing.name = name;
+      delete existing.passwordSalt;
+      delete existing.passwordHash;
+      delete existing.passwordIterations;
+      if (oldLogin && oldLogin !== email) await this.ctx.storage.delete(key.userLogin(oldLogin));
+      await this.ctx.storage.put({
+        [key.user(existing.id)]: existing,
+        [key.userGoogleSub(googleSub)]: existing.id,
+        [key.userEmail(email)]: existing.id,
+        [key.userLogin(email)]: existing.id,
+      });
+      return json({ ok: true, user: publicUser(existing), created: false, linked: true });
+    }
+
+    const user: UserRecord = {
+      id: `user-google-${crypto.randomUUID().slice(0, 12)}`,
+      name: name || email.split("@")[0] || email,
+      login: email,
+      email,
+      googleSub,
+      admin: false,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+    };
+    await this.ctx.storage.put({
+      [key.user(user.id)]: user,
+      [key.userGoogleSub(googleSub)]: user.id,
+      [key.userEmail(email)]: user.id,
+      [key.userLogin(email)]: user.id,
+    });
+    return json({ ok: true, user: publicUser(user), created: true }, 201);
+  }
+
   private async createOAuthCode(body: any): Promise<Response> {
     const codeHash = String(body?.codeHash ?? "");
     const clientId = String(body?.clientId ?? "");
@@ -1058,13 +1150,8 @@ export class Registry extends DurableObject {
     return json(tokens);
   }
 
-  private async createAdminSession(body: any): Promise<Response> {
-    const passwordResponse = await this.oauthPassword(body);
-    const passwordData = await passwordResponse.json<any>();
-    if (!passwordResponse.ok) return json(passwordData, passwordResponse.status);
-    const user = await this.ctx.storage.get<UserRecord>(key.user(String(passwordData.user?.id || "")));
-    if (!user?.enabled) return json({ error: "access_denied" }, 403);
-
+  private async issueAdminSession(user: UserRecord): Promise<Response> {
+    if (!user.enabled || user.deletedAt) return json({ error: "access_denied" }, 403);
     const token = newToken("adm");
     const csrfToken = newToken("csrf");
     const tokenHash = await hashToken(token);
@@ -1078,6 +1165,22 @@ export class Registry extends DurableObject {
     };
     await this.ctx.storage.put(key.adminSession(tokenHash), record);
     return json({ ok: true, user: publicUser(user), token, csrfToken, expiresAt: record.expiresAt });
+  }
+
+  private async createAdminSession(body: any): Promise<Response> {
+    const passwordResponse = await this.oauthPassword(body);
+    const passwordData = await passwordResponse.json<any>();
+    if (!passwordResponse.ok) return json(passwordData, passwordResponse.status);
+    const user = await this.ctx.storage.get<UserRecord>(key.user(String(passwordData.user?.id || "")));
+    if (!user?.enabled) return json({ error: "access_denied" }, 403);
+    return this.issueAdminSession(user);
+  }
+
+  private async createAdminSessionForUser(body: any): Promise<Response> {
+    const userId = String(body?.userId ?? "");
+    const user = userId ? await this.ctx.storage.get<UserRecord>(key.user(userId)) : undefined;
+    if (!user?.enabled || user.deletedAt || !user.googleSub) return json({ error: "access_denied" }, 403);
+    return this.issueAdminSession(user);
   }
 
   private async authAdminSession(body: any): Promise<Response> {

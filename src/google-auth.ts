@@ -1,0 +1,203 @@
+type GoogleAuthEnv = {
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  GOOGLE_REDIRECT_URI?: string;
+  PUBLIC_BASE_URL?: string;
+};
+
+export type GoogleIdentity = { sub: string; email: string; name: string };
+
+const GOOGLE_STATE_COOKIE = "chat_relay_google_oauth";
+const GOOGLE_STATE_TTL_SECONDS = 10 * 60;
+
+function cookieValue(request: Request, name: string) {
+  const raw = request.headers.get("cookie") || "";
+  for (const part of raw.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return decodeURIComponent(rest.join("="));
+  }
+  return "";
+}
+
+function stateCookie(value: string, maxAge = GOOGLE_STATE_TTL_SECONDS) {
+  return GOOGLE_STATE_COOKIE + "=" + encodeURIComponent(value) +
+    "; Path=/admin/google; Max-Age=" + maxAge +
+    "; HttpOnly; Secure; SameSite=Lax";
+}
+
+export function clearGoogleStateCookie() { return stateCookie("", 0); }
+
+function redirectUri(request: Request, env: GoogleAuthEnv) {
+  if (env.GOOGLE_REDIRECT_URI) return env.GOOGLE_REDIRECT_URI;
+  const base = (env.PUBLIC_BASE_URL || new URL(request.url).origin).replace(/\/$/, "");
+  return base + "/admin/google/callback";
+}
+
+function base64Url(bytes: Uint8Array) {
+  let binary = "";
+  for (const value of bytes) binary += String.fromCharCode(value);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function randomToken(bytes = 32) {
+  const values = new Uint8Array(bytes);
+  crypto.getRandomValues(values);
+  return base64Url(values);
+}
+
+async function sha256Base64Url(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return base64Url(new Uint8Array(digest));
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const part = token.split(".")[1] || "";
+    const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"]/g, (char) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char] || char)
+  );
+}
+
+function googleError(message: string, status = 400) {
+  return new Response(
+    '<!doctype html><meta charset="utf-8"><title>Google sign-in failed</title>' +
+      '<main style="font-family:system-ui;max-width:520px;margin:80px auto;padding:24px">' +
+      "<h1>Google sign-in failed</h1><p>" + escapeHtml(message) +
+      '</p><p><a href="/dashboard/">Back to dashboard</a></p></main>',
+    {
+      status,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "set-cookie": clearGoogleStateCookie(),
+      },
+    },
+  );
+}
+
+export async function startGoogleLogin(request: Request, env: GoogleAuthEnv): Promise<Response> {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    return googleError("Google login is not configured.", 503);
+  }
+
+  const state = randomToken();
+  const nonce = randomToken();
+  const verifier = randomToken(48);
+  const challenge = await sha256Base64Url(verifier);
+  const target = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  target.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
+  target.searchParams.set("redirect_uri", redirectUri(request, env));
+  target.searchParams.set("response_type", "code");
+  target.searchParams.set("scope", "openid email profile");
+  target.searchParams.set("state", state);
+  target.searchParams.set("nonce", nonce);
+  target.searchParams.set("code_challenge", challenge);
+  target.searchParams.set("code_challenge_method", "S256");
+  target.searchParams.set("prompt", "select_account");
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: target.toString(),
+      "cache-control": "no-store",
+      "set-cookie": stateCookie([state, nonce, verifier].join(".")),
+    },
+  });
+}
+
+export async function finishGoogleLogin(
+  request: Request,
+  env: GoogleAuthEnv,
+): Promise<{ ok: true; identity: GoogleIdentity } | { ok: false; response: Response }> {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    return { ok: false, response: googleError("Google login is not configured.", 503) };
+  }
+
+  const url = new URL(request.url);
+  const returnedState = url.searchParams.get("state") || "";
+  const code = url.searchParams.get("code") || "";
+  const providerError = url.searchParams.get("error") || "";
+  const [state, nonce, verifier] = cookieValue(request, GOOGLE_STATE_COOKIE).split(".");
+
+  if (providerError) {
+    return { ok: false, response: googleError("Google denied the authorization request.") };
+  }
+  if (!state || !nonce || !verifier || !returnedState || returnedState !== state || !code) {
+    return { ok: false, response: googleError("Google sign-in state is invalid or expired.") };
+  }
+
+  const form = new URLSearchParams({
+    client_id: env.GOOGLE_CLIENT_ID,
+    client_secret: env.GOOGLE_CLIENT_SECRET,
+    code,
+    code_verifier: verifier,
+    grant_type: "authorization_code",
+    redirect_uri: redirectUri(request, env),
+  });
+  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: form,
+  });
+  const tokenData = await tokenResponse.json<any>().catch(() => ({}));
+  const idToken = String(tokenData.id_token || "");
+  if (!tokenResponse.ok || !idToken) {
+    return { ok: false, response: googleError("Google token exchange failed.", 502) };
+  }
+
+  const tokenInfoResponse = await fetch(
+    "https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(idToken),
+    { headers: { "cache-control": "no-store" } },
+  );
+  const tokenInfo = await tokenInfoResponse.json<any>().catch(() => ({}));
+  const payload = decodeJwtPayload(idToken);
+  const issuer = String(tokenInfo.iss || payload?.iss || "");
+  const audience = String(tokenInfo.aud || payload?.aud || "");
+  const subject = String(tokenInfo.sub || payload?.sub || "");
+  const email = String(tokenInfo.email || payload?.email || "").trim().toLowerCase();
+  const emailVerified = tokenInfo.email_verified === true || tokenInfo.email_verified === "true" ||
+    payload?.email_verified === true;
+  const tokenNonce = String(payload?.nonce || tokenInfo.nonce || "");
+  const expiresAt = Number(tokenInfo.exp || payload?.exp || 0);
+
+  if (!tokenInfoResponse.ok ||
+      !["accounts.google.com", "https://accounts.google.com"].includes(issuer) ||
+      audience !== env.GOOGLE_CLIENT_ID ||
+      !subject ||
+      tokenNonce !== nonce ||
+      !emailVerified ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt * 1000 <= Date.now()) {
+    return { ok: false, response: googleError("Google identity token validation failed.", 401) };
+  }
+
+  const name = String(tokenInfo.name || payload?.name || email.split("@")[0] || email).slice(0, 120);
+  return { ok: true, identity: { sub: subject.slice(0, 255), email, name } };
+}
+
+export function googleLoginSuccessPage(csrfToken: string, sessionCookie: string): Response {
+  const scriptValue = JSON.stringify(csrfToken);
+  const headers = new Headers({
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  headers.append("set-cookie", sessionCookie);
+  headers.append("set-cookie", clearGoogleStateCookie());
+  return new Response(
+    '<!doctype html><meta charset="utf-8"><title>Signed in</title>' +
+      "<script>sessionStorage.setItem('chat_relay_csrf'," + scriptValue +
+      ");location.replace('/dashboard/');</script>" +
+      '<p>Signed in. <a href="/dashboard/">Continue</a></p>',
+    { status: 200, headers },
+  );
+}

@@ -34,6 +34,11 @@ async function browser(path, { method = "GET", body, cookie, csrf, origin } = {}
 const unauthorized = await browser("/admin/api/users");
 if (unauthorized.response.status !== 401) throw new Error("browser admin read was not protected");
 
+const googleUnconfigured = await req("/admin/google/start", { redirect: "manual" });
+if (googleUnconfigured.response.status !== 503 || !googleUnconfigured.text.includes("Google login is not configured")) {
+  throw new Error(`unconfigured Google login did not fail closed: ${googleUnconfigured.text}`);
+}
+
 const bootstrap = await admin("/admin/bootstrap", "POST", { userName: "Owner", agentId: "default", agentName: "Primary PC" });
 if (!bootstrap.response.ok) throw new Error(`bootstrap failed: ${bootstrap.text}`);
 

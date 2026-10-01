@@ -15,3 +15,8 @@ ALLOWED_ROOTS=C:\Users\you\Projects
 CALLER_TOKEN=replace-with-owner-user-token
 ADMIN_TOKEN=replace-with-admin-token
 OPENAI_APPS_CHALLENGE=
+
+# Google dashboard login (Worker configuration)
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# GOOGLE_REDIRECT_URI=https://chat-relay.example.workers.dev/admin/google/callback

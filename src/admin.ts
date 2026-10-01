@@ -1,5 +1,6 @@
 import { hashToken, newToken, normalizeAgentId } from "./registry";
 import { DEFAULT_QUOTA_POLICY, normalizeQuotaPolicy, type QuotaPolicy } from "./usage";
+import { finishGoogleLogin, googleLoginSuccessPage, startGoogleLogin } from "./google-auth";
 
 type AdminEnv = {
   REGISTRY: DurableObjectNamespace;
@@ -15,6 +16,10 @@ type AdminEnv = {
   USER_DAILY_CALL_QUOTA?: string;
   USAGE_RAW_RETENTION_DAYS?: string;
   AUDIT_RETENTION_DAYS?: string;
+  PUBLIC_BASE_URL?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  GOOGLE_REDIRECT_URI?: string;
 };
 
 const error = (status: number, code: string, details?: unknown) =>
@@ -310,6 +315,39 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   const path = url.pathname;
   const body = request.method === "GET" ? null : await request.json<any>().catch(() => null);
   const operatorAuthorized = Boolean(env.ADMIN_TOKEN && authorized(request, env.ADMIN_TOKEN));
+
+  if (path === "/admin/google/start" && request.method === "GET") {
+    return startGoogleLogin(request, env);
+  }
+
+  if (path === "/admin/google/callback" && request.method === "GET") {
+    const google = await finishGoogleLogin(request, env);
+    if (!google.ok) return google.response;
+    const identityResponse = await registryCall(env, "/google/upsert", {
+      googleSub: google.identity.sub,
+      email: google.identity.email,
+      name: google.identity.name,
+    });
+    const identityData = await identityResponse.json<any>().catch(() => ({}));
+    if (!identityResponse.ok || !identityData.user?.id) {
+      await recordAudit(env, { kind: "anonymous" }, "admin.google.login", { type: "google_identity" }, "failure", { status: identityResponse.status });
+      return error(identityResponse.status, identityData.error || "google_account_link_failed");
+    }
+
+    const sessionResponse = await registryCall(env, "/admin-session/create-for-user", { userId: identityData.user.id });
+    const sessionData = await sessionResponse.json<any>().catch(() => ({}));
+    await recordAudit(
+      env,
+      sessionResponse.ok ? { kind: "admin-user", userId: String(identityData.user.id) } : { kind: "anonymous" },
+      "admin.google.login",
+      { type: "admin_session", id: String(identityData.user.id) },
+      sessionResponse.ok ? "success" : "failure",
+      { status: sessionResponse.status },
+    );
+    if (!sessionResponse.ok) return error(sessionResponse.status, sessionData.error || "google_session_failed");
+    const maxAge = Math.max(1, Math.floor((Date.parse(sessionData.expiresAt) - Date.now()) / 1000));
+    return googleLoginSuccessPage(sessionData.csrfToken, adminCookie(sessionData.token, maxAge));
+  }
 
   if (path === "/admin/ws" && request.method === "GET") {
     const wsOrigin = request.headers.get("origin");

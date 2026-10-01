@@ -1,4 +1,4 @@
-let csrf = "";
+let csrf = sessionStorage.getItem("chat_relay_csrf") || "";
 let currentUser = null;
 let activeView = "overview";
 let liveSocket = null;
@@ -305,6 +305,7 @@ async function api(path, options = {}) {
 }
 
 function signOutUi(message = "") {
+  sessionStorage.removeItem("chat_relay_csrf");
   stopLiveChannel();
   csrf = "";
   currentUser = null;
@@ -991,6 +992,7 @@ $("loginForm").onsubmit = async (event) => {
   try {
     const data = await api("/admin/session/login", { method: "POST", body: JSON.stringify({ login: $("loginName").value, password: $("password").value }) });
     csrf = data.csrfToken;
+    sessionStorage.setItem("chat_relay_csrf", csrf);
     currentUser = data.user;
     $("password").value = "";
     $("loginView").hidden = true;

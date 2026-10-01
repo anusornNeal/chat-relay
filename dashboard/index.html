@@ -16,11 +16,13 @@
       </div>
       <div class="auth-copy">
         <h1>Sign in</h1>
-        <p>Use your Chat Relay account.</p>
+        <p>Use your Google account. The owner password remains available for recovery.</p>
       </div>
-      <label>Login<input id="loginName" autocomplete="username" required></label>
+      <a class="button google" href="/admin/google/start">Continue with Google</a>
+      <div class="auth-divider"><span>Owner recovery</span></div>
+      <label>Owner login<input id="loginName" autocomplete="username" required></label>
       <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
-      <button class="button primary" type="submit">Sign in</button>
+      <button class="button" type="submit">Sign in with password</button>
       <p id="loginError" class="form-error" role="alert"></p>
     </form>
   </section>
