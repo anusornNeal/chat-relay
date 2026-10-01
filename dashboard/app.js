@@ -361,7 +361,8 @@ async function loadCalls() {
   if (isAdmin() && callFilters.userId) params.set("userId", callFilters.userId);
   const data = await api("/admin/api/tool-calls?" + params);
   const rawItems = Array.isArray(data.items) ? data.items : [];
-  const terminalItems = callFilters.status && callFilters.status !== "running" ? [] : activeTerminalRows(data.terminals || []);
+  const terminalItems = (callFilters.status && callFilters.status !== "running" ? [] : activeTerminalRows(data.terminals || []))
+    .filter((item) => !isAdmin() || !callFilters.userId || item.userId === callFilters.userId);
   const seen = new Set(rawItems.map((item) => item.toolCallId).filter(Boolean));
   const items = [...terminalItems.filter((item) => !item.toolCallId || !seen.has(item.toolCallId)), ...rawItems]
     .sort((a, b) => Date.parse(b.timestamp || b.startedAt || "") - Date.parse(a.timestamp || a.startedAt || ""));

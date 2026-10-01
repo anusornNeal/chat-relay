@@ -573,7 +573,8 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const data = await response.json<any>().catch(() => ({}));
     if (!response.ok) return Response.json(data, { status: response.status });
     if (query.get("state") === "history") return Response.json(data);
-    const terminals = await terminalActivity(env, adminAuthorized ? undefined : selfUserId);
+    const terminalUserId = adminAuthorized ? (query.get("userId") || undefined) : selfUserId;
+    const terminals = await terminalActivity(env, terminalUserId);
     return Response.json({ ...data, terminals });
   }
 
