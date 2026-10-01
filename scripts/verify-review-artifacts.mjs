@@ -37,7 +37,9 @@ for (const script of ["test:submission", "verify:review"]) {
   if (!pkg.scripts?.[script]) fail("missing package script " + script);
 }
 
-const source = fs.readFileSync("src/index.ts", "utf8");
+const source = ["src/index.ts", "src/worker-app.ts"]
+  .map((file) => fs.readFileSync(file, "utf8"))
+  .join("\n");
 if (!source.includes('path === "/.well-known/openai-apps-challenge"')) {
   fail("domain challenge endpoint is missing");
 }
