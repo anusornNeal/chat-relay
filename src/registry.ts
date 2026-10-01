@@ -102,6 +102,15 @@ type OAuthTokenRecord = {
   expiresAt: string;
 };
 
+type OAuthRefreshReplayRecord = {
+  userId: string;
+  clientId: string;
+  resource: string;
+  response: Record<string, string | number>;
+  createdAt: string;
+  expiresAt: string;
+};
+
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
@@ -112,6 +121,7 @@ const DEVICE_APPROVE_WINDOW_MS = 15 * 60 * 1000;
 const DEVICE_APPROVE_MAX = 60;
 const OAUTH_ACCESS_TTL_MS = 60 * 60 * 1000;
 const OAUTH_REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const OAUTH_REFRESH_REPLAY_TTL_MS = 30 * 1000;
 const OAUTH_REGISTER_WINDOW_MS = 15 * 60 * 1000;
 const OAUTH_REGISTER_MAX = 60;
 const json = (value: unknown, status = 200) => Response.json(value, { status });
@@ -135,6 +145,7 @@ const key = {
   oauthCode: (hash: string) => `oauth-code:${hash}`,
   oauthAccess: (hash: string) => `oauth-access:${hash}`,
   oauthRefresh: (hash: string) => `oauth-refresh:${hash}`,
+  oauthRefreshReplay: (hash: string) => `oauth-refresh-replay:${hash}`,
   oauthRegisterRate: (sourceHash: string) => `oauth-register-rate:${sourceHash}`,
 };
 
@@ -574,6 +585,7 @@ export class Registry extends DurableObject {
       { prefix: "oauth-code:", device: false },
       { prefix: "oauth-access:", device: false },
       { prefix: "oauth-refresh:", device: false },
+      { prefix: "oauth-refresh-replay:", device: false },
     ];
     let scanned = 0;
     let deletedRecords = 0;
@@ -1036,53 +1048,22 @@ export class Registry extends DurableObject {
     return json({ ok: true });
   }
 
-  private async issueOAuthTokens(
-    userId: string,
-    clientId: string,
-    scope: string[],
-    resource: string,
+  private async createOAuthTokens(
+    userId: string, clientId: string, scope: string[], resource: string,
   ) {
     const now = new Date().toISOString();
     const accessToken = newToken("access");
-    const access: OAuthTokenRecord = {
-      tokenHash: await hashToken(accessToken),
-      userId,
-      clientId,
-      scope,
-      resource,
-      createdAt: now,
-      expiresAt: new Date(Date.now() + OAUTH_ACCESS_TTL_MS).toISOString(),
-    };
-
-    const records: Record<string, OAuthTokenRecord> = {
-      [key.oauthAccess(access.tokenHash)]: access,
-    };
-    const result: Record<string, string | number> = {
-      access_token: accessToken,
-      token_type: "Bearer",
-      expires_in: Math.floor(OAUTH_ACCESS_TTL_MS / 1000),
-      scope: scope.join(" "),
-    };
-
+    const access: OAuthTokenRecord = { tokenHash: await hashToken(accessToken), userId, clientId, scope, resource, createdAt: now, expiresAt: new Date(Date.now() + OAUTH_ACCESS_TTL_MS).toISOString() };
+    const records: Record<string, OAuthTokenRecord> = { [key.oauthAccess(access.tokenHash)]: access };
+    const result: Record<string, string | number> = { access_token: accessToken, token_type: "Bearer", expires_in: Math.floor(OAUTH_ACCESS_TTL_MS / 1000), scope: scope.join(" ") };
     if (scope.includes("offline_access")) {
       const refreshToken = newToken("refresh");
-      const refresh: OAuthTokenRecord = {
-        tokenHash: await hashToken(refreshToken),
-        userId,
-        clientId,
-        scope,
-        resource,
-        createdAt: now,
-        expiresAt: new Date(Date.now() + OAUTH_REFRESH_TTL_MS).toISOString(),
-      };
+      const refresh: OAuthTokenRecord = { tokenHash: await hashToken(refreshToken), userId, clientId, scope, resource, createdAt: now, expiresAt: new Date(Date.now() + OAUTH_REFRESH_TTL_MS).toISOString() };
       records[key.oauthRefresh(refresh.tokenHash)] = refresh;
       result.refresh_token = refreshToken;
     }
-
-    await this.ctx.storage.put(records);
-    return result;
+    return { records, result };
   }
-
   private async exchangeOAuthCode(body: any): Promise<Response> {
     const codeHash = String(body?.codeHash ?? "");
     const clientId = String(body?.clientId ?? "");
@@ -1109,47 +1090,40 @@ export class Registry extends DurableObject {
     if (!user?.enabled) return json({ error: "invalid_grant" }, 400);
 
     await this.ctx.storage.delete(key.oauthCode(codeHash));
-    const tokens = await this.issueOAuthTokens(
-      record.userId,
-      record.clientId,
-      record.scope,
-      record.resource,
+    const tokens = await this.createOAuthTokens(
+      record.userId, record.clientId, record.scope, record.resource,
     );
-    return json(tokens);
+    await this.ctx.storage.put(tokens.records);
+    return json(tokens.result);
   }
 
   private async exchangeOAuthRefresh(body: any): Promise<Response> {
     const refreshTokenHash = String(body?.refreshTokenHash ?? "");
     const clientId = String(body?.clientId ?? "");
     const resource = String(body?.resource ?? "");
-
-    const record = refreshTokenHash
-      ? await this.ctx.storage.get<OAuthTokenRecord>(
-        key.oauthRefresh(refreshTokenHash),
-      )
-      : undefined;
-    if (!record || isExpired(record.expiresAt) ||
-        record.clientId !== clientId ||
-        record.resource !== resource) {
-      if (record && isExpired(record.expiresAt)) {
-        await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
-      }
+    const replayKey = key.oauthRefreshReplay(refreshTokenHash);
+    const replay = refreshTokenHash ? await this.ctx.storage.get<OAuthRefreshReplayRecord>(replayKey) : undefined;
+    if (replay) {
+      if (isExpired(replay.expiresAt)) await this.ctx.storage.delete(replayKey);
+      else if (replay.clientId === clientId && replay.resource === resource) {
+        const user = await this.ctx.storage.get<UserRecord>(key.user(replay.userId));
+        return user?.enabled ? json(replay.response) : json({ error: "invalid_grant" }, 400);
+      } else return json({ error: "invalid_grant" }, 400);
+    }
+    const record = refreshTokenHash ? await this.ctx.storage.get<OAuthTokenRecord>(key.oauthRefresh(refreshTokenHash)) : undefined;
+    if (!record || isExpired(record.expiresAt) || record.clientId !== clientId || record.resource !== resource) {
+      if (record && isExpired(record.expiresAt)) await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
       return json({ error: "invalid_grant" }, 400);
     }
-
     const user = await this.ctx.storage.get<UserRecord>(key.user(record.userId));
     if (!user?.enabled) return json({ error: "invalid_grant" }, 400);
-
+    const tokens = await this.createOAuthTokens(record.userId, record.clientId, record.scope, record.resource);
+    const now = new Date();
+    const replayRecord: OAuthRefreshReplayRecord = { userId: record.userId, clientId: record.clientId, resource: record.resource, response: tokens.result, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + OAUTH_REFRESH_REPLAY_TTL_MS).toISOString() };
+    await this.ctx.storage.put({ ...tokens.records, [replayKey]: replayRecord });
     await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
-    const tokens = await this.issueOAuthTokens(
-      record.userId,
-      record.clientId,
-      record.scope,
-      record.resource,
-    );
-    return json(tokens);
+    return json(tokens.result);
   }
-
   private async issueAdminSession(user: UserRecord): Promise<Response> {
     if (!user.enabled || user.deletedAt) return json({ error: "access_denied" }, 403);
     const token = newToken("adm");

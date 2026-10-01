@@ -282,7 +282,7 @@ if (!refreshed.response.ok ||
   throw new Error(`refresh failed: ${refreshed.text}`);
 }
 
-const reusedRefresh = await jsonFetch("/token", {
+const retriedRefresh = await jsonFetch("/token", {
   method: "POST",
   headers: { "content-type": "application/x-www-form-urlencoded" },
   body: formBody({
@@ -292,8 +292,27 @@ const reusedRefresh = await jsonFetch("/token", {
     resource,
   }),
 });
-if (reusedRefresh.data.error !== "invalid_grant") {
-  throw new Error("refresh token rotation failed");
+if (!retriedRefresh.response.ok ||
+    retriedRefresh.data.access_token !== refreshed.data.access_token ||
+    retriedRefresh.data.refresh_token !== refreshed.data.refresh_token) {
+  throw new Error(`refresh retry was not idempotent: ${retriedRefresh.text}`);
+}
+console.log("refresh retry replay ok");
+
+const rotatedAgain = await jsonFetch("/token", {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: formBody({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    refresh_token: refreshed.data.refresh_token,
+    resource,
+  }),
+});
+if (!rotatedAgain.response.ok ||
+    !rotatedAgain.data.refresh_token ||
+    rotatedAgain.data.refresh_token === refreshed.data.refresh_token) {
+  throw new Error(`refresh rotation failed: ${rotatedAgain.text}`);
 }
 console.log("refresh rotation ok");
 
@@ -303,7 +322,7 @@ const wrongResource = await jsonFetch("/token", {
   body: formBody({
     grant_type: "refresh_token",
     client_id: clientId,
-    refresh_token: refreshed.data.refresh_token,
+    refresh_token: rotatedAgain.data.refresh_token,
     resource: `${base}/other`,
   }),
 });
@@ -317,7 +336,7 @@ const missingClient = await jsonFetch("/token", {
   body: formBody({
     grant_type: "refresh_token",
     client_id: "client_missing",
-    refresh_token: refreshed.data.refresh_token,
+    refresh_token: rotatedAgain.data.refresh_token,
     resource,
   }),
 });
