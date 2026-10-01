@@ -3,7 +3,8 @@ import path from "node:path";
 
 import WebSocket from "ws";
 import { AGENT_PROTOCOL_VERSION, buildAgentHello } from "../agent/protocol.mjs";
-import { shouldRestartAgent } from "../cli/remote.mjs";
+import { shouldRestartAgent } from "../cli/remote.mjs";import { DesktopManager, createDesktopPlatformAdapter } from "../agent/desktop-manager.mjs";
+
 
 function protocolContractTests() {
   const windows = buildAgentHello({
@@ -38,6 +39,30 @@ function protocolContractTests() {
   }
 }
 
+async function platformAdapterTests() {
+  const windowsAdapter = createDesktopPlatformAdapter({ platform: "win32", runner: async () => ({ ok: true }) });
+  if (!windowsAdapter.supported || windowsAdapter.transport !== "persistent-worker") throw new Error("windows desktop adapter contract failed");
+  const windowsManager = new DesktopManager({ enabled: true, adapter: windowsAdapter });
+  if (!windowsManager.getConfig().supported || windowsManager.getConfig().platform !== "win32") throw new Error("windows desktop manager config failed");
+
+  for (const platform of ["darwin", "linux"]) {
+    const adapter = createDesktopPlatformAdapter({ platform });
+    if (adapter.supported || adapter.transport !== "unsupported") throw new Error(`${platform} desktop adapter was unexpectedly supported`);
+    const manager = new DesktopManager({ enabled: true, adapter });
+    const config = manager.getConfig();
+    if (config.supported || config.platform !== platform) throw new Error(`${platform} desktop config failed`);
+    const result = await manager.screenshot();
+    if (result.error !== "unsupported_platform") throw new Error(`${platform} desktop call did not degrade explicitly`);
+    manager.close();
+  }
+
+  const darwinHello = buildAgentHello({ agentVersion: "test-version", platform: "darwin", arch: "arm64", terminalEnabled: true, desktopEnabled: false });
+  if (!darwinHello.capabilities.includes("filesystem.batch") || !darwinHello.capabilities.includes("terminal.batch")) throw new Error("darwin core capabilities missing");
+  if (darwinHello.capabilities.some((item) => item.startsWith("desktop."))) throw new Error("darwin desktop capability advertised");
+  windowsManager.close();
+}
+
+await platformAdapterTests();
 protocolContractTests();
 
 import { FileManager } from "../agent/file-manager.mjs";

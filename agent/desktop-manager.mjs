@@ -171,12 +171,40 @@ class PersistentDesktopRunner {
   }
 }
 
+export function createDesktopPlatformAdapter(options = {}) {
+  const platform = options.platform ?? process.platform;
+  const customRunner = typeof options.runner === "function" ? options.runner : null;
+
+  if (platform === "win32") {
+    const persistentRunner = customRunner ? null : (options.persistentRunner ?? new PersistentDesktopRunner({ platform }));
+    return {
+      platform,
+      supported: true,
+      transport: "persistent-worker",
+      run: customRunner ?? ((operation, args) => persistentRunner.run(operation, args)),
+      close: () => persistentRunner?.close?.(),
+    };
+  }
+
+  return {
+    platform,
+    supported: false,
+    transport: "unsupported",
+    run: customRunner ?? (async () => ({ ok: false, error: "unsupported_platform" })),
+    close: () => {},
+  };
+}
+
 export class DesktopManager {
   constructor(options = {}) {
     this.enabled = options.enabled ?? process.env.DESKTOP_ENABLED === "1";
-    this.platform = options.platform ?? process.platform;
-    this.persistentRunner = options.persistentRunner ?? new PersistentDesktopRunner({ platform: this.platform });
-    this.runner = options.runner ?? ((operation, args) => this.persistentRunner.run(operation, args));
+    this.adapter = options.adapter ?? createDesktopPlatformAdapter({
+      platform: options.platform,
+      persistentRunner: options.persistentRunner,
+      runner: options.runner,
+    });
+    this.platform = this.adapter.platform;
+    this.runner = (operation, args) => this.adapter.run(operation, args);
     this.controlLane = options.controlLane ?? new BoundedLane({
       name: "desktop_control",
       concurrency: 1,
@@ -188,16 +216,16 @@ export class DesktopManager {
   getConfig() {
     return {
       enabled: this.enabled,
-      supported: this.platform === "win32",
-      platform: this.platform,
-      transport: this.platform === "win32" ? "persistent-worker" : "unsupported",
+      supported: this.adapter.supported,
+      platform: this.adapter.platform,
+      transport: this.adapter.transport,
       controlQueue: this.controlLane.snapshot(),
     };
   }
 
   gate() {
     if (!this.enabled) return { ok: false, error: "desktop_disabled" };
-    if (this.platform !== "win32") return { ok: false, error: "unsupported_platform" };
+    if (!this.adapter.supported) return { ok: false, error: "unsupported_platform" };
     return null;
   }
 
@@ -405,7 +433,7 @@ export class DesktopManager {
   }
 
   close() {
-    this.persistentRunner?.close?.();
+    this.adapter.close();
   }
 }
 

@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { DesktopManager } from "./desktop-manager.mjs";
+import { DesktopManager, createDesktopPlatformAdapter } from "./desktop-manager.mjs";
 import { FileManager } from "./file-manager.mjs";
 import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
@@ -14,7 +14,12 @@ const agentName = process.env.AGENT_NAME || agentId;
 const reconnectMs = Number(process.env.RECONNECT_MS ?? 2000);
 const terminalEnabled = process.env.TERMINAL_ENABLED === "1";
 const desktopEnabled = process.env.DESKTOP_ENABLED === "1";
-const agentHello = buildAgentHello({ terminalEnabled, desktopEnabled });
+const desktopAdapter = createDesktopPlatformAdapter({ platform: process.platform });
+const agentHello = buildAgentHello({
+  platform: desktopAdapter.platform,
+  terminalEnabled,
+  desktopEnabled: desktopEnabled && desktopAdapter.supported,
+});
 const MAX_RESPONSE_BYTES = 60 * 1024;
 const terminals = new TerminalManager({
   batchConcurrency: process.env.TERMINAL_BATCH_CONCURRENCY,
@@ -38,6 +43,7 @@ const files = new FileManager(process.env.ALLOWED_ROOTS);
 const processes = new ProcessManager();
 const desktop = new DesktopManager({
   enabled: desktopEnabled,
+  adapter: desktopAdapter,
   controlMaxQueued: process.env.DESKTOP_CONTROL_MAX_QUEUED,
   controlQueueTimeoutMs: process.env.AGENT_QUEUE_TIMEOUT_MS,
 });
@@ -282,7 +288,8 @@ function connect() {
   connectionState.markConnecting();
   console.log(`Connecting to ${wsUrl}`);
   console.log(`Terminal access: ${terminalEnabled ? "enabled" : "disabled"}`);
-  console.log("Desktop access: " + (desktopEnabled ? "enabled" : "disabled"));
+  const desktopConfig = desktop.getConfig();
+  console.log("Desktop access: " + (!desktopEnabled ? "disabled" : desktopConfig.supported ? "enabled" : `unsupported (${desktopConfig.platform})`));
 
   const socket = new WebSocket(wsUrl, {
     headers: { Authorization: `Bearer ${agentToken}` },
