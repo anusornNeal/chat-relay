@@ -4,7 +4,10 @@ import os from "node:os";
 
 import WebSocket from "ws";
 import { AGENT_PROTOCOL_VERSION, buildAgentHello } from "../agent/protocol.mjs";
-import { shouldRestartAgent } from "../cli/remote.mjs";import { DesktopManager, createDesktopPlatformAdapter } from "../agent/desktop-manager.mjs";
+import { shouldRestartAgent } from "../cli/remote.mjs";
+import { DesktopManager, createDesktopPlatformAdapter } from "../agent/desktop-manager.mjs";
+import { shellForPlatform } from "../agent/terminal-manager.mjs";
+import { parsePosixProcesses } from "../agent/process-manager.mjs";
 
 
 function protocolContractTests() {
@@ -22,6 +25,16 @@ function protocolContractTests() {
     if (!windows.capabilities.includes(capability)) throw new Error(`missing capability: ${capability}`);
   }
 
+  const darwin = buildAgentHello({
+    agentVersion: "test-version",
+    platform: "darwin",
+    arch: "arm64",
+    terminalEnabled: true,
+    desktopEnabled: true,
+  });
+  for (const capability of ["terminal.batch", "desktop.screenshot", "desktop.control", "desktop.step"]) {
+    if (!darwin.capabilities.includes(capability)) throw new Error(`missing darwin capability: ${capability}`);
+  }
   const linux = buildAgentHello({
     agentVersion: "test-version",
     platform: "linux",
@@ -46,20 +59,23 @@ async function platformAdapterTests() {
   const windowsManager = new DesktopManager({ enabled: true, adapter: windowsAdapter });
   if (!windowsManager.getConfig().supported || windowsManager.getConfig().platform !== "win32") throw new Error("windows desktop manager config failed");
 
-  for (const platform of ["darwin", "linux"]) {
-    const adapter = createDesktopPlatformAdapter({ platform });
-    if (adapter.supported || adapter.transport !== "unsupported") throw new Error(`${platform} desktop adapter was unexpectedly supported`);
-    const manager = new DesktopManager({ enabled: true, adapter });
-    const config = manager.getConfig();
-    if (config.supported || config.platform !== platform) throw new Error(`${platform} desktop config failed`);
-    const result = await manager.screenshot();
-    if (result.error !== "unsupported_platform") throw new Error(`${platform} desktop call did not degrade explicitly`);
-    manager.close();
-  }
+  const macAdapter = createDesktopPlatformAdapter({ platform: "darwin", runner: async () => ({ ok: true }) });
+  if (!macAdapter.supported || macAdapter.transport !== "native-macos") throw new Error("macOS desktop adapter contract failed");
+  const macManager = new DesktopManager({ enabled: true, adapter: macAdapter });
+  if (!macManager.getConfig().supported || macManager.getConfig().platform !== "darwin") throw new Error("macOS desktop manager config failed");
 
-  const darwinHello = buildAgentHello({ agentVersion: "test-version", platform: "darwin", arch: "arm64", terminalEnabled: true, desktopEnabled: false });
-  if (!darwinHello.capabilities.includes("filesystem.batch") || !darwinHello.capabilities.includes("terminal.batch")) throw new Error("darwin core capabilities missing");
-  if (darwinHello.capabilities.some((item) => item.startsWith("desktop."))) throw new Error("darwin desktop capability advertised");
+  const linuxAdapter = createDesktopPlatformAdapter({ platform: "linux" });
+  if (linuxAdapter.supported || linuxAdapter.transport !== "unsupported") throw new Error("linux desktop adapter was unexpectedly supported");
+  const linuxManager = new DesktopManager({ enabled: true, adapter: linuxAdapter });
+  if ((await linuxManager.screenshot()).error !== "unsupported_platform") throw new Error("linux desktop call did not degrade explicitly");
+
+  const darwinShell = shellForPlatform("darwin");
+  if (darwinShell.file !== "/bin/zsh" || darwinShell.commandArgs("echo ok")[0] !== "-lc") throw new Error("darwin shell contract failed");
+  const parsed = parsePosixProcesses("  42  1 /usr/bin/node app.js\n", "node");
+  if (parsed[0]?.ProcessId !== 42 || parsed[0]?.Name !== "node") throw new Error("posix process parser failed");
+
+  linuxManager.close();
+  macManager.close();
   windowsManager.close();
 }
 

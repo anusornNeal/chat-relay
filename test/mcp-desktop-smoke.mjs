@@ -58,6 +58,11 @@ async function managerTests() {
   const unsupported = new DesktopManager({ enabled: true, platform: "linux", runner });
   assert((await unsupported.screenshot()).error === "unsupported_platform", "unsupported platform gate failed");
 
+  const macManager = new DesktopManager({ enabled: true, platform: "darwin", runner });
+  assert(macManager.getConfig().supported && macManager.getConfig().transport === "native-macos", "macOS adapter was not enabled");
+  const macScreenshot = await macManager.screenshot();
+  assert(macScreenshot.ok && macScreenshot.mimeType === "image/jpeg", "macOS controlled screenshot contract failed");
+  macManager.close();
   const manager = new DesktopManager({ enabled: true, platform: "win32", runner });
   const screenshot = await manager.screenshot();
   assert(screenshot.ok && screenshot.mimeType === "image/jpeg" && screenshot.data === tinyJpeg, "controlled screenshot failed");
@@ -84,7 +89,7 @@ async function managerTests() {
   assert((await manager.keyboardInput({ text: "สวัสดี" })).ok, "unicode text path failed");
   assert((await manager.keyboardInput({ key: "A", ctrl: true })).ok, "key chord path failed");
   assert(runnerCalls.some((item) => item.operation === "keyboard_input" && item.args.text === "สวัสดี"), "unicode text was not forwarded");
-  assert(runnerCalls.some((item) => item.operation === "keyboard_input" && item.args.keyCode === 0x41 && item.args.ctrl), "key mapping failed");
+  assert(runnerCalls.some((item) => item.operation === "keyboard_input" && item.args.key === "a" && item.args.keyCode === 0x41 && item.args.ctrl), "key mapping failed");
 
   const step = await manager.step({
     actions: [

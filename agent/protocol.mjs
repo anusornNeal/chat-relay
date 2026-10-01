@@ -43,7 +43,7 @@ export function getAgentCapabilities(options = {}) {
     capabilities.push("terminal.exec", "terminal.sessions", "terminal.batch");
   }
 
-  if (desktopEnabled && platform === "win32") {
+  if (desktopEnabled && ["win32", "darwin"].includes(platform)) {
     capabilities.push("desktop.screenshot", "desktop.control", "desktop.step");
   }
 

@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
+import path from "node:path";
 
 const MAX_EXEC_BUFFER = 48 * 1024;
 const MAX_SESSION_BUFFER = 256 * 1024;
@@ -51,6 +52,42 @@ function safeCwd(cwd) {
   return cwd;
 }
 
+export function shellForPlatform(platform, preferredShell) {
+  if (platform === "win32") {
+    return {
+      file: "powershell.exe",
+      displayName: "powershell",
+      commandArgs: (command) => ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+      interactiveArgs: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", "-"],
+    };
+  }
+  const file = preferredShell || (platform === "darwin" ? "/bin/zsh" : "/bin/sh");
+  return {
+    file,
+    displayName: path.basename(file),
+    commandArgs: (command) => ["-lc", command],
+    interactiveArgs: ["-l"],
+  };
+}
+
+function terminateProcessTree(platform, pid) {
+  if (platform === "win32") {
+    return new Promise((resolve) => {
+      execFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], () => resolve());
+    });
+  }
+  return new Promise((resolve) => {
+    try { process.kill(-pid, "SIGTERM"); } catch {
+      try { process.kill(pid, "SIGTERM"); } catch {}
+    }
+    setTimeout(() => {
+      try { process.kill(-pid, "SIGKILL"); } catch {
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+      resolve();
+    }, 150);
+  });
+}
 function clipText(value, limit) {
   const text = typeof value === "string" ? value : "";
   if (text.length <= limit) return { text, truncated: false };
@@ -73,6 +110,8 @@ function clipJobOutput(stdout, stderr, limit = MAX_JOB_READ_CHARS) {
 
 export class TerminalManager {
   constructor(options = {}) {
+    this.platform = options.platform ?? process.platform;
+    this.shell = shellForPlatform(this.platform, options.shell);
     this.sessions = new Map();
     this.batches = new Map();
     this.batchQueue = [];
@@ -98,8 +137,8 @@ export class TerminalManager {
 
     return new Promise((resolve) => {
       execFile(
-        "powershell.exe",
-        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        this.shell.file,
+        this.shell.commandArgs(command),
         {
           cwd: resolvedCwd,
           timeout,
@@ -125,7 +164,7 @@ export class TerminalManager {
       type: "command",
       command,
       cwd: safeCwd(cwd),
-      args: ["-NoLogo", "-NoProfile", "-Command", command],
+      args: this.shell.commandArgs(command),
       observability,
     });
   }
@@ -133,9 +172,9 @@ export class TerminalManager {
   startShell(cwd, observability) {
     return this.#spawnSession({
       type: "shell",
-      command: "powershell",
+      command: this.shell.displayName,
       cwd: safeCwd(cwd),
-      args: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", "-"],
+      args: this.shell.interactiveArgs,
       observability,
     });
   }
@@ -222,9 +261,7 @@ export class TerminalManager {
     const session = this.#get(sessionId);
     if (session.status !== "running") return this.#summary(session);
 
-    await new Promise((resolve) => {
-      execFile("taskkill.exe", ["/PID", String(session.pid), "/T", "/F"], () => resolve());
-    });
+    await terminateProcessTree(this.platform, session.pid);
     return this.#summary(session);
   }
 
@@ -334,9 +371,7 @@ export class TerminalManager {
     });
 
     const running = batch.jobs.filter((job) => job.status === "running" && job.process?.pid);
-    await Promise.all(running.map((job) => new Promise((resolve) => {
-      execFile("taskkill.exe", ["/PID", String(job.process.pid), "/T", "/F"], () => resolve());
-    })));
+    await Promise.all(running.map((job) => terminateProcessTree(this.platform, job.process.pid)));
 
     this.#finishBatchIfDone(batch);
     this.#drainBatchQueue();
@@ -358,10 +393,11 @@ export class TerminalManager {
     const running = [...this.sessions.values()].filter((session) => session.status === "running").length;
     if (running >= MAX_SESSIONS) throw new Error("too_many_sessions");
 
-    const child = spawn("powershell.exe", args, {
+    const child = spawn(this.shell.file, args, {
       cwd,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: this.platform !== "win32",
     });
 
     const session = {
@@ -422,13 +458,14 @@ export class TerminalManager {
 
     const started = Date.now();
     const child = execFile(
-      "powershell.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", job.command],
+      this.shell.file,
+      this.shell.commandArgs(job.command),
       {
         cwd: job.cwd,
         timeout: job.timeoutMs,
         windowsHide: true,
         maxBuffer: MAX_EXEC_BUFFER,
+        detached: this.platform !== "win32",
       },
       (error, stdout, stderr) => {
         job.process = null;

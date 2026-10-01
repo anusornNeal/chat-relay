@@ -1,6 +1,6 @@
-﻿# chat-relay
+# chat-relay
 
-Cloudflare Worker + Durable Objects relay that exposes one or more local Windows agents to ChatGPT through remote MCP.
+Cloudflare Worker + Durable Objects relay that exposes one or more local Windows or macOS agents to ChatGPT through remote MCP.
 
 ```
 ChatGPT / MCP client
@@ -149,7 +149,7 @@ Terminal:
 - `terminal_list`
 - `terminal_kill`
 
-Desktop (Windows, opt-in):
+Desktop (Windows/macOS, opt-in):
 - `screenshot` - returns a bounded MCP image content block plus coordinate metadata
 - `mouse_click` - left/right/middle single or double click in desktop coordinates
 - `keyboard_input` - Unicode text or named key/modifier chord
@@ -209,17 +209,19 @@ The initial `bootstrap` migrates the legacy `CALLER_TOKEN` and `AGENT_TOKEN` sec
 | `POST /relay?agentId=<id>` | user token | Direct JSON relay with scope checks |
 | `/admin/*` | admin Bearer token | User/agent/grant administration |
 
-## Windows desktop access (opt-in)
+## Desktop access (Windows/macOS, opt-in)
 
 Desktop interaction is disabled by default and requires two independent gates:
 
 1. Enable the local agent with `chat-relay remote --desktop` or `DESKTOP_ENABLED=1`. The CLI persists this setting locally. Use `--no-desktop` to disable it again.
 2. Grant `desktop_read` for screenshots and/or `desktop_control` for mouse/keyboard input. Generic read/write/terminal/process scopes do not imply desktop access.
 
-- `screenshot` captures the primary interactive Windows display, scales/compresses it to a bounded JPEG, and returns it as an MCP image block. The accompanying metadata contains image size, desktop origin/size, and scale factors for converting screenshot pixels to desktop coordinates.
+- `screenshot` captures the selected interactive display on Windows or macOS, scales/compresses it to a bounded JPEG, and returns it as an MCP image block. The accompanying metadata contains image size, desktop origin/size, and scale factors for converting screenshot pixels to desktop coordinates.
 - `mouse_click` accepts integer desktop x/y coordinates, button `left|right|middle`, and click count 1 or 2. Invalid/out-of-bounds input is rejected rather than coerced.
 - `keyboard_input` accepts either Unicode `text` or one named `key` with optional Ctrl/Alt/Shift/Win modifiers. Text and key cannot be supplied together.
-- Windows interactive sessions are the v1 target. Non-Windows agents return `unsupported_platform`; unavailable/locked/non-interactive desktops return a controlled session/capture/input error and do not crash the reconnect loop.
+- Windows uses the persistent PowerShell desktop worker. macOS uses built-in `screencapture`, `sips`, `osascript`/JXA, CoreGraphics, and System Events; no extra npm/native dependency is required.
+- macOS desktop capture requires Screen Recording permission for the terminal/Node process, while mouse, keyboard, and window control require Accessibility permission. Missing permissions return controlled errors instead of crashing the reconnect loop.
+- Linux desktop control is not implemented yet and returns `unsupported_platform`.
 - Screenshot bytes, typed text, key chords, and click coordinates are not stored in recentCalls. Only action/timing/success metadata is retained there.
 - This card does not add streaming video, OCR, remote-desktop viewer UI, clipboard sync, drag-and-drop, app-specific automation, or Session 0/service automation.
 
