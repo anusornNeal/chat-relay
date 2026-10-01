@@ -329,6 +329,28 @@ function byteSize(value: unknown): number {
   catch { return 0; }
 }
 
+function safeErrorCode(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const code = value.trim();
+  if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(code)) return undefined;
+  return code.toLowerCase();
+}
+
+type SafeToolFailure = {
+  errorClass?: string;
+  errorSource?: string;
+  errorCode?: string;
+};
+
+function failureMetadata(call: { ok: boolean; errorSource?: string; errorCode?: string }): SafeToolFailure {
+  if (call.ok) return {};
+  return {
+    errorClass: call.errorCode || "tool_error",
+    errorSource: call.errorSource || "agent",
+    ...(call.errorCode ? { errorCode: call.errorCode } : {}),
+  };
+}
+
 type ToolActivityContext = {
   toolCallId: string;
   activityId?: string;
@@ -470,7 +492,7 @@ async function instrumentTool<T>(
   user: AuthUser,
   tool: string,
   args: unknown,
-  run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; statusCode?: number; exitCode?: number | null }>,
+  run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null }>,
 ): Promise<T> {
   const started = Date.now();
   const activity = toolActivityContexts.get(user) ?? {
@@ -488,7 +510,7 @@ async function instrumentTool<T>(
     ...(activity.activityId ? { activityId: activity.activityId } : {}),
     startedAt: activity.startedAt,
   });
-  let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string; statusCode?: number; exitCode?: number | null } | undefined;
+  let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null } | undefined;
   try {
     outcome = await run();
     return outcome.value;
@@ -503,7 +525,9 @@ async function instrumentTool<T>(
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - started,
       ok: false,
-      errorClass: cause instanceof Error ? cause.name.slice(0, 80) : "exception",
+      errorClass: safeErrorCode(cause instanceof Error ? cause.name : undefined) || "exception",
+      errorSource: "worker",
+      errorCode: safeErrorCode(cause instanceof Error ? cause.name : undefined) || "exception",
       requestBytes: byteSize(args),
       responseBytes: 0,
     });
@@ -521,6 +545,8 @@ async function instrumentTool<T>(
         durationMs: Date.now() - started,
         ok: outcome.ok,
         ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
+        ...(outcome.errorSource ? { errorSource: outcome.errorSource } : {}),
+        ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
         ...(Number.isFinite(outcome.statusCode) ? { statusCode: outcome.statusCode } : {}),
         ...(outcome.exitCode === null || Number.isFinite(outcome.exitCode) ? { exitCode: outcome.exitCode } : {}),
         requestBytes: byteSize(args),
@@ -613,7 +639,20 @@ async function callAgent(
   const scopes = Array.isArray(scope) ? scope : [scope];
   const resolved = await resolveAgentForScopes(env, user.id, scopes, requestedAgentId);
   if (!resolved.ok) {
-    return { ok: false, body: await resolved.response.text(), agentId: requestedAgentId, statusCode: resolved.response.status };
+    const body = await resolved.response.text();
+    let errorCode: string | undefined;
+    try {
+      const parsed = JSON.parse(body) as any;
+      errorCode = safeErrorCode(parsed?.errorCode) || safeErrorCode(parsed?.error);
+    } catch {}
+    return {
+      ok: false,
+      body,
+      agentId: requestedAgentId,
+      statusCode: resolved.response.status,
+      errorSource: "relay",
+      errorCode: errorCode || ("http_" + resolved.response.status),
+    };
   }
 
   const stub = env.RELAY.get(env.RELAY.idFromName(resolved.agentId));
@@ -626,14 +665,33 @@ async function callAgent(
 
   let ok = response.ok;
   let exitCode: number | null | undefined;
+  let errorCode: string | undefined;
+  let errorSource: string | undefined;
   try {
-    const parsed = JSON.parse(body) as { payload?: { ok?: boolean; exitCode?: unknown } };
-    if (parsed.payload?.ok === false) ok = false;
-    if (parsed.payload?.exitCode === null) exitCode = null;
-    else if (Number.isFinite(Number(parsed.payload?.exitCode))) exitCode = Number(parsed.payload?.exitCode);
-  } catch {}
+    const parsed = JSON.parse(body) as any;
+    const payload = parsed?.payload;
+    if (payload?.ok === false) ok = false;
+    if (payload?.exitCode === null) exitCode = null;
+    else if (Number.isFinite(Number(payload?.exitCode))) exitCode = Number(payload?.exitCode);
+    if (!ok) {
+      errorCode = safeErrorCode(payload?.errorCode) || safeErrorCode(payload?.error) ||
+        safeErrorCode(parsed?.errorCode) || safeErrorCode(parsed?.error);
+      errorSource = payload && (payload.errorCode !== undefined || payload.error !== undefined) ? "agent" : "relay";
+    }
+  } catch {
+    if (!response.ok) errorSource = "relay";
+  }
+  if (!ok && !errorCode && !response.ok) errorCode = "http_" + response.status;
 
-  return { ok, body, agentId: resolved.agentId, statusCode: response.status, ...(exitCode === undefined ? {} : { exitCode }) };
+  return {
+    ok,
+    body,
+    agentId: resolved.agentId,
+    statusCode: response.status,
+    ...(exitCode === undefined ? {} : { exitCode }),
+    ...(errorSource ? { errorSource } : {}),
+    ...(errorCode ? { errorCode } : {}),
+  };
 }
 
 function toolResult(result: { ok: boolean; body: string }) {
@@ -808,7 +866,7 @@ function createMcpServer(env: Env, user: AuthUser) {
           agentId: call.agentId,
           statusCode: call.statusCode,
           ...(call.exitCode === undefined ? {} : { exitCode: call.exitCode }),
-          ...(call.ok ? {} : { errorClass: "tool_error" }),
+          ...failureMetadata(call),
         };
       }),
     );
@@ -1005,7 +1063,7 @@ function createMcpServer(env: Env, user: AuthUser) {
         value: await screenshotToolResult(env, call.agentId, call),
         ok: call.ok,
         agentId: call.agentId,
-        ...(call.ok ? {} : { errorClass: "tool_error" }),
+        ...failureMetadata(call),
       };
     }),
   );
@@ -1111,7 +1169,7 @@ function createMcpServer(env: Env, user: AuthUser) {
           value: wantsCapture ? await screenshotToolResult(env, call.agentId, call) : toolResult(call),
           ok: call.ok,
           agentId: call.agentId,
-          ...(call.ok ? {} : { errorClass: "tool_error" }),
+          ...failureMetadata(call),
         };
       },
     ),

@@ -3,14 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Chat Relay</title>
+  <meta name="theme-color" content="#111417">
+  <title>Chat Relay · Operations</title>
   <link rel="stylesheet" href="/dashboard/styles.css">
 </head>
 <body>
   <section id="loginView" class="auth-shell">
     <form id="loginForm" class="auth-card">
-      <div class="brand-row"><span class="brand-mark">CR</span><div><strong>Chat Relay</strong><small>Operations dashboard</small></div></div>
-      <div class="auth-copy"><h1>Sign in</h1><p>Use your Chat Relay account.</p></div>
+      <div class="brand-row">
+        <span class="brand-mark">CR</span>
+        <div><strong>Chat Relay</strong><small>Operations dashboard</small></div>
+      </div>
+      <div class="auth-copy">
+        <h1>Sign in</h1>
+        <p>Use your Chat Relay account.</p>
+      </div>
       <label>Login<input id="loginName" autocomplete="username" required></label>
       <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
       <button class="button primary" type="submit">Sign in</button>
@@ -20,8 +27,11 @@
 
   <div id="appView" class="app-shell" hidden>
     <aside class="sidebar">
-      <div class="brand-row sidebar-brand"><span class="brand-mark">CR</span><div><strong>Chat Relay</strong><small>Operations</small></div></div>
-      <nav id="nav"></nav>
+      <div class="brand-row sidebar-brand">
+        <span class="brand-mark">CR</span>
+        <div><strong>Chat Relay</strong><small>Operations</small></div>
+      </div>
+      <nav id="nav" aria-label="Dashboard"></nav>
       <div class="sidebar-footer">
         <span id="roleBadge" class="role-badge"></span>
         <small>Refreshes every 5 seconds</small>
@@ -30,35 +40,61 @@
 
     <main class="main">
       <header class="topbar">
-        <div><p id="eyebrow" class="eyebrow"></p><h1 id="pageTitle"></h1><p id="pageSubtitle" class="subtitle"></p></div>
-        <div class="top-actions"><span id="freshness" class="soft-pill">Waiting for data</span><span id="who" class="identity"></span><button id="refresh" class="icon-button" title="Refresh">↻</button><button id="logout" class="button">Sign out</button></div>
+        <div>
+          <p id="eyebrow" class="eyebrow"></p>
+          <h1 id="pageTitle"></h1>
+          <p id="pageSubtitle" class="subtitle"></p>
+        </div>
+        <div class="top-actions">
+          <span id="freshness" class="soft-pill">Waiting for data</span>
+          <span id="who" class="identity"></span>
+          <button id="refresh" class="icon-button" type="button" title="Refresh" aria-label="Refresh dashboard"></button>
+          <button id="logout" class="button" type="button">Sign out</button>
+        </div>
       </header>
-      <div id="notice" class="notice" hidden></div>
+      <div id="notice" class="notice" hidden role="status"></div>
       <section id="content" aria-live="polite"></section>
     </main>
   </div>
 
   <dialog id="userDialog" class="dialog">
     <form id="userForm" method="dialog">
-      <div class="dialog-head"><div><h2>Add user</h2><p>Create Admin or User dashboard access.</p></div><button type="button" class="icon-button" data-close-dialog>×</button></div>
+      <div class="dialog-head">
+        <div><h2>Add user</h2><p>Create Admin or User dashboard access.</p></div>
+        <button type="button" class="button small" data-close-dialog>Close</button>
+      </div>
       <label>Name<input id="newName" required maxlength="120"></label>
       <label>Login<input id="newLogin" required minlength="3" maxlength="64"></label>
       <label>Temporary password<input id="newPassword" type="password" required minlength="8" maxlength="128"></label>
       <label>Role<select id="newAdmin"><option value="false">User</option><option value="true">Admin</option></select></label>
       <p class="privacy-note">Quota configuration is intentionally excluded from this release.</p>
-      <div class="dialog-actions"><button type="button" class="button" data-close-dialog>Cancel</button><button class="button primary" type="submit">Create user</button></div>
+      <div class="dialog-actions">
+        <button type="button" class="button" data-close-dialog>Cancel</button>
+        <button class="button primary" type="submit">Create user</button>
+      </div>
       <p id="userFormError" class="form-error"></p>
     </form>
   </dialog>
 
   <dialog id="confirmDialog" class="dialog">
-    <div class="dialog-head"><div><h2>Soft delete user?</h2><p id="confirmCopy"></p></div></div>
+    <div class="dialog-head">
+      <div><h2>Soft delete user?</h2><p id="confirmCopy"></p></div>
+    </div>
     <div class="privacy-note">Login and access are blocked; active sessions are revoked. Usage and audit history remain available.</div>
-    <div class="dialog-actions"><button id="cancelDelete" class="button">Cancel</button><button id="confirmDelete" class="button danger">Soft delete</button></div>
+    <div class="dialog-actions">
+      <button id="cancelDelete" class="button" type="button">Cancel</button>
+      <button id="confirmDelete" class="button danger" type="button">Soft delete</button>
+    </div>
   </dialog>
 
   <dialog id="detailDialog" class="dialog">
-    <div class="dialog-head"><div><h2 id="detailTitle">Safe detail</h2><p>Metadata only. Commands, arguments, payloads, and output are never stored.</p></div><button id="closeDetail" class="icon-button" type="button">×</button></div>
+    <div class="dialog-head">
+      <div>
+        <h2 id="detailTitle">Safe detail</h2>
+        <p>Metadata only. Commands, arguments, payloads, output, and credentials are never shown.</p>
+      </div>
+      <button id="closeDetail" class="button small" type="button">Close</button>
+    </div>
     <div id="detailBody" class="detail-list"></div>
   </dialog>
 

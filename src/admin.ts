@@ -195,6 +195,28 @@ async function usageSummary(env: AdminEnv, hours: number, userId?: string) {
   return response.json<any>();
 }
 
+const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
+function bangkokToday(nowMs = Date.now()) {
+  const local = new Date(nowMs + BANGKOK_OFFSET_MS);
+  const startMs = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - BANGKOK_OFFSET_MS;
+  return {
+    label: "Today",
+    timezone: "Asia/Bangkok",
+    timezoneLabel: "BKK · UTC+7",
+    day: new Date(startMs + BANGKOK_OFFSET_MS).toISOString().slice(0, 10),
+    from: new Date(startMs).toISOString(),
+    to: new Date(nowMs).toISOString(),
+  };
+}
+
+async function usageWindow(env: AdminEnv, period: ReturnType<typeof bangkokToday>, userId?: string) {
+  const query = new URLSearchParams({ from: period.from, to: period.to });
+  if (userId) query.set("userId", userId);
+  const response = await usageStub(env).fetch("https://usage.internal/window?" + query);
+  if (!response.ok) throw new Error("usage_window_failed");
+  return response.json<any>();
+}
+
 async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], grants: any[] = []) {
   const userById = new Map(users.map((user) => [user.id, user]));
   const grantsByAgent = new Map<string, any[]>();  for (const grant of grants) {
@@ -407,21 +429,32 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   if (path === "/admin/api/overview" && request.method === "GET") {
-    const hours = 24;
+    const period = bangkokToday();
     if (!adminAuthorized) {
       const [usage, terminals] = await Promise.all([
-        usageSummary(env, hours, selfUserId),
+        usageWindow(env, period, selfUserId),
         terminalActivity(env, selfUserId),
       ]);
       const activeTerminals = terminals.reduce((count, agent) => count +
         agent.sessions.filter((session: any) => session.status === "running").length +
         agent.batches.reduce((sum: number, batch: any) => sum + Number(batch.counts?.running || 0), 0), 0);
-      return Response.json({ role: "user", user: sessionUser, hours, usage: usage.metric ?? null, activeTerminals });
+      return Response.json({
+        role: "user",
+        user: sessionUser,
+        period,
+        usage: usage.metric ?? null,
+        buckets: usage.buckets ?? [],
+        topTools: usage.topTools ?? [],
+        bounded: usage.bounded === true,
+        sampleSize: Number(usage.sampleSize || 0),
+        activeTerminals,
+      });
     }
+
     const state = await registryState(env);
     const [agents, usage, terminals] = await Promise.all([
       onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []),
-      usageSummary(env, hours),
+      usageWindow(env, period),
       terminalActivity(env),
     ]);
     const activeTerminals = terminals.reduce((count, agent) => count +
@@ -430,11 +463,15 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const activeUsers = new Set((state.users ?? []).filter((u: any) => u.enabled && !u.deletedAt).map((u: any) => u.id));
     return Response.json({
       role: "admin",
-      hours,
+      period,
       users: { total: (state.users ?? []).length, enabled: activeUsers.size },
       agents: { total: agents.length, online: agents.filter((a: any) => a.online).length },
       grants: { total: (state.grants ?? []).length },
       usage: usage.metric ?? null,
+      buckets: usage.buckets ?? [],
+      topTools: usage.topTools ?? [],
+      bounded: usage.bounded === true,
+      sampleSize: Number(usage.sampleSize || 0),
       activeTerminals,
       activeUsers: activeUsers.size,
     });
@@ -452,10 +489,27 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const state = await registryState(env);
     const q = String(url.searchParams.get("q") || "").toLowerCase();
     const enabled = url.searchParams.get("enabled");
-    const items = (state.users ?? []).filter((user: any) =>
-      (!q || String(user.id + " " + user.name + " " + (user.login ?? "")).toLowerCase().includes(q)) &&
-      (enabled === null || String(user.enabled) === enabled)
-    );
+    const agents = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
+    const agentById = new Map(agents.map((agent: any) => [agent.id, agent]));
+    const items = (state.users ?? [])
+      .filter((user: any) =>
+        (!q || String(user.id + " " + user.name + " " + (user.login ?? "")).toLowerCase().includes(q)) &&
+        (enabled === null || String(user.enabled) === enabled)
+      )
+      .map((user: any) => {
+        const ids = new Set<string>();
+        for (const grant of state.grants ?? []) if (grant.userId === user.id) ids.add(grant.agentId);
+        for (const agent of state.agents ?? []) if (agent.ownerUserId === user.id) ids.add(agent.id);
+        const activeIds = [...ids].filter((id) => {
+          const agent = agentById.get(id);
+          return agent && agent.enabled && !agent.retiredAt;
+        });
+        return {
+          ...user,
+          agentCount: activeIds.length,
+          onlineAgentCount: activeIds.filter((id) => agentById.get(id)?.online === true).length,
+        };
+      });
     return Response.json(page(items, url));
   }
 
@@ -505,7 +559,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
   if (path === "/admin/api/tool-calls" && request.method === "GET") {
     const query = new URLSearchParams();
-    for (const key of ["state", "limit", "tool", "agentId", "from", "to", "activityId"]) {
+    for (const key of ["state", "limit", "tool", "agentId", "from", "to", "activityId", "status"]) {
       const value = url.searchParams.get(key);
       if (value) query.set(key, value);
     }
@@ -518,7 +572,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const response = await usageStub(env).fetch("https://usage.internal/activity/query?" + query);
     const data = await response.json<any>().catch(() => ({}));
     if (!response.ok) return Response.json(data, { status: response.status });
-    if (query.get("state") !== "active") return Response.json(data);
+    if (query.get("state") === "history") return Response.json(data);
     const terminals = await terminalActivity(env, adminAuthorized ? undefined : selfUserId);
     return Response.json({ ...data, terminals });
   }

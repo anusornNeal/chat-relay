@@ -128,6 +128,12 @@ for (const event of correlated.data.recent || []) {
   if (!event.toolCallId || !String(event.toolCallId).startsWith("tc_")) throw new Error("missing toolCallId in raw usage event");
 }
 
+const errors = await admin("/admin/api/errors?limit=100");
+const syntheticError = (errors.data.items || []).find((event) => event.tool === "read_file" && event.errorCode === "synthetic_failure");
+if (!syntheticError || syntheticError.errorSource !== "agent") {
+  throw new Error(`safe structured error metadata missing: ${errors.text}`);
+}
+
 const serialized = JSON.stringify(total.data.recent || []);
 for (const forbidden of [
   "SENSITIVE_PATH_SECRET",
@@ -138,6 +144,28 @@ for (const forbidden of [
   agentToken,
 ]) {
   if (serialized.includes(forbidden)) throw new Error(`sensitive usage payload persisted: ${forbidden}`);
+}
+
+// Prove the Bangkok Today overview does not silently stop at the old 1,000-event read bound.
+const bulkCalls = 1005;
+for (let offset = 0; offset < bulkCalls; offset += 25) {
+  const count = Math.min(25, bulkCalls - offset);
+  await Promise.all(Array.from({ length: count }, (_, index) =>
+    tool(ownerToken, 1000 + offset + index, "whoami", {}, false, "usage-bulk-session")
+  ));
+}
+const todayOverview = await admin("/admin/api/overview");
+if (!todayOverview.response.ok || todayOverview.data.period?.timezoneLabel !== "BKK · UTC+7") {
+  throw new Error(`Bangkok Today overview contract missing: ${todayOverview.text}`);
+}
+if ((todayOverview.data.usage?.calls || 0) <= 1000) {
+  throw new Error(`Today overview silently capped at 1,000 calls: ${todayOverview.text}`);
+}
+if (todayOverview.data.bounded === true) {
+  throw new Error(`Today overview unexpectedly bounded near 1,000 calls: ${todayOverview.text}`);
+}
+if (!Array.isArray(todayOverview.data.buckets) || !Array.isArray(todayOverview.data.topTools)) {
+  throw new Error("Today overview missing chart data");
 }
 
 socket.close();

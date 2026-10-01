@@ -62,6 +62,10 @@ const filtered = await admin(`/admin/api/users?q=${encodeURIComponent(createdUse
 if (filtered.data.total !== 1 || filtered.data.items[0]?.id !== createdUsers[1].user.id) {
   throw new Error(`users filtering failed: ${filtered.text}`);
 }
+const assignedUser = await admin(`/admin/api/users?q=${encodeURIComponent(createdUsers[0].user.id)}&limit=100`);
+if (assignedUser.data.items?.[0]?.agentCount !== 1 || assignedUser.data.items?.[0]?.onlineAgentCount !== 0) {
+  throw new Error(`user agent counts failed: ${assignedUser.text}`);
+}
 
 const userDetail = await admin(`/admin/api/users/${encodeURIComponent(createdUsers[0].user.id)}`);
 if (!userDetail.response.ok || userDetail.data.user?.id !== createdUsers[0].user.id) throw new Error("user detail failed");
@@ -84,6 +88,11 @@ const revoked = await admin("/admin/api/sessions/revoke", "POST", { userId: crea
 if (!revoked.response.ok || typeof revoked.data.revoked !== "number") throw new Error(`session revoke failed: ${revoked.text}`);
 
 await rpc(ownerToken, 1, "whoami");
+await rpc(createdUsers[0].token, 2, "whoami");
+const filteredCalls = await admin(`/admin/api/tool-calls?state=all&status=success&userId=${encodeURIComponent(createdUsers[0].user.id)}&limit=100`);
+if (!filteredCalls.response.ok || !filteredCalls.data.items?.length || filteredCalls.data.items.some((item) => item.userId !== createdUsers[0].user.id || item.status !== "success")) {
+  throw new Error(`admin tool-call user/status filter failed: ${filteredCalls.text}`);
+}
 const usage = await admin(`/admin/api/usage?day=${new Date().toISOString().slice(0, 10)}`);
 if (!usage.response.ok || !(usage.data.metric?.calls >= 1)) throw new Error(`usage API failed: ${usage.text}`);
 
@@ -93,6 +102,12 @@ if (!range.response.ok || range.data.days?.length !== 1) throw new Error(`usage 
 const overview = await admin("/admin/api/overview");
 if (!overview.response.ok || overview.data.users?.total < 4 || overview.data.agents?.total < 2) {
   throw new Error(`overview failed: ${overview.text}`);
+}
+if (overview.data.period?.label !== "Today" || overview.data.period?.timezone !== "Asia/Bangkok" || overview.data.period?.timezoneLabel !== "BKK · UTC+7") {
+  throw new Error(`Bangkok period contract failed: ${overview.text}`);
+}
+if (!Array.isArray(overview.data.buckets) || !Array.isArray(overview.data.topTools)) {
+  throw new Error("overview chart payload missing");
 }
 
 const disabled = await admin("/admin/users/enabled", "POST", { userId: createdUsers[2].user.id, enabled: false });
