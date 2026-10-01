@@ -3,13 +3,22 @@ import type { DashboardTopic } from "./dashboard-hub";
 
 type UsageEnv = { DASHBOARD: DurableObjectNamespace };
 
-async function publishDashboard(env: UsageEnv, topics: DashboardTopic[], userId?: string) {
+async function publishDashboard(
+  env: UsageEnv,
+  topics: DashboardTopic[],
+  userId?: string,
+  event?: Record<string, unknown>,
+) {
   try {
     const stub = env.DASHBOARD.get(env.DASHBOARD.idFromName("global"));
     await stub.fetch(new Request("https://dashboard.internal/publish", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ topics, ...(userId ? { userId } : {}) }),
+      body: JSON.stringify({
+        topics,
+        ...(userId ? { userId } : {}),
+        ...(event ? { event } : {}),
+      }),
     }));
   } catch {}
 }
@@ -376,7 +385,15 @@ export class Usage extends DurableObject {
         activityId: body?.activityId ? String(body.activityId).slice(0, 96) : fallbackActivityId(toolCallId),
       };
       await this.ctx.storage.put("active:" + safePart(toolCallId), event);
-      this.ctx.waitUntil(publishDashboard(this.usageEnv, ["calls"], event.userId));
+      await publishDashboard(this.usageEnv, [], event.userId, {
+        type: "tool_started",
+        userId: event.userId,
+        tool: event.tool,
+        toolCallId: event.toolCallId,
+        activityId: event.activityId,
+        agentId: event.agentId,
+        startedAt: event.startedAt,
+      });
       return Response.json({ ok: true });
     }
 
@@ -431,11 +448,30 @@ export class Usage extends DurableObject {
         ...writes,
         [eventKey]: event,
       });
-      this.ctx.waitUntil(publishDashboard(
+      await publishDashboard(
         this.usageEnv,
-        event.ok ? ["overview", "calls"] : ["overview", "calls", "errors"],
+        event.ok ? ["overview"] : ["overview", "errors"],
         event.userId,
-      ));
+        {
+          type: "tool_finished",
+          userId: event.userId,
+          tool: event.tool,
+          toolCallId: event.toolCallId,
+          activityId: event.activityId,
+          agentId: event.agentId,
+          startedAt: event.startedAt || event.timestamp,
+          timestamp: event.timestamp,
+          durationMs: event.durationMs,
+          ok: event.ok,
+          errorClass: event.errorClass,
+          errorSource: event.errorSource,
+          errorCode: event.errorCode,
+          failureStage: event.failureStage,
+          retryable: event.retryable,
+          statusCode: event.statusCode,
+          exitCode: event.exitCode,
+        },
+      );
       return Response.json({ ok: true });
     }
 

@@ -25,6 +25,51 @@ async function admin(path, method = "GET", body) {
   });
 }
 
+async function browserLogin(userId, label) {
+  const suffix = Date.now().toString(36) + "-" + label;
+  const login = "usage-" + suffix;
+  const password = "Usage-" + suffix + "-Password!";
+  const attached = await admin("/admin/users/login", "POST", { userId, login, password });
+  if (!attached.response.ok) throw new Error(`browser credentials failed: ${attached.text}`);
+  const auth = await jsonFetch("/admin/session/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ login, password }),
+  });
+  if (!auth.response.ok) throw new Error(`browser login failed: ${auth.text}`);
+  return (auth.response.headers.get("set-cookie") || "").split(";")[0];
+}
+
+async function openDashboardWs(cookie) {
+  const socket = new WebSocket(base.replace(/^http/, "ws") + "/admin/ws", { headers: { cookie } });
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  return socket;
+}
+
+function nextDashboardEvent(socket, predicate, timeout = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("dashboard lifecycle event timeout"));
+    }, timeout);
+    const onMessage = (raw) => {
+      let data;
+      try { data = JSON.parse(String(raw)); } catch { return; }
+      if (!predicate(data)) return;
+      cleanup();
+      resolve(data);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+    };
+    socket.on("message", onMessage);
+  });
+}
+
 async function rpc(token, id, method, params = {}, sessionId = "usage-smoke-session") {
   const response = await fetch(`${base}/mcp?key=${encodeURIComponent(token)}`, {
     method: "POST",
@@ -78,6 +123,46 @@ socket.on("message", (raw) => {
   } else result = { ok: true };
   socket.send(JSON.stringify({ requestId: message.requestId, payload: result }));
 });
+
+const lifecycleSuffix = Date.now().toString(36);
+const lifecycleUser = await admin("/admin/users", "POST", { name: "Lifecycle Reader", id: "lifecycle-" + lifecycleSuffix });
+if (!lifecycleUser.response.ok || !lifecycleUser.data.token) throw new Error(`lifecycle user create failed: ${lifecycleUser.text}`);
+const lifecycleGrant = await admin("/admin/grants", "POST", {
+  userId: lifecycleUser.data.user.id,
+  agentId: "default",
+  scopes: ["*"],
+});
+if (!lifecycleGrant.response.ok) throw new Error(`lifecycle grant failed: ${lifecycleGrant.text}`);
+const lifecycleCookie = await browserLogin(lifecycleUser.data.user.id, "lifecycle");
+const dashboardSocket = await openDashboardWs(lifecycleCookie);
+await new Promise((resolve) => setTimeout(resolve, 40));
+
+const lifecycleOrder = [];
+const collectLifecycle = (raw) => {
+  try {
+    const event = JSON.parse(String(raw));
+    if (event?.type === "tool_started" || event?.type === "tool_finished") lifecycleOrder.push(event);
+  } catch {}
+};
+dashboardSocket.on("message", collectLifecycle);
+const lifecycleSensitivePath = "SENSITIVE_FAST_LIFECYCLE_PATH.txt";
+const startedPromise = nextDashboardEvent(dashboardSocket, (event) => event.type === "tool_started" && event.tool === "read_file");
+const finishedPromise = nextDashboardEvent(dashboardSocket, (event) => event.type === "tool_finished" && event.tool === "read_file");
+const fastToolPromise = tool(lifecycleUser.data.token, 40, "read_file", { path: lifecycleSensitivePath }, false, "lifecycle-fast-session");
+const [startedEvent, finishedEvent] = await Promise.all([startedPromise, finishedPromise]);
+await fastToolPromise;
+if (startedEvent.toolCallId !== finishedEvent.toolCallId || finishedEvent.status !== "success" || finishedEvent.ok !== true || !finishedEvent.agentName || finishedEvent.agentName === finishedEvent.agentId) {
+  throw new Error(`lifecycle transition mismatch: ${JSON.stringify({ startedEvent, finishedEvent })}`);
+}
+const ordered = lifecycleOrder.filter((event) => event.toolCallId === startedEvent.toolCallId).map((event) => event.type);
+if (ordered[0] !== "tool_started" || ordered[1] !== "tool_finished") {
+  throw new Error(`lifecycle delivery order invalid: ${JSON.stringify(ordered)}`);
+}
+const lifecycleSerialized = JSON.stringify([startedEvent, finishedEvent]);
+for (const forbidden of [lifecycleSensitivePath, "PRIVATE_FILE_OUTPUT", "command", "args", "arguments", "payload", "stdout", "stderr"]) {
+  if (lifecycleSerialized.includes(forbidden)) throw new Error(`unsafe dashboard lifecycle payload: ${forbidden}`);
+}
+dashboardSocket.off("message", collectLifecycle);
 
 await tool(ownerToken, 1, "whoami");
 await tool(ownerToken, 2, "ping_agent", { agentId: "default" });
@@ -171,6 +256,7 @@ const serialized = JSON.stringify(total.data.recent || []);
 for (const forbidden of [
   "SENSITIVE_PATH_SECRET",
   "SENSITIVE_FAILURE_PATH",
+  "SENSITIVE_FAST_LIFECYCLE_PATH",
   "PRIVATE_FILE_OUTPUT",
   "PRIVATE_ERROR_OUTPUT",
   "PRIVATE_TERMINAL_OUTPUT",
@@ -202,5 +288,6 @@ if (!Array.isArray(todayOverview.data.buckets) || !Array.isArray(todayOverview.d
   throw new Error("Today overview missing chart data");
 }
 
+dashboardSocket.terminate();
 socket.close();
 console.log("usage telemetry smoke test passed");

@@ -13,6 +13,7 @@ let socketEverOpened = false;
 let refreshRunning = false;
 let refreshQueued = false;
 const pendingLiveTopics = new Set();
+const agentNameCache = new Map();
 let pendingDeleteUser = null;
 let dashboardPeriod = null;
 let adminUsersCache = [];
@@ -485,6 +486,10 @@ function connectLiveChannel() {
       lastPongAt = Date.now();
       return;
     }
+    if (data?.type === "tool_started" || data?.type === "tool_finished") {
+      applyToolLifecycle(data);
+      return;
+    }
     if (data?.type === "invalidate" && Array.isArray(data.topics)) queueLiveRefresh(data.topics);
   };
   socket.onerror = () => {
@@ -700,6 +705,91 @@ function callFilterMarkup() {
     "</div></div>";
 }
 
+function rememberAgentName(event) {
+  if (event?.agentId && event?.agentName) agentNameCache.set(String(event.agentId), String(event.agentName));
+}
+function callAgentName(event) {
+  return event?.agentName || (event?.agentId ? agentNameCache.get(String(event.agentId)) : "") || "Resolving…";
+}
+function callEventMatchesFilters(event) {
+  const when = Date.parse(event.startedAt || event.timestamp || "");
+  if (callFilters.from && Number.isFinite(when) && when < Date.parse(callFilters.from)) return false;
+  if (callFilters.to && Number.isFinite(when) && when > Date.parse(callFilters.to)) return false;
+  if (isAdmin() && callFilters.userId && event.userId !== callFilters.userId) return false;
+  if (callFilters.activityId && event.activityId !== callFilters.activityId) return false;
+  if (callFilters.status && event.status !== callFilters.status) return false;
+  return true;
+}
+function callRowMarkup(event) {
+  rememberAgentName(event);
+  const detailId = registerDetail(event);
+  const when = event.startedAt || event.timestamp;
+  const rowKey = event.toolCallId || [when, event.userId, event.tool, event.agentId].join(":");
+  const duration = event.status === "running"
+    ? '<span class="running-duration" data-running-start="' + esc(event.startedAt || event.timestamp) + '">' + esc(elapsedClock(event.startedAt || event.timestamp)) + "</span>"
+    : esc(fmtMs(event.durationMs));
+  return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Tool call detail">' +
+    '<td class="time-cell"><strong>' + esc(when ? bkkTime(when) : "-") + "</strong></td>" +
+    (isAdmin() ? '<td><span class="user-cell">' + esc(event.userId || "-") + "</span></td>" : "") +
+    '<td><div class="tool-cell"><span class="tool-icon">' + icon(event.tool?.startsWith("terminal") ? "terminal" : "activity") + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
+    '<td><div class="agent-cell"><strong>' + esc(callAgentName(event)) + "</strong></div></td>" +
+    '<td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
+    "<td>" + duration + "</td>" +
+    "<td>" + statusBadge(event.status || (event.ok ? "success" : "error")) + "</td>" +
+    '<td class="row-chevron">' + icon("chevron") + "</td></tr>";
+}
+function applyCallSearchFilter() {
+  const search = $("toolSearch");
+  const q = String(search?.value || callFilters.query || "").trim().toLowerCase();
+  document.querySelectorAll("[data-filter-row]").forEach((row) => {
+    row.hidden = Boolean(q && !row.textContent.toLowerCase().includes(q));
+  });
+}
+function lifecycleCallEvent(data) {
+  const started = data.startedAt || data.timestamp;
+  const status = data.type === "tool_started" ? "running" : (data.status || (data.ok ? "success" : "error"));
+  const event = {
+    ...data,
+    status,
+    startedAt: started,
+    timestamp: data.type === "tool_started" ? started : data.timestamp,
+    ...(data.agentId && agentNameCache.has(String(data.agentId)) ? { agentName: agentNameCache.get(String(data.agentId)) } : {}),
+  };
+  delete event.type;
+  return event;
+}
+function applyToolLifecycle(data) {
+  if (!data?.toolCallId || activeView !== "calls" || callPaging.cursor) return;
+  const tbody = document.querySelector(".calls-table tbody");
+  if (!tbody) return;
+
+  const event = lifecycleCallEvent(data);
+  const existing = [...tbody.querySelectorAll("[data-live-key]")].find((row) => row.dataset.liveKey === event.toolCallId);
+  if (!callEventMatchesFilters(event)) {
+    existing?.remove();
+    ensureRunningClock();
+    touchFreshness();
+    return;
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = callRowMarkup(event).trim();
+  const nextRow = template.content.firstElementChild;
+  if (!nextRow) return;
+
+  const empty = tbody.querySelector(".table-empty")?.closest("tr");
+  empty?.remove();
+  if (existing) patchLiveNode(existing, nextRow);
+  else tbody.prepend(nextRow);
+
+  const rows = [...tbody.querySelectorAll("[data-filter-row]")];
+  for (const row of rows.slice(PAGE_SIZE)) row.remove();
+  bindDetailRows();
+  applyCallSearchFilter();
+  ensureRunningClock();
+  touchFreshness();
+}
+
 async function loadCalls({ patch = false } = {}) {
   detailRecords.clear();
   detailSeq = 0;
@@ -725,23 +815,8 @@ async function loadCalls({ patch = false } = {}) {
   const items = [...terminalItems.filter((item) => !item.toolCallId || !seen.has(item.toolCallId)), ...rawItems]
     .sort((a, b) => Date.parse(b.timestamp || b.startedAt || "") - Date.parse(a.timestamp || a.startedAt || ""));
 
-  const tableRows = items.length ? items.map((event) => {
-    const detailId = registerDetail(event);
-    const when = event.timestamp || event.startedAt;
-    const rowKey = event.toolCallId || [when, event.userId, event.tool, event.agentId].join(":");
-    const duration = event.status === "running"
-      ? '<span class="running-duration" data-running-start="' + esc(event.startedAt || event.timestamp) + '">' + esc(elapsedClock(event.startedAt || event.timestamp)) + "</span>"
-      : esc(fmtMs(event.durationMs));
-    return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Tool call detail">' +
-      '<td class="time-cell"><strong>' + esc(when ? bkkTime(when) : "-") + "</strong></td>" +
-      (isAdmin() ? '<td><span class="user-cell">' + esc(event.userId || "-") + "</span></td>" : "") +
-      '<td><div class="tool-cell"><span class="tool-icon">' + icon(event.tool?.startsWith("terminal") ? "terminal" : "activity") + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
-      '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving…") + "</strong></div></td>" +
-      '<td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
-      "<td>" + duration + "</td>" +
-      "<td>" + statusBadge(event.status || (event.ok ? "success" : "error")) + "</td>" +
-      '<td class="row-chevron">' + icon("chevron") + "</td></tr>";
-  }).join("") : '<tr><td colspan="' + (isAdmin() ? "8" : "7") + '"><div class="table-empty">' + icon("activity") + '<strong>No tool calls in this window</strong><span>New activity appears here in realtime.</span></div></td></tr>';
+  items.forEach(rememberAgentName);
+  const tableRows = items.length ? items.map(callRowMarkup).join("") : '<tr><td colspan="' + (isAdmin() ? "8" : "7") + '"><div class="table-empty">' + icon("activity") + '<strong>No tool calls in this window</strong><span>New activity appears here in realtime.</span></div></td></tr>';
 
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) +
@@ -758,10 +833,7 @@ async function loadCalls({ patch = false } = {}) {
   if (search) {
     search.oninput = () => {
       callFilters.query = search.value;
-      const q = search.value.trim().toLowerCase();
-      document.querySelectorAll("[data-filter-row]").forEach((row) => {
-        row.hidden = Boolean(q && !row.textContent.toLowerCase().includes(q));
-      });
+      applyCallSearchFilter();
     };
     search.dispatchEvent(new Event("input"));
   }

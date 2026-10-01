@@ -3,14 +3,41 @@ import { DurableObject } from "cloudflare:workers";
 export const DASHBOARD_TOPICS = ["overview", "calls", "users", "errors", "agents"] as const;
 export type DashboardTopic = typeof DASHBOARD_TOPICS[number];
 
+type DashboardHubEnv = {
+  REGISTRY: DurableObjectNamespace;
+};
+
 type DashboardSocketAttachment = {
   userId: string;
   admin: boolean;
 };
 
+type DashboardLifecycleEvent = {
+  type: "tool_started" | "tool_finished";
+  userId: string;
+  tool: string;
+  toolCallId: string;
+  activityId?: string;
+  agentId?: string;
+  agentName?: string;
+  startedAt: string;
+  timestamp?: string;
+  durationMs?: number;
+  status?: "success" | "error";
+  ok?: boolean;
+  errorClass?: string;
+  errorSource?: string;
+  errorCode?: string;
+  failureStage?: string;
+  retryable?: boolean;
+  statusCode?: number;
+  exitCode?: number | null;
+};
+
 type DashboardPublishEvent = {
   topics?: unknown;
   userId?: unknown;
+  event?: unknown;
 };
 
 const topicSet = new Set<string>(DASHBOARD_TOPICS);
@@ -22,7 +49,95 @@ function normalizeTopics(value: unknown): DashboardTopic[] {
     .slice(0, DASHBOARD_TOPICS.length))] as DashboardTopic[];
 }
 
+function safeString(value: unknown, maxLength: number) {
+  return typeof value === "string" && value ? value.slice(0, maxLength) : "";
+}
+
+function safeNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function normalizeLifecycleEvent(value: unknown): DashboardLifecycleEvent | null {
+  if (!value || typeof value !== "object") return null;
+  const input = value as Record<string, unknown>;
+  const type = input.type === "tool_started" || input.type === "tool_finished" ? input.type : null;
+  if (!type) return null;
+
+  const userId = safeString(input.userId, 128);
+  const tool = safeString(input.tool, 160);
+  const toolCallId = safeString(input.toolCallId, 96);
+  const startedAt = safeString(input.startedAt, 64);
+  if (!userId || !tool || !toolCallId || !Number.isFinite(Date.parse(startedAt))) return null;
+
+  const event: DashboardLifecycleEvent = {
+    type,
+    userId,
+    tool,
+    toolCallId,
+    startedAt,
+  };
+  const activityId = safeString(input.activityId, 96);
+  const agentId = safeString(input.agentId, 128);
+  if (activityId) event.activityId = activityId;
+  if (agentId) event.agentId = agentId;
+
+  if (type === "tool_finished") {
+    const timestamp = safeString(input.timestamp, 64);
+    if (!timestamp || !Number.isFinite(Date.parse(timestamp))) return null;
+    event.timestamp = timestamp;
+    event.durationMs = Math.max(0, safeNumber(input.durationMs) ?? 0);
+    event.ok = input.ok === true;
+    event.status = event.ok ? "success" : "error";
+
+    for (const [key, maxLength] of [
+      ["errorClass", 80],
+      ["errorSource", 40],
+      ["errorCode", 80],
+      ["failureStage", 40],
+    ] as const) {
+      const text = safeString(input[key], maxLength);
+      if (text) (event as any)[key] = text;
+    }
+    if (typeof input.retryable === "boolean") event.retryable = input.retryable;
+    const statusCode = safeNumber(input.statusCode);
+    if (statusCode !== undefined) event.statusCode = statusCode;
+    if (input.exitCode === null) event.exitCode = null;
+    else {
+      const exitCode = safeNumber(input.exitCode);
+      if (exitCode !== undefined) event.exitCode = exitCode;
+    }
+  }
+
+  return event;
+}
+
 export class DashboardHub extends DurableObject {
+  private readonly hubEnv: DashboardHubEnv;
+  private readonly agentNames = new Map<string, string>();
+
+  constructor(ctx: DurableObjectState, env: DashboardHubEnv) {
+    super(ctx, env);
+    this.hubEnv = env;
+  }
+
+  private async enrichLifecycle(event: DashboardLifecycleEvent | null) {
+    if (!event?.agentId) return event;
+    let agentName = this.agentNames.get(event.agentId);
+    if (!agentName) {
+      try {
+        const stub = this.hubEnv.REGISTRY.get(this.hubEnv.REGISTRY.idFromName("global"));
+        const response = await stub.fetch("https://registry.internal/state");
+        if (response.ok) {
+          const state = await response.json<any>();
+          agentName = String((state.agents ?? []).find((agent: any) => agent.id === event.agentId)?.name || "").slice(0, 120);
+          if (agentName) this.agentNames.set(event.agentId, agentName);
+        }
+      } catch {}
+    }
+    return agentName ? { ...event, agentName } : event;
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -46,14 +161,20 @@ export class DashboardHub extends DurableObject {
     if (url.pathname === "/publish" && request.method === "POST") {
       const body = await request.json<DashboardPublishEvent>().catch(() => ({}));
       const topics = normalizeTopics(body.topics);
-      if (!topics.length) return Response.json({ ok: true, delivered: 0 });
+      if (topics.includes("agents")) this.agentNames.clear();
+      const lifecycle = await this.enrichLifecycle(normalizeLifecycleEvent(body.event));
+      if (!topics.length && !lifecycle) return Response.json({ ok: true, delivered: 0 });
 
-      const audienceUserId = typeof body.userId === "string" ? body.userId.slice(0, 160) : "";
-      const payload = JSON.stringify({
-        type: "invalidate",
-        topics,
-        at: new Date().toISOString(),
-      });
+      const requestedAudience = safeString(body.userId, 128);
+      const audienceUserId = requestedAudience || lifecycle?.userId || "";
+      const payloads = [
+        ...(lifecycle ? [JSON.stringify(lifecycle)] : []),
+        ...(topics.length ? [JSON.stringify({
+          type: "invalidate",
+          topics,
+          at: new Date().toISOString(),
+        })] : []),
+      ];
 
       let delivered = 0;
       for (const socket of this.ctx.getWebSockets()) {
@@ -61,7 +182,7 @@ export class DashboardHub extends DurableObject {
         if (!attachment) continue;
         if (audienceUserId && !attachment.admin && attachment.userId !== audienceUserId) continue;
         try {
-          socket.send(payload);
+          for (const payload of payloads) socket.send(payload);
           delivered += 1;
         } catch {
           try { socket.close(1011, "send_failed"); } catch {}
