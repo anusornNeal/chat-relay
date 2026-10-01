@@ -1,4 +1,18 @@
 import { DurableObject } from "cloudflare:workers";
+import type { DashboardTopic } from "./dashboard-hub";
+
+type UsageEnv = { DASHBOARD: DurableObjectNamespace };
+
+async function publishDashboard(env: UsageEnv, topics: DashboardTopic[], userId?: string) {
+  try {
+    const stub = env.DASHBOARD.get(env.DASHBOARD.idFromName("global"));
+    await stub.fetch(new Request("https://dashboard.internal/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ topics, ...(userId ? { userId } : {}) }),
+    }));
+  } catch {}
+}
 
 export type UsageEvent = {
   userId: string;
@@ -125,6 +139,12 @@ function nextUtcDay(nowMs: number) {
 }
 
 export class Usage extends DurableObject {
+  private readonly usageEnv: UsageEnv;
+
+  constructor(ctx: DurableObjectState, env: UsageEnv) {
+    super(ctx, env);
+    this.usageEnv = env;
+  }
   private async readWindowEvents(fromMs: number, toMs: number, maxEvents = 20000) {
     const events: UsageEvent[] = [];
     const startKey = "event:" + new Date(fromMs).toISOString();
@@ -275,6 +295,7 @@ export class Usage extends DurableObject {
         ...(body?.activityId ? { activityId: String(body.activityId).slice(0, 96) } : {}),
       };
       await this.ctx.storage.put("active:" + safePart(toolCallId), event);
+      this.ctx.waitUntil(publishDashboard(this.usageEnv, ["calls"], event.userId));
       return Response.json({ ok: true });
     }
 
@@ -324,6 +345,11 @@ export class Usage extends DurableObject {
         ...writes,
         [eventKey]: event,
       });
+      this.ctx.waitUntil(publishDashboard(
+        this.usageEnv,
+        event.ok ? ["overview", "calls"] : ["overview", "calls", "errors"],
+        event.userId,
+      ));
       return Response.json({ ok: true });
     }
 

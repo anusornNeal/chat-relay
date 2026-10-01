@@ -1,7 +1,18 @@
 let csrf = "";
 let currentUser = null;
 let activeView = "overview";
-let pollTimer = null;
+let liveSocket = null;
+let reconnectTimer = null;
+let fallbackStartTimer = null;
+let fallbackPollTimer = null;
+let heartbeatTimer = null;
+let lastPongAt = 0;
+let liveRefreshTimer = null;
+let reconnectAttempt = 0;
+let socketEverOpened = false;
+let refreshRunning = false;
+let refreshQueued = false;
+const pendingLiveTopics = new Set();
 let pendingDeleteUser = null;
 let dashboardPeriod = null;
 let adminUsersCache = [];
@@ -118,6 +129,108 @@ function bindTableFilter(inputId) {
       row.hidden = Boolean(q && !row.textContent.toLowerCase().includes(q));
     });
   };
+  input.oninput();
+}
+
+function liveNodeKey(node) {
+  if (!(node instanceof Element)) return "";
+  return node.id || node.getAttribute("data-live-key") || node.getAttribute("data-chart-from") || "";
+}
+function sameLiveNode(current, next) {
+  if (current.nodeType !== next.nodeType) return false;
+  if (current.nodeType !== Node.ELEMENT_NODE) return true;
+  if (current.tagName !== next.tagName) return false;
+  const currentKey = liveNodeKey(current);
+  const nextKey = liveNodeKey(next);
+  return !currentKey || !nextKey || currentKey === nextKey;
+}
+function syncLiveAttributes(current, next) {
+  const preserveControl = current instanceof HTMLInputElement || current instanceof HTMLSelectElement || current instanceof HTMLTextAreaElement;
+  for (const attr of [...current.attributes]) {
+    if (preserveControl && ["value", "checked", "selected"].includes(attr.name)) continue;
+    if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+  }
+  for (const attr of [...next.attributes]) {
+    if (preserveControl && ["value", "checked", "selected"].includes(attr.name)) continue;
+    if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+  }
+}
+function patchLiveNode(current, next) {
+  if (current.nodeType === Node.TEXT_NODE) {
+    if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+    return current;
+  }
+  if (!sameLiveNode(current, next)) {
+    const replacement = next.cloneNode(true);
+    current.replaceWith(replacement);
+    return replacement;
+  }
+  if (!(current instanceof Element) || !(next instanceof Element)) return current;
+
+  const preserveValue = current instanceof HTMLInputElement || current instanceof HTMLSelectElement || current instanceof HTMLTextAreaElement;
+  const controlValue = preserveValue ? current.value : null;
+  const selectionStart = current instanceof HTMLInputElement || current instanceof HTMLTextAreaElement ? current.selectionStart : null;
+  const selectionEnd = current instanceof HTMLInputElement || current instanceof HTMLTextAreaElement ? current.selectionEnd : null;
+  syncLiveAttributes(current, next);
+
+  const nextChildren = [...next.childNodes];
+  let index = 0;
+  while (index < nextChildren.length || index < current.childNodes.length) {
+    const existing = current.childNodes[index];
+    const desired = nextChildren[index];
+    if (!desired) {
+      existing?.remove();
+      continue;
+    }
+    if (!existing) {
+      current.appendChild(desired.cloneNode(true));
+      index += 1;
+      continue;
+    }
+    if (!sameLiveNode(existing, desired) && desired instanceof Element) {
+      const desiredKey = liveNodeKey(desired);
+      if (desiredKey) {
+        const match = [...current.childNodes].slice(index + 1).find((node) => node instanceof Element && liveNodeKey(node) === desiredKey);
+        if (match) current.insertBefore(match, existing);
+      }
+    }
+    patchLiveNode(current.childNodes[index], desired);
+    index += 1;
+  }
+
+  if (preserveValue && controlValue !== null) {
+    current.value = controlValue;
+    if ((current instanceof HTMLInputElement || current instanceof HTMLTextAreaElement) && document.activeElement === current && selectionStart !== null) {
+      try { current.setSelectionRange(selectionStart, selectionEnd ?? selectionStart); } catch {}
+    }
+  }
+  return current;
+}
+function renderContent(markup, patch = false) {
+  const content = $("content");
+  if (!patch || !content.firstChild) {
+    content.innerHTML = markup;
+    return;
+  }
+  const template = document.createElement("template");
+  template.innerHTML = markup;
+  const desired = [...template.content.childNodes];
+  let index = 0;
+  while (index < desired.length || index < content.childNodes.length) {
+    const existing = content.childNodes[index];
+    const next = desired[index];
+    if (!next) {
+      existing?.remove();
+      continue;
+    }
+    if (!existing) {
+      content.appendChild(next.cloneNode(true));
+      index += 1;
+      continue;
+    }
+    patchLiveNode(existing, next);
+    index += 1;
+  }
 }
 
 async function api(path, options = {}) {
@@ -139,8 +252,7 @@ async function api(path, options = {}) {
 }
 
 function signOutUi(message = "") {
-  clearInterval(pollTimer);
-  pollTimer = null;
+  stopLiveChannel();
   csrf = "";
   currentUser = null;
   dashboardPeriod = null;
@@ -155,6 +267,14 @@ function setNotice(message = "", error = false) {
   node.classList.toggle("notice-error", Boolean(error));
 }
 function touchFreshness() { $("freshness").textContent = "Updated just now"; }
+function setLiveState(state) {
+  const node = $("liveStatus");
+  if (!node) return;
+  const labels = { connecting: "Connecting", live: "Live", reconnecting: "Reconnecting", fallback: "Fallback" };
+  node.textContent = labels[state] || labels.connecting;
+  node.className = "live-pill " + state;
+  node.title = state === "live" ? "Receiving realtime dashboard events over WebSocket" : state === "fallback" ? "WebSocket unavailable; using temporary fallback refresh" : "Realtime connection is being restored";
+}
 function isAdmin() { return currentUser?.admin === true; }
 
 function navItems() {
@@ -188,21 +308,155 @@ async function switchView(view) {
   activeView = view;
   renderNav();
   showLoading();
-  await loadActive();
+  await loadActive({ patch: false });
 }
-async function loadActive() {
+async function loadActive({ patch = false } = {}) {
   setNotice("");
   try {
-    if (activeView === "overview") await loadOverview();
-    else if (activeView === "calls") await loadCalls();
-    else if (activeView === "users") await loadUsers();
-    else if (activeView === "errors") await loadErrors();
+    if (activeView === "overview") await loadOverview({ patch });
+    else if (activeView === "calls") await loadCalls({ patch });
+    else if (activeView === "users") await loadUsers({ patch });
+    else if (activeView === "errors") await loadErrors({ patch });
     touchFreshness();
   } catch (error) {
     if (error.message !== "unauthorized") {
-      setNotice("Dashboard data is temporarily unavailable. Retrying automatically in 5 seconds.", true);
+      setNotice("Dashboard data is temporarily unavailable. Live updates will retry automatically.", true);
     }
   }
+}
+
+async function refreshActiveIncrementally() {
+  if (!currentUser) return;
+  if (refreshRunning) {
+    refreshQueued = true;
+    return;
+  }
+  refreshRunning = true;
+  try {
+    do {
+      refreshQueued = false;
+      await loadActive({ patch: true });
+    } while (refreshQueued);
+  } finally {
+    refreshRunning = false;
+  }
+}
+function topicsTouchActiveView(topics) {
+  const set = new Set(topics);
+  if (activeView === "overview") return ["overview", "calls", "users", "errors", "agents"].some((topic) => set.has(topic));
+  if (activeView === "calls") return set.has("calls") || set.has("agents");
+  if (activeView === "users") return set.has("users") || set.has("agents");
+  if (activeView === "errors") return set.has("errors");
+  return false;
+}
+function queueLiveRefresh(topics = []) {
+  for (const topic of topics) pendingLiveTopics.add(topic);
+  clearTimeout(liveRefreshTimer);
+  liveRefreshTimer = setTimeout(async () => {
+    const topicsNow = [...pendingLiveTopics];
+    pendingLiveTopics.clear();
+    if (topicsTouchActiveView(topicsNow)) await refreshActiveIncrementally();
+  }, 120);
+}
+function stopFallbackPolling() {
+  clearTimeout(fallbackStartTimer);
+  fallbackStartTimer = null;
+  clearInterval(fallbackPollTimer);
+  fallbackPollTimer = null;
+}
+function scheduleFallbackPolling() {
+  if (fallbackStartTimer || fallbackPollTimer) return;
+  fallbackStartTimer = setTimeout(() => {
+    fallbackStartTimer = null;
+    if (liveSocket?.readyState === WebSocket.OPEN || !currentUser) return;
+    setLiveState("fallback");
+    void refreshActiveIncrementally();
+    fallbackPollTimer = setInterval(() => {
+      if (liveSocket?.readyState === WebSocket.OPEN) return;
+      void refreshActiveIncrementally();
+    }, 15000);
+  }, 8000);
+}
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  if (!currentUser) return;
+  const delay = Math.min(10000, 500 * (2 ** Math.min(reconnectAttempt, 5)));
+  reconnectAttempt += 1;
+  setLiveState("reconnecting");
+  reconnectTimer = setTimeout(connectLiveChannel, delay);
+  scheduleFallbackPolling();
+}
+function stopLiveChannel() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  clearTimeout(liveRefreshTimer);
+  liveRefreshTimer = null;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+  lastPongAt = 0;
+  stopFallbackPolling();
+  pendingLiveTopics.clear();
+  const socket = liveSocket;
+  liveSocket = null;
+  if (socket && socket.readyState < WebSocket.CLOSING) {
+    try { socket.close(1000, "dashboard_closed"); } catch {}
+  }
+}
+function connectLiveChannel() {
+  if (!currentUser) return;
+  if (liveSocket && (liveSocket.readyState === WebSocket.OPEN || liveSocket.readyState === WebSocket.CONNECTING)) return;
+  setLiveState(reconnectAttempt ? "reconnecting" : "connecting");
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(scheme + "//" + location.host + "/admin/ws");
+  liveSocket = socket;
+  socket.onopen = async () => {
+    if (liveSocket !== socket) return;
+    const reconnect = socketEverOpened;
+    socketEverOpened = true;
+    reconnectAttempt = 0;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    stopFallbackPolling();
+    clearInterval(heartbeatTimer);
+    lastPongAt = Date.now();
+    heartbeatTimer = setInterval(() => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastPongAt > 60000) {
+        try { socket.close(4000, "heartbeat_timeout"); } catch {}
+        return;
+      }
+      socket.send(JSON.stringify({ type: "ping" }));
+    }, 25000);
+    setLiveState("live");
+    if (reconnect) await refreshActiveIncrementally();
+  };
+  socket.onmessage = (event) => {
+    if (liveSocket !== socket || typeof event.data !== "string") return;
+    let data;
+    try { data = JSON.parse(event.data); } catch { return; }
+    if (data?.type === "pong" || data?.type === "ready") {
+      lastPongAt = Date.now();
+      return;
+    }
+    if (data?.type === "invalidate" && Array.isArray(data.topics)) queueLiveRefresh(data.topics);
+  };
+  socket.onerror = () => {
+    try { socket.close(); } catch {}
+  };
+  socket.onclose = () => {
+    if (liveSocket !== socket) return;
+    liveSocket = null;
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+    scheduleReconnect();
+  };
+}
+function startLiveChannel() {
+  stopLiveChannel();
+  reconnectAttempt = 0;
+  socketEverOpened = false;
+  setLiveState("connecting");
+  connectLiveChannel();
 }
 function metricCard(label, value, meta = "", tone = "") {
   return '<div class="metric ' + esc(tone) + '"><div class="metric-label">' + esc(label) + '</div>' +
@@ -234,7 +488,7 @@ function chartMarkup(buckets = []) {
   return '<div class="chart-frame">' + yLabels + '<div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i></div><div class="chart-bars">' + bars + "</div></div></div>";
 }
 
-async function loadOverview() {
+async function loadOverview({ patch = false } = {}) {
   setHeader(isAdmin() ? "System overview" : "My overview", isAdmin() ? "Today across Chat Relay" : "Your activity today");
   const data = await api("/admin/api/overview");
   dashboardPeriod = data.period || dashboardPeriod || { label: "Today", timezoneLabel: "BKK · UTC+7" };
@@ -254,7 +508,7 @@ async function loadOverview() {
   const boundedNotice = data.bounded
     ? '<div class="data-warning">' + icon("alert") + '<span>This view reached its safe event bound. Counts shown are partial rather than falsely exact.</span></div>'
     : "";
-  $("content").innerHTML =
+  const liveMarkup =
     '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +
       '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
     boundedNotice +
@@ -267,6 +521,7 @@ async function loadOverview() {
         '</div><div class="secondary-text">' + esc(humanTool(item.tool)) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + "</strong></div>"
       ).join("") : '<div class="empty-inline">No tool calls yet today.</div>') +
     "</div></section></div>";
+  renderContent(liveMarkup, patch);
 
   document.querySelectorAll("[data-chart-from]").forEach((bar) => {
     bar.onclick = async () => {
@@ -348,12 +603,14 @@ function callFilterMarkup() {
     "</div></div>";
 }
 
-async function loadCalls() {
+async function loadCalls({ patch = false } = {}) {
+  detailRecords.clear();
+  detailSeq = 0;
   setHeader(isAdmin() ? "Tool calls" : "My tool calls", "Running and completed activity in one timeline");
   await ensureCallPeriod();
   await loadAdminUsersForFilter();
   const from = callFilters.from || dashboardPeriod?.from;
-  const to = callFilters.to || dashboardPeriod?.to;
+  const to = callFilters.to || new Date().toISOString();
   const params = new URLSearchParams({ state: "all", limit: "250" });
   if (from) params.set("from", from);
   if (to) params.set("to", to);
@@ -371,7 +628,8 @@ async function loadCalls() {
     const detailId = registerDetail(event);
     const when = event.timestamp || event.startedAt;
     const duration = event.status === "running" ? age(event.startedAt || event.timestamp) : fmtMs(event.durationMs);
-    return '<tr data-filter-row data-detail-id="' + detailId + '" data-detail-title="Tool call detail">' +
+    const rowKey = event.toolCallId || [when, event.userId, event.tool, event.agentId].join(":");
+    return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Tool call detail">' +
       '<td class="time-cell"><strong>' + esc(when ? bkkTime(when) : "-") + '</strong><span>' + esc(when ? bkkDateTime(when) : "") + "</span></td>" +
       (isAdmin() ? '<td><span class="user-cell">' + esc(event.userId || "-") + "</span></td>" : "") +
       '<td><div class="tool-cell"><span class="tool-icon">' + icon(event.tool?.startsWith("terminal") ? "terminal" : "activity") + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
@@ -382,13 +640,14 @@ async function loadCalls() {
       '<td class="row-chevron">' + icon("chevron") + "</td></tr>";
   }).join("") : '<tr><td colspan="' + (isAdmin() ? "8" : "7") + '"><div class="table-empty">' + icon("activity") + '<strong>No tool calls in this window</strong><span>Activity will appear on the next refresh.</span></div></td></tr>';
 
-  $("content").innerHTML =
+  const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) +
       '<span class="privacy-chip">' + icon("info") + "Safe metadata only</span></div>" +
     (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>History reached its safe bound; results are partial.</span></div>" : "") +
     callFilterMarkup() +
     '<div class="table-wrap calls-table"><table><thead><tr><th>Time</th>' + (isAdmin() ? "<th>User</th>" : "") +
       "<th>Tool</th><th>Agent</th><th>Activity</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody>" + tableRows + "</tbody></table></div>";
+  renderContent(liveMarkup, patch);
 
   const search = $("toolSearch");
   if (search) {
@@ -401,26 +660,25 @@ async function loadCalls() {
     };
     search.dispatchEvent(new Event("input"));
   }
-  if ($("callUser")) $("callUser").onchange = async () => { callFilters.userId = $("callUser").value; showLoading(); await loadCalls(); };
-  if ($("callStatus")) $("callStatus").onchange = async () => { callFilters.status = $("callStatus").value; showLoading(); await loadCalls(); };
+  if ($("callUser")) $("callUser").onchange = async () => { callFilters.userId = $("callUser").value; await loadCalls({ patch: true }); };
+  if ($("callStatus")) $("callStatus").onchange = async () => { callFilters.status = $("callStatus").value; await loadCalls({ patch: true }); };
   if ($("clearDrilldown")) $("clearDrilldown").onclick = async () => {
     callFilters.from = "";
     callFilters.to = "";
     callFilters.drilldown = false;
-    showLoading();
-    await loadCalls();
+    await loadCalls({ patch: true });
   };
   bindDetailRows();
 }
 
-async function loadUsers() {
+async function loadUsers({ patch = false } = {}) {
   if (!isAdmin()) return switchView("overview");
   setHeader("Users", "Access, roles, and connected agents");
   const data = await api("/admin/api/users?limit=100");
   adminUsersCache = Array.isArray(data.items) ? data.items : adminUsersCache;
   const rows = (data.items || []).map((user) => {
     const agentMeta = fmtNum(user.agentCount) + " assigned · " + fmtNum(user.onlineAgentCount) + " online";
-    return '<tr data-filter-row><td><div class="identity-stack"><span class="avatar">' + esc((user.name || user.login || "?").slice(0, 1).toUpperCase()) + '</span><div><div class="primary-text">' + esc(user.name) + '</div><div class="secondary-text">' + esc(user.login || user.id) + "</div></div></div></td>" +
+    return '<tr data-filter-row data-live-key="' + esc(user.id) + '"><td><div class="identity-stack"><span class="avatar">' + esc((user.name || user.login || "?").slice(0, 1).toUpperCase()) + '</span><div><div class="primary-text">' + esc(user.name) + '</div><div class="secondary-text">' + esc(user.login || user.id) + "</div></div></div></td>" +
       '<td><span class="role-tag">' + esc(user.admin ? "Admin" : "User") + "</span></td>" +
       '<td>' + statusBadge(user.deletedAt ? "error" : user.enabled ? "success" : "disabled").replace("Success", "Enabled").replace("Error", "Deleted") + "</td>" +
       '<td><div class="agent-count"><strong>' + fmtNum(user.agentCount) + '</strong><span>' + esc(agentMeta) + "</span></div></td>" +
@@ -433,12 +691,13 @@ async function loadUsers() {
       "</td></tr>";
   }).join("");
 
-  $("content").innerHTML =
+  const liveMarkup =
     '<div class="filters-panel compact"><div class="filters-row"><label class="filter-control grow"><span>Search users</span><div class="input-with-icon">' +
       icon("search") + '<input id="userSearch" placeholder="Name, login, role, agent"></div></label>' +
       '<button id="addUser" class="button primary" type="button">' + icon("plus") + "Add user</button></div></div>" +
     '<div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Agents</th><th>Created</th><th>Action</th></tr></thead><tbody>' +
       (rows || '<tr><td colspan="6"><div class="table-empty">No users.</div></td></tr>') + "</tbody></table></div>";
+  renderContent(liveMarkup, patch);
 
   bindTableFilter("userSearch");
   $("addUser").onclick = () => { $("userForm").reset(); $("userFormError").textContent = ""; $("userDialog").showModal(); };
@@ -449,24 +708,27 @@ async function loadUsers() {
   });
   document.querySelectorAll("[data-restore]").forEach((button) => button.onclick = async () => {
     await api("/admin/api/users/restore", { method: "POST", body: JSON.stringify({ userId: button.dataset.restore }) });
-    await loadUsers();
+    await loadUsers({ patch: true });
   });
 }
 
-async function loadErrors() {
+async function loadErrors({ patch = false } = {}) {
+  detailRecords.clear();
+  detailSeq = 0;
   if (!isAdmin()) return switchView("overview");
   setHeader("Errors", "Safe failure metadata for today");
   await ensureCallPeriod();
   const params = new URLSearchParams({ limit: "150" });
   if (dashboardPeriod?.from) params.set("from", dashboardPeriod.from);
-  if (dashboardPeriod?.to) params.set("to", dashboardPeriod.to);
+  params.set("to", new Date().toISOString());
   const data = await api("/admin/api/errors?" + params);
   const items = data.items || [];
   const rows = items.length ? items.map((event) => {
     const detailId = registerDetail(event);
     const code = event.errorCode || event.errorClass || "tool_error";
     const source = event.errorSource || "tool";
-    return '<tr data-filter-row data-detail-id="' + detailId + '" data-detail-title="Error detail">' +
+    const rowKey = event.toolCallId || [event.timestamp, event.userId, event.tool, event.agentId].join(":");
+    return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Error detail">' +
       '<td class="time-cell"><strong>' + esc(bkkTime(event.timestamp)) + '</strong><span>' + esc(bkkDateTime(event.timestamp)) + "</span></td>" +
       '<td><div class="error-cell"><span class="error-icon">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(source + " · " + (event.errorClass || "tool_error")) + "</span></div></div></td>" +
       '<td>' + esc(event.userId) + "</td><td>" + esc(event.tool) + "</td><td>" + esc(event.agentId || "-") + "</td>" +
@@ -474,13 +736,14 @@ async function loadErrors() {
       '<td>' + esc(event.exitCode ?? event.statusCode ?? "-") + '</td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
   }).join("") : '<tr><td colspan="9"><div class="table-empty">' + icon("check") + '<strong>No errors today</strong><span>Safe error metadata will appear here if a call fails.</span></div></td></tr>';
 
-  $("content").innerHTML =
+  const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) + '<span class="privacy-chip">' + icon("info") + "No commands, args, payloads, or output stored</span></div>" +
     (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>Error history reached its safe bound; results are partial.</span></div>" : "") +
     '<div class="filters-panel compact"><div class="filters-row"><label class="filter-control grow"><span>Search errors</span><div class="input-with-icon">' + icon("search") +
       '<input id="errorSearch" placeholder="Code, source, user, tool, agent"></div></label></div></div>' +
     '<div class="table-wrap error-table"><table><thead><tr><th>Time</th><th>Error</th><th>User</th><th>Tool</th><th>Agent</th><th>Duration</th><th>Activity</th><th>Code</th><th></th></tr></thead><tbody>' +
       rows + "</tbody></table></div>";
+  renderContent(liveMarkup, patch);
   bindDetailRows();
   bindTableFilter("errorSearch");
 }
@@ -499,9 +762,8 @@ $("loginForm").onsubmit = async (event) => {
     $("roleBadge").innerHTML = icon(isAdmin() ? "server" : "users") + (isAdmin() ? "Admin workspace" : "User workspace");
     activeView = "overview";
     renderNav();
-    await loadActive();
-    clearInterval(pollTimer);
-    pollTimer = setInterval(() => loadActive(), 5000);
+    await loadActive({ patch: false });
+    startLiveChannel();
   } catch (error) {
     $("loginError").textContent = error.message;
   }
@@ -512,6 +774,7 @@ $("logout").onclick = async () => {
 };
 $("refresh").innerHTML = icon("refresh");
 $("refresh").setAttribute("aria-label", "Refresh dashboard");
+$("refresh").onclick = () => void refreshActiveIncrementally();
 $("logout").insertAdjacentHTML("afterbegin", icon("logout"));
 $("userForm").onsubmit = async (event) => {
   event.preventDefault();
@@ -527,7 +790,7 @@ $("userForm").onsubmit = async (event) => {
     });
     $("userDialog").close();
     adminUsersCache = [];
-    await loadUsers();
+    await loadUsers({ patch: true });
   } catch (error) {
     $("userFormError").textContent = error.message;
   }
@@ -540,7 +803,7 @@ $("confirmDelete").onclick = async () => {
   pendingDeleteUser = null;
   adminUsersCache = [];
   $("confirmDialog").close();
-  await loadUsers();
+  await loadUsers({ patch: true });
 };
 $("closeDetail").onclick = () => $("detailDialog").close();
 
@@ -553,7 +816,10 @@ $("closeDetail").onclick = () => $("detailDialog").close();
     $("who").textContent = (currentUser.name || currentUser.login) + " · " + (isAdmin() ? "Admin" : "User");
     $("roleBadge").innerHTML = icon(isAdmin() ? "server" : "users") + (isAdmin() ? "Admin workspace" : "User workspace");
     renderNav();
-    await loadActive();
-    pollTimer = setInterval(() => loadActive(), 5000);
+    await loadActive({ patch: false });
+    startLiveChannel();
   } catch {}
 })();
+
+window.addEventListener("online", () => { if (currentUser && liveSocket?.readyState !== WebSocket.OPEN) connectLiveChannel(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && currentUser && liveSocket?.readyState !== WebSocket.OPEN) connectLiveChannel(); });

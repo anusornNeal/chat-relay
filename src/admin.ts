@@ -6,6 +6,7 @@ type AdminEnv = {
   RELAY: DurableObjectNamespace;
   USAGE: DurableObjectNamespace;
   AUDIT: DurableObjectNamespace;
+  DASHBOARD: DurableObjectNamespace;
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
   CALLER_TOKEN?: string;
@@ -77,6 +78,20 @@ function auditStub(env: AdminEnv) {
   return env.AUDIT.get(env.AUDIT.idFromName("global"));
 }
 
+function dashboardStub(env: AdminEnv) {
+  return env.DASHBOARD.get(env.DASHBOARD.idFromName("global"));
+}
+
+async function publishDashboard(env: AdminEnv, topics: string[], userId?: string) {
+  try {
+    await dashboardStub(env).fetch(new Request("https://dashboard.internal/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ topics, ...(userId ? { userId } : {}) }),
+    }));
+  } catch {}
+}
+
 type SafeAuditActor = {
   kind: "operator" | "admin-user" | "anonymous" | "system";
   userId?: string;
@@ -124,6 +139,7 @@ async function auditedRegistryMutation(
     status: response.status,
     ...metadata,
   });
+  if (response.ok) await publishDashboard(env, ["overview", "users", "agents"]);
   return response;
 }
 
@@ -283,6 +299,20 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   const path = url.pathname;
   const body = request.method === "GET" ? null : await request.json<any>().catch(() => null);
   const operatorAuthorized = Boolean(env.ADMIN_TOKEN && authorized(request, env.ADMIN_TOKEN));
+
+  if (path === "/admin/ws" && request.method === "GET") {
+    const wsOrigin = request.headers.get("origin");
+    if (wsOrigin && wsOrigin !== url.origin) return error(403, "origin_invalid");
+    const auth = await browserSession(request, env, false);
+    if (!auth.ok) return auth.response;
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return error(426, "websocket_required");
+    }
+    const headers = new Headers(request.headers);
+    headers.set("x-dashboard-user-id", String(auth.data.user?.id || ""));
+    headers.set("x-dashboard-admin", auth.data.user?.admin === true ? "1" : "0");
+    return dashboardStub(env).fetch(new Request("https://dashboard.internal/connect", { method: "GET", headers }));
+  }
 
   if (path === "/admin/session/login" && request.method === "POST") {
     const response = await registryCall(env, "/admin-session/create", {
@@ -616,6 +646,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       user = (await role.json<any>()).user;
     }
     await recordAudit(env, actor, "user.create", { type: "user", id }, "success", { admin: makeAdmin });
+    await publishDashboard(env, ["overview", "users"]);
     return Response.json({ ok: true, user }, { status: 201 });
   }
 
@@ -668,6 +699,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       { status: response.status },
     );
     if (response.ok) {
+      await publishDashboard(env, ["overview", "users", "agents", "calls"]);
       const disconnectResponse = await env.RELAY.get(env.RELAY.idFromName(agentId))
         .fetch("https://relay.internal/disconnect")
         .catch(() => null);
@@ -717,6 +749,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const response = await registryCall(env, "/users/create", { id, name, tokenHash: await hashToken(token) });
     const data = await response.json<any>();
     await recordAudit(env, actor, "user.create", { type: "user", id }, response.ok ? "success" : "failure", { status: response.status });
+    if (response.ok) await publishDashboard(env, ["overview", "users"]);
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
   }
 
@@ -735,6 +768,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     });
     const data = await response.json<any>();
     await recordAudit(env, actor, "agent.create", { type: "agent", id }, response.ok ? "success" : "failure", { status: response.status });
+    if (response.ok) await publishDashboard(env, ["overview", "users", "agents"]);
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
   }
 

@@ -5,17 +5,19 @@ import { z } from "zod";
 import { handleDeviceAuth } from "./device-auth";
 import { handleOAuth, oauthChallenge, oauthResource } from "./oauth";
 import { handleAdmin } from "./admin";
+import { DashboardHub } from "./dashboard-hub";
 import { Audit } from "./audit";
 import { Registry, hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 import { DEFAULT_QUOTA_POLICY, Usage, normalizeQuotaPolicy, type QuotaPolicy, type UsageEvent } from "./usage";
 
-export { Audit, Registry, Usage };
+export { Audit, DashboardHub, Registry, Usage };
 
 interface Env {
   RELAY: DurableObjectNamespace;
   REGISTRY: DurableObjectNamespace;
   USAGE: DurableObjectNamespace;
   AUDIT: DurableObjectNamespace;
+  DASHBOARD: DurableObjectNamespace;
   ASSETS?: Fetcher;
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
@@ -80,9 +82,11 @@ async function readJson(request: Request): Promise<unknown> {
 export class Relay extends DurableObject {
   private agent: WebSocket | null = null;
   private readonly pending = new Map<string, Pending>();
+  private readonly relayEnv: Env;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.relayEnv = env;
     this.agent = ctx.getWebSockets().at(-1) ?? null;
   }
 
@@ -201,6 +205,7 @@ export class Relay extends DurableObject {
 
     this.ctx.acceptWebSocket(server);
     this.agent = server;
+    this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents"]));
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -221,6 +226,7 @@ export class Relay extends DurableObject {
       }
     }
     this.failPending(503, "agent_disconnected");
+    this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents", "calls"]));
     return Response.json({ ok: true, disconnected: sockets.length });
   }
 
@@ -267,6 +273,7 @@ export class Relay extends DurableObject {
     if (socket !== this.agent) return;
     this.agent = null;
     this.failPending(503, "agent_disconnected");
+    this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents", "calls"]));
   }
 
   private failPending(status: number, code: string): void {
@@ -322,6 +329,20 @@ async function registryJson<T = any>(env: Env, path: string, body?: unknown): Pr
 
 function usageStub(env: Env) {
   return env.USAGE.get(env.USAGE.idFromName("global"));
+}
+
+function dashboardStub(env: Env) {
+  return env.DASHBOARD.get(env.DASHBOARD.idFromName("global"));
+}
+
+async function publishDashboard(env: Env, topics: string[]): Promise<void> {
+  try {
+    await dashboardStub(env).fetch(new Request("https://dashboard.internal/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ topics }),
+    }));
+  } catch {}
 }
 
 function byteSize(value: unknown): number {
