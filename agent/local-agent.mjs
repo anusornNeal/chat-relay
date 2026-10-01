@@ -77,8 +77,8 @@ if (!relayUrl || !agentToken) {
 const wsUrl = relayUrl.replace(/^http/, "ws").replace(/\/$/, "") +
   `/agent?agentId=${encodeURIComponent(agentId)}`;
 
-function serializeResponse(requestId, payload) {
-  const response = JSON.stringify({ requestId, payload });
+function serializeResponse(requestId, payload, meta) {
+  const response = JSON.stringify({ requestId, payload, ...(meta ? { meta } : {}) });
   if (Buffer.byteLength(response, "utf8") <= MAX_RESPONSE_BYTES) return response;
   return JSON.stringify({
     requestId,
@@ -252,6 +252,12 @@ function sendHeartbeat(socket) {
       processId: process.pid,
       heartbeatMs: connectionState.heartbeatMs,
       lifecycle: lifecycle.snapshot(),
+      health: {
+        reconnectCount: connectionState.reconnectCount,
+        reconnectAttempt: connectionState.reconnectAttempt,
+        lastDisconnectReason: connectionState.lastDisconnectReason,
+        queues: scheduler.snapshot(),
+      },
     }));
     connectionState.markHeartbeat(now);
   } catch {}
@@ -263,9 +269,9 @@ function startHeartbeat(socket) {
   heartbeatTimer = setInterval(() => sendHeartbeat(socket), connectionState.heartbeatMs);
 }
 
-function sendSocketResponse(socket, requestId, payload) {
+function sendSocketResponse(socket, requestId, payload, meta) {
   if (socket !== activeSocket || socket.readyState !== WebSocket.OPEN) return;
-  try { socket.send(serializeResponse(requestId, payload)); } catch {}
+  try { socket.send(serializeResponse(requestId, payload, meta)); } catch {}
 }
 
 function scheduleReconnect(code, reason) {
@@ -359,21 +365,41 @@ function connect() {
     const action = message.payload && typeof message.payload === "object"
       ? String(message.payload.action ?? "unknown")
       : "unknown";
+    let scheduleMeta = { lane: "unknown", queueWaitMs: 0, queueDepthAtStart: 0, activeAtStart: 0 };
+    let handlerDurationMs = 0;
     try {
-      const result = await scheduler.run(action, () => handlePayload(message.payload));
+      const result = await scheduler.run(action, async (meta = {}) => {
+        scheduleMeta = { ...scheduleMeta, ...meta };
+        const handlerStartedAt = Date.now();
+        try {
+          return await handlePayload(message.payload);
+        } finally {
+          handlerDurationMs = Math.max(0, Date.now() - handlerStartedAt);
+        }
+      });
       recentCalls.push({
         at: new Date().toISOString(),
         action,
         durationMs: Date.now() - startedAt,
+        queueWaitMs: scheduleMeta.queueWaitMs,
+        handlerDurationMs,
+        lane: scheduleMeta.lane,
         ok: !(result && typeof result === "object" && result.ok === false),
       });
       if (recentCalls.length > 100) recentCalls.shift();
-      sendSocketResponse(socket, message.requestId, result);
+      sendSocketResponse(socket, message.requestId, result, {
+        agentQueueWaitMs: scheduleMeta.queueWaitMs,
+        agentHandlerMs: handlerDurationMs,
+        lane: scheduleMeta.lane,
+      });
     } catch (error) {
       recentCalls.push({
         at: new Date().toISOString(),
         action,
         durationMs: Date.now() - startedAt,
+        queueWaitMs: scheduleMeta.queueWaitMs,
+        handlerDurationMs,
+        lane: scheduleMeta.lane,
         ok: false,
         error: error instanceof Error ? error.message : "agent_error",
       });

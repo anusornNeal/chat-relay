@@ -26,7 +26,7 @@ export class BoundedLane {
   run(work) {
     if (typeof work !== "function") return Promise.reject(queueError("invalid_work"));
     return new Promise((resolve, reject) => {
-      const job = { work, resolve, reject, timer: null };
+      const job = { work, resolve, reject, timer: null, enqueuedAt: Date.now() };
       if (this.active < this.concurrency) {
         this.#start(job);
         return;
@@ -58,8 +58,15 @@ export class BoundedLane {
   #start(job) {
     if (job.timer) clearTimeout(job.timer);
     this.active += 1;
+    const queueWaitMs = Math.max(0, Date.now() - job.enqueuedAt);
+    const metadata = {
+      lane: this.name,
+      queueWaitMs,
+      queueDepthAtStart: this.queue.length,
+      activeAtStart: this.active,
+    };
     Promise.resolve()
-      .then(job.work)
+      .then(() => job.work(metadata))
       .then(job.resolve, job.reject)
       .finally(() => {
         this.active -= 1;

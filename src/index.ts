@@ -34,6 +34,7 @@ interface Env {
 type Pending = {
   resolve: (response: Response) => void;
   timeout: ReturnType<typeof setTimeout>;
+  startedAt: number;
 };
 
 type AuthUser = { id: string; name: string };
@@ -50,6 +51,12 @@ type AgentSocketAttachment = {
   arch?: string;
   capabilities?: string[];
   lifecycle?: { state: string; drainStartedAt: string | null; restartRequestedAt: string | null; readyToRestart?: boolean; work: Record<string, number> };
+  health?: {
+    reconnectCount: number;
+    reconnectAttempt: number;
+    lastDisconnectReason: string | null;
+    queues: Record<string, { concurrency: number; active: number; queued: number; maxQueued: number; queueTimeoutMs: number }>;
+  };
 };
 
 const DEFAULT_AGENT_HEARTBEAT_TTL_MS = 45_000;
@@ -110,6 +117,29 @@ function normalizeAgentLifecycle(value: any) {
   };
 }
 
+function normalizeAgentHealth(value: any) {
+  const bounded = (input: unknown, max = 1_000_000) => Math.min(Math.max(0, Number(input) || 0), max);
+  const queues: Record<string, { concurrency: number; active: number; queued: number; maxQueued: number; queueTimeoutMs: number }> = {};
+  const source = value?.queues && typeof value.queues === "object" ? value.queues : {};
+  for (const name of ["agent", "filesystem", "process", "terminalExec", "terminalControl", "desktopRead"]) {
+    const lane = source[name];
+    if (!lane || typeof lane !== "object") continue;
+    queues[name] = {
+      concurrency: bounded(lane.concurrency, 64),
+      active: bounded(lane.active, 512),
+      queued: bounded(lane.queued, 512),
+      maxQueued: bounded(lane.maxQueued, 512),
+      queueTimeoutMs: bounded(lane.queueTimeoutMs, 120_000),
+    };
+  }
+  return {
+    reconnectCount: bounded(value?.reconnectCount, 1_000_000),
+    reconnectAttempt: bounded(value?.reconnectAttempt, 1_000_000),
+    lastDisconnectReason: normalizeAgentText(value?.lastDisconnectReason, 160),
+    queues,
+  };
+}
+
 function readAgentAttachment(socket: WebSocket | null): AgentSocketAttachment {
   if (!socket) return {};
   try {
@@ -144,6 +174,7 @@ function agentLiveness(socket: WebSocket | null) {
       arch: null,
       capabilities: [],
       lifecycle: null,
+      health: null,
     };
   }
   const attachment = readAgentAttachment(socket);
@@ -171,6 +202,7 @@ function agentLiveness(socket: WebSocket | null) {
     arch: attachment.arch ?? null,
     capabilities: Array.isArray(attachment.capabilities) ? attachment.capabilities : [],
     lifecycle: attachment.lifecycle ?? null,
+    health: attachment.health ?? null,
   };
 }
 
@@ -487,6 +519,7 @@ export class Relay extends DurableObject {
         heartbeatMs: Number((message as any).heartbeatMs),
         processId: Number((message as any).processId),
         lifecycle: normalizeAgentLifecycle((message as any).lifecycle),
+        health: normalizeAgentHealth((message as any).health),
       });
       return;
     }
@@ -501,7 +534,22 @@ export class Relay extends DurableObject {
 
     clearTimeout(pending.timeout);
     this.pending.delete(requestId);
-    pending.resolve(Response.json({ requestId, payload: message.payload }));
+    const agentMeta = (message as any).meta && typeof (message as any).meta === "object" ? (message as any).meta : {};
+    const relayRoundTripMs = Math.max(0, Date.now() - pending.startedAt);
+    const agentQueueWaitMs = Math.max(0, Number(agentMeta.agentQueueWaitMs) || 0);
+    const agentHandlerMs = Math.max(0, Number(agentMeta.agentHandlerMs) || 0);
+    const transportMs = Math.max(0, relayRoundTripMs - agentQueueWaitMs - agentHandlerMs);
+    pending.resolve(Response.json({
+      requestId,
+      payload: message.payload,
+      meta: {
+        relayRoundTripMs,
+        transportMs,
+        agentQueueWaitMs,
+        agentHandlerMs,
+        lane: normalizeAgentText(agentMeta.lane, 32),
+      },
+    }));
   }
 
   private disconnect(socket: WebSocket): void {
@@ -542,7 +590,7 @@ export class Relay extends DurableObject {
         resolve(error(504, "agent_timeout"));
       }, TIMEOUT_MS);
 
-      this.pending.set(requestId, { resolve, timeout });
+      this.pending.set(requestId, { resolve, timeout, startedAt: Date.now() });
       try {
         agent.send(JSON.stringify({ requestId, payload: body.payload }));
       } catch {
@@ -592,6 +640,20 @@ async function publishDashboard(env: Env, topics: string[]): Promise<void> {
 function byteSize(value: unknown): number {
   try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; }
   catch { return 0; }
+}
+
+type SafeTiming = {
+  workerOverheadMs?: number;
+  relayRoundTripMs?: number;
+  transportMs?: number;
+  agentQueueWaitMs?: number;
+  agentHandlerMs?: number;
+};
+
+function safeTimingMs(value: unknown): number | undefined {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return undefined;
+  return Math.min(Math.max(0, Math.round(numeric)), 120_000);
 }
 
 function safeErrorCode(value: unknown): string | undefined {
@@ -757,7 +819,7 @@ async function instrumentTool<T>(
   user: AuthUser,
   tool: string,
   args: unknown,
-  run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null }>,
+  run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming }>,
 ): Promise<T> {
   const started = Date.now();
   const activity = toolActivityContexts.get(user) ?? {
@@ -775,7 +837,7 @@ async function instrumentTool<T>(
     ...(activity.activityId ? { activityId: activity.activityId } : {}),
     startedAt: activity.startedAt,
   });
-  let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null } | undefined;
+  let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming } | undefined;
   try {
     outcome = await run();
     return outcome.value;
@@ -814,6 +876,7 @@ async function instrumentTool<T>(
         ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
         ...(Number.isFinite(outcome.statusCode) ? { statusCode: outcome.statusCode } : {}),
         ...(outcome.exitCode === null || Number.isFinite(outcome.exitCode) ? { exitCode: outcome.exitCode } : {}),
+        ...(outcome.timing || {}),
         requestBytes: byteSize(args),
         responseBytes: byteSize(outcome.value),
       });
@@ -922,6 +985,7 @@ async function callAgent(
   }
 
   const stub = env.RELAY.get(env.RELAY.idFromName(resolved.agentId));
+  const workerStartedAt = Date.now();
   const response = await stub.fetch(new Request("https://relay.internal/relay", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -933,9 +997,22 @@ async function callAgent(
   let exitCode: number | null | undefined;
   let errorCode: string | undefined;
   let errorSource: string | undefined;
+  let timing: SafeTiming | undefined;
   try {
     const parsed = JSON.parse(body) as any;
     const payload = parsed?.payload;
+    const relayRoundTripMs = safeTimingMs(parsed?.meta?.relayRoundTripMs);
+    const transportMs = safeTimingMs(parsed?.meta?.transportMs);
+    const agentQueueWaitMs = safeTimingMs(parsed?.meta?.agentQueueWaitMs);
+    const agentHandlerMs = safeTimingMs(parsed?.meta?.agentHandlerMs);
+    const workerTotalMs = Math.max(0, Date.now() - workerStartedAt);
+    timing = {
+      ...(relayRoundTripMs === undefined ? {} : { relayRoundTripMs }),
+      ...(transportMs === undefined ? {} : { transportMs }),
+      ...(agentQueueWaitMs === undefined ? {} : { agentQueueWaitMs }),
+      ...(agentHandlerMs === undefined ? {} : { agentHandlerMs }),
+      ...(relayRoundTripMs === undefined ? {} : { workerOverheadMs: Math.max(0, workerTotalMs - relayRoundTripMs) }),
+    };
     if (payload?.ok === false) ok = false;
     if (payload?.exitCode === null) exitCode = null;
     else if (Number.isFinite(Number(payload?.exitCode))) exitCode = Number(payload?.exitCode);
@@ -957,6 +1034,7 @@ async function callAgent(
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(errorSource ? { errorSource } : {}),
     ...(errorCode ? { errorCode } : {}),
+    ...(timing ? { timing } : {}),
   };
 }
 
@@ -1190,6 +1268,7 @@ function createMcpServer(env: Env, user: AuthUser) {
           agentId: call.agentId,
           statusCode: call.statusCode,
           ...(call.exitCode === undefined ? {} : { exitCode: call.exitCode }),
+          ...(call.timing ? { timing: call.timing } : {}),
           ...failureMetadata(call),
         };
       }),

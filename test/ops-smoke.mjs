@@ -1,4 +1,4 @@
-﻿import fs from "node:fs";
+import fs from "node:fs";
 
 const vars = fs.existsSync(".dev.vars")
   ? Object.fromEntries(
@@ -216,6 +216,15 @@ if (!auditAfter.response.ok ||
 const finalAuditText = JSON.stringify(auditAfter.data);
 for (const secret of [password, createdToken, rotatedToken, adminToken, callerToken, device.data.deviceCode]) {
   if (secret && finalAuditText.includes(secret)) throw new Error("sensitive value leaked after cleanup");
+}
+
+const usageSource = fs.readFileSync("src/usage.ts", "utf8");
+const usageType = usageSource.match(/export type UsageEvent = \{([\s\S]*?)\n\};/)?.[1] || "";
+for (const field of ["workerOverheadMs", "relayRoundTripMs", "transportMs", "agentQueueWaitMs", "agentHandlerMs"]) {
+  if (!usageType.includes(field)) throw new Error("missing safe timing field: " + field);
+}
+for (const forbidden of ["command", "arguments", "payload", "stdout", "stderr", "clipboard", "screenshot"]) {
+  if (new RegExp("\\b" + forbidden + "\\b", "i").test(usageType)) throw new Error("content field leaked into UsageEvent: " + forbidden);
 }
 
 console.log("operations/audit/retention smoke test passed");

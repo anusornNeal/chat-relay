@@ -40,6 +40,11 @@ export type UsageEvent = {
   retryable?: boolean;
   statusCode?: number;
   exitCode?: number | null;
+  workerOverheadMs?: number;
+  relayRoundTripMs?: number;
+  transportMs?: number;
+  agentQueueWaitMs?: number;
+  agentHandlerMs?: number;
   requestBytes: number;
   responseBytes: number;
 };
@@ -421,6 +426,11 @@ export class Usage extends DurableObject {
         ...(body.errorCode ? { errorCode: String(body.errorCode).slice(0, 80) } : {}),
         ...(Number.isFinite(Number(body.statusCode)) ? { statusCode: Number(body.statusCode) } : {}),
         ...(body.exitCode === null || Number.isFinite(Number(body.exitCode)) ? { exitCode: body.exitCode === null ? null : Number(body.exitCode) } : {}),
+        ...(Number.isFinite(Number(body.workerOverheadMs)) ? { workerOverheadMs: Math.max(0, Math.min(120000, Math.round(Number(body.workerOverheadMs)))) } : {}),
+        ...(Number.isFinite(Number(body.relayRoundTripMs)) ? { relayRoundTripMs: Math.max(0, Math.min(120000, Math.round(Number(body.relayRoundTripMs)))) } : {}),
+        ...(Number.isFinite(Number(body.transportMs)) ? { transportMs: Math.max(0, Math.min(120000, Math.round(Number(body.transportMs)))) } : {}),
+        ...(Number.isFinite(Number(body.agentQueueWaitMs)) ? { agentQueueWaitMs: Math.max(0, Math.min(120000, Math.round(Number(body.agentQueueWaitMs)))) } : {}),
+        ...(Number.isFinite(Number(body.agentHandlerMs)) ? { agentHandlerMs: Math.max(0, Math.min(120000, Math.round(Number(body.agentHandlerMs)))) } : {}),
         requestBytes: Number(body.requestBytes) || 0,
         responseBytes: Number(body.responseBytes) || 0,
       };
@@ -470,6 +480,11 @@ export class Usage extends DurableObject {
           retryable: event.retryable,
           statusCode: event.statusCode,
           exitCode: event.exitCode,
+          workerOverheadMs: event.workerOverheadMs,
+          relayRoundTripMs: event.relayRoundTripMs,
+          transportMs: event.transportMs,
+          agentQueueWaitMs: event.agentQueueWaitMs,
+          agentHandlerMs: event.agentHandlerMs,
         },
       );
       return Response.json({ ok: true });

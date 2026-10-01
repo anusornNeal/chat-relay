@@ -254,6 +254,15 @@ async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], gra
       retiredAt: agent.retiredAt ?? null,
       online: Boolean(status.online),
       lifecycle: agent.retiredAt ? "retired" : agent.enabled ? "active" : "disabled",
+      runtime: {
+        protocolVersion: status.protocolVersion ?? null,
+        agentVersion: status.agentVersion ?? null,
+        platform: status.platform ?? null,
+        arch: status.arch ?? null,
+        capabilities: Array.isArray(status.capabilities) ? status.capabilities : [],
+        health: status.health ?? null,
+        lifecycle: status.lifecycle ?? null,
+      },
       reauthorizationRequired: Boolean(agent.retiredAt),
       owner: owner ? { id: owner.id, name: owner.name, login: owner.login ?? null } : null,
       grants: grantsByAgent.get(agent.id) ?? [],
@@ -493,11 +502,30 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       agent.sessions.filter((session: any) => session.status === "running").length +
       agent.batches.reduce((sum: number, batch: any) => sum + Number(batch.counts?.running || 0), 0), 0);
     const activeUsers = new Set((state.users ?? []).filter((u: any) => u.enabled && !u.deletedAt).map((u: any) => u.id));
+    const agentHealth = agents.reduce((summary: any, agent: any) => {
+      const health = agent.runtime?.health;
+      const queues = health?.queues && typeof health.queues === "object" ? Object.values(health.queues) as any[] : [];
+      summary.active += queues.reduce((sum, lane) => sum + Number(lane?.active || 0), 0);
+      summary.queued += queues.reduce((sum, lane) => sum + Number(lane?.queued || 0), 0);
+      summary.reconnectCount += Number(health?.reconnectCount || 0);
+      if (health?.lastDisconnectReason) summary.lastDisconnectReason = String(health.lastDisconnectReason).slice(0, 160);
+      if (agent.runtime?.agentVersion) summary.versions.add(String(agent.runtime.agentVersion));
+      for (const capability of agent.runtime?.capabilities || []) summary.capabilities.add(String(capability));
+      return summary;
+    }, { active: 0, queued: 0, reconnectCount: 0, lastDisconnectReason: null, versions: new Set<string>(), capabilities: new Set<string>() });
     return Response.json({
       role: "admin",
       period,
       users: { total: (state.users ?? []).length, enabled: activeUsers.size },
       agents: { total: agents.length, online: agents.filter((a: any) => a.online).length },
+      agentHealth: {
+        active: agentHealth.active,
+        queued: agentHealth.queued,
+        reconnectCount: agentHealth.reconnectCount,
+        lastDisconnectReason: agentHealth.lastDisconnectReason,
+        versions: [...agentHealth.versions].slice(0, 8),
+        capabilities: [...agentHealth.capabilities].slice(0, 32),
+      },
       grants: { total: (state.grants ?? []).length },
       usage: usage.metric ?? null,
       buckets: usage.buckets ?? [],

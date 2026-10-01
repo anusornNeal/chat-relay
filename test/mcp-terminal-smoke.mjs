@@ -69,7 +69,8 @@ async function schedulerTests() {
   });
 
   const firstFile = scheduler.run("fs.read", async () => { await fileGate; return "first"; });
-  const secondFile = scheduler.run("fs.stat", async () => "second");
+  let observedQueueWaitMs = -1;
+  const secondFile = scheduler.run("fs.stat", async (meta = {}) => { observedQueueWaitMs = Number(meta.queueWaitMs); return "second"; });
   let overflow = null;
   try { await scheduler.run("fs.list", async () => "third"); }
   catch (error) { overflow = error instanceof Error ? error.message : String(error); }
@@ -77,9 +78,11 @@ async function schedulerTests() {
 
   const terminal = await scheduler.run("terminal.exec", async () => "terminal");
   if (terminal !== "terminal") throw new Error("scheduler cross-lane fairness failed");
+  await new Promise((resolve) => setTimeout(resolve, 20));
   releaseFile();
   const fileResults = await Promise.all([firstFile, secondFile]);
   if (fileResults.join(",") !== "first,second") throw new Error("scheduler FIFO failed");
+  if (!Number.isFinite(observedQueueWaitMs) || observedQueueWaitMs <= 0) throw new Error("scheduler queue wait metadata failed");
 
   let releaseTimeout;
   const timeoutGate = new Promise((resolve) => { releaseTimeout = resolve; });

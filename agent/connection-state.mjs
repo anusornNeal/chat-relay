@@ -39,6 +39,7 @@ export class AgentConnectionState {
     this.lastCloseCode = null;
     this.lastDisconnectReason = null;
     this.reconnectAttempt = 0;
+    this.reconnectCount = 0;
     this.nextReconnectAt = null;
     this.nextReconnectDelayMs = null;
   }
@@ -55,6 +56,7 @@ export class AgentConnectionState {
     this.connectedAt = isoTime(now);
     this.disconnectedAt = null;
     this.reconnectAttempt = 0;
+    this.reconnectCount = 0;
     this.nextReconnectAt = null;
     this.nextReconnectDelayMs = null;
   }
@@ -69,6 +71,7 @@ export class AgentConnectionState {
     this.lastCloseCode = Number.isFinite(Number(code)) ? Number(code) : null;
     this.lastDisconnectReason = cleanReason(reason);
     this.reconnectAttempt += 1;
+    this.reconnectCount += 1;
   }
 
   scheduleReconnect(delayMs, now = Date.now()) {
@@ -112,6 +115,7 @@ export class AgentConnectionState {
       lastCloseCode: this.lastCloseCode,
       lastDisconnectReason: this.lastDisconnectReason,
       reconnectAttempt: this.reconnectAttempt,
+      reconnectCount: this.reconnectCount,
       nextReconnectAt: this.nextReconnectAt,
       nextReconnectDelayMs: this.nextReconnectDelayMs,
       baseReconnectMs: this.baseReconnectMs,
