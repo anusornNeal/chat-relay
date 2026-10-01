@@ -154,6 +154,23 @@ function agentLiveness(socket: WebSocket | null) {
 
 const MAX_BYTES = 64 * 1024;
 const TIMEOUT_MS = 30_000;
+const TEMP_ARTIFACT_DEFAULT_TTL_SECONDS = 300;
+const TEMP_ARTIFACT_MAX_TTL_SECONDS = 900;
+const TEMP_ARTIFACT_MIME_TYPES = new Set([
+  "text/plain; charset=utf-8",
+  "text/markdown; charset=utf-8",
+  "application/json",
+  "application/octet-stream",
+  "image/jpeg",
+  "image/png",
+]);
+
+function safeArtifactFilename(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().replace(/[^a-zA-Z0-9._ -]/g, "_").slice(0, 180);
+  return normalized || null;
+}
+
 const error = (status: number, code: string, details?: unknown) =>
   Response.json({ error: code, ...(details === undefined ? {} : { details }) }, { status });
 
@@ -209,44 +226,67 @@ export class Relay extends DurableObject {
     if (path.startsWith("/temp-shot/")) {
       return this.getTempShot(path.slice("/temp-shot/".length));
     }
+    if (path.startsWith("/temp-artifact/")) {
+      return this.getTempArtifact(path.slice("/temp-artifact/".length));
+    }
     switch (path) {
       case "/agent": return this.connectAgent(request);
       case "/status": return Response.json(agentLiveness(this.agent));
       case "/disconnect": return this.disconnectAgent();
       case "/relay": return this.relay(request);
       case "/temp-shot": return this.storeTempShot(request);
+      case "/temp-artifact": return this.storeTempArtifact(request);
       default: return error(404, "not_found");
     }
   }
 
   async alarm(): Promise<void> {
-    await this.cleanupTempShots();
+    await this.cleanupTempArtifacts();
   }
 
+
   private async storeTempShot(request: Request): Promise<Response> {
+    return this.storeTempArtifact(request, "temp-shot:", true);
+  }
+
+  private async storeTempArtifact(
+    request: Request,
+    prefix = "temp-artifact:",
+    screenshotOnly = false,
+  ): Promise<Response> {
     if (request.method !== "POST") return error(405, "method_not_allowed");
 
     let body: any;
     try { body = await request.json(); }
     catch { return error(400, "invalid_json"); }
 
-    if (body?.mimeType !== "image/jpeg" || typeof body.data !== "string") {
-      return error(400, "invalid_screenshot");
+    const mimeType = typeof body?.mimeType === "string" ? body.mimeType : "";
+    if (typeof body?.data !== "string" ||
+        (screenshotOnly ? mimeType !== "image/jpeg" : !TEMP_ARTIFACT_MIME_TYPES.has(mimeType))) {
+      return error(400, screenshotOnly ? "invalid_screenshot" : "invalid_artifact");
     }
 
-    let byteLength = 0;
-    try { byteLength = Uint8Array.from(atob(body.data), (c) => c.charCodeAt(0)).byteLength; }
-    catch { return error(400, "invalid_screenshot"); }
-    if (byteLength <= 0 || byteLength > MAX_BYTES) {
-      return error(413, "screenshot_too_large", { maxBytes: MAX_BYTES });
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(body.data), (c) => c.charCodeAt(0)); }
+    catch { return error(400, screenshotOnly ? "invalid_screenshot" : "invalid_artifact"); }
+    if (bytes.byteLength <= 0 || bytes.byteLength > MAX_BYTES) {
+      return error(413, screenshotOnly ? "screenshot_too_large" : "artifact_too_large", { maxBytes: MAX_BYTES });
     }
 
+    const requestedTtl = Number(body?.ttlSeconds);
+    const ttlSeconds = screenshotOnly
+      ? TEMP_ARTIFACT_DEFAULT_TTL_SECONDS
+      : Number.isFinite(requestedTtl)
+        ? Math.min(Math.max(Math.trunc(requestedTtl), 1), TEMP_ARTIFACT_MAX_TTL_SECONDS)
+        : TEMP_ARTIFACT_DEFAULT_TTL_SECONDS;
     const token = crypto.randomUUID().replaceAll("-", "");
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-    await this.ctx.storage.put("temp-shot:" + token, {
-      mimeType: body.mimeType,
+    const expiresAt = Date.now() + ttlSeconds * 1000;
+    const filename = screenshotOnly ? null : safeArtifactFilename(body?.filename);
+    await this.ctx.storage.put(prefix + token, {
+      mimeType,
       data: body.data,
       expiresAt,
+      ...(filename ? { filename } : {}),
     });
 
     const currentAlarm = await this.ctx.storage.getAlarm();
@@ -254,49 +294,63 @@ export class Relay extends DurableObject {
       await this.ctx.storage.setAlarm(expiresAt);
     }
 
-    return Response.json({ ok: true, token, expiresAt });
+    return Response.json({ ok: true, token, expiresAt, ttlSeconds });
   }
 
   private async getTempShot(token: string): Promise<Response> {
+    return this.getTempArtifact(token, "temp-shot:", "invalid_screenshot");
+  }
+
+  private async getTempArtifact(
+    token: string,
+    prefix = "temp-artifact:",
+    invalidCode = "invalid_artifact",
+  ): Promise<Response> {
     if (!/^[a-f0-9]{32}$/.test(token)) return error(404, "not_found");
 
-    const key = "temp-shot:" + token;
-    const shot = await this.ctx.storage.get<any>(key);
-    if (!shot) return error(404, "not_found");
+    const key = prefix + token;
+    const artifact = await this.ctx.storage.get<any>(key);
+    if (!artifact) return error(404, "not_found");
 
-    if (typeof shot.expiresAt !== "number" || Date.now() >= shot.expiresAt) {
+    if (typeof artifact.expiresAt !== "number" || Date.now() >= artifact.expiresAt) {
       await this.ctx.storage.delete(key);
       return error(410, "expired");
     }
 
     let bytes: Uint8Array;
-    try { bytes = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)); }
+    try { bytes = Uint8Array.from(atob(artifact.data), (c) => c.charCodeAt(0)); }
     catch {
       await this.ctx.storage.delete(key);
-      return error(500, "invalid_screenshot");
+      return error(500, invalidCode);
     }
 
+    const filename = safeArtifactFilename(artifact.filename);
     return new Response(bytes, {
       headers: {
-        "content-type": shot.mimeType || "image/jpeg",
+        "content-type": artifact.mimeType || "application/octet-stream",
         "cache-control": "private, no-store, max-age=0",
-        "content-disposition": "inline",
+        "content-disposition": filename ? `inline; filename="${filename}"` : "inline",
         "x-content-type-options": "nosniff",
       },
     });
   }
 
-  private async cleanupTempShots(): Promise<void> {
-    const entries = await this.ctx.storage.list<any>({ prefix: "temp-shot:" });
+  private async cleanupTempArtifacts(): Promise<void> {
+    const [shots, artifacts] = await Promise.all([
+      this.ctx.storage.list<any>({ prefix: "temp-shot:" }),
+      this.ctx.storage.list<any>({ prefix: "temp-artifact:" }),
+    ]);
     const now = Date.now();
     let nextExpiry: number | null = null;
 
-    for (const [key, shot] of entries) {
-      const expiresAt = typeof shot?.expiresAt === "number" ? shot.expiresAt : 0;
-      if (expiresAt <= now) {
-        await this.ctx.storage.delete(key);
-      } else if (nextExpiry === null || expiresAt < nextExpiry) {
-        nextExpiry = expiresAt;
+    for (const entries of [shots, artifacts]) {
+      for (const [key, artifact] of entries) {
+        const expiresAt = typeof artifact?.expiresAt === "number" ? artifact.expiresAt : 0;
+        if (expiresAt <= now) {
+          await this.ctx.storage.delete(key);
+        } else if (nextExpiry === null || expiresAt < nextExpiry) {
+          nextExpiry = expiresAt;
+        }
       }
     }
 
@@ -940,6 +994,57 @@ async function screenshotToolResult(env: Env, agentId: string | undefined, resul
   }
 }
 
+async function tempArtifactToolResult(
+  env: Env,
+  agentId: string | undefined,
+  result: { ok: boolean; body: string },
+  ttlSeconds?: number,
+) {
+  if (!result.ok) return toolResult(result);
+  try {
+    const envelope = JSON.parse(result.body) as { payload?: any };
+    const payload = envelope?.payload;
+    if (!payload?.ok || typeof payload.data !== "string" ||
+        typeof payload.mimeType !== "string" || !agentId) {
+      return toolResult({ ok: false, body: JSON.stringify({ error: payload?.error || "invalid_artifact_result" }) });
+    }
+
+    const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
+    const stored = await stub.fetch(new Request("https://relay.internal/temp-artifact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mimeType: payload.mimeType,
+        data: payload.data,
+        filename: payload.filename,
+        ttlSeconds,
+      }),
+    }));
+    if (!stored.ok) {
+      return toolResult({ ok: false, body: JSON.stringify({ error: "temp_artifact_store_failed" }) });
+    }
+
+    const temp = await stored.json<any>();
+    const tempPath = "/tmp-artifact/" + encodeURIComponent(agentId) + "/" + temp.token;
+    const baseUrl = String(env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+    const metadata = {
+      ok: true,
+      filename: payload.filename,
+      mimeType: payload.mimeType,
+      byteLength: payload.byteLength,
+      tempUrl: baseUrl ? baseUrl + tempPath : tempPath,
+      expiresAt: new Date(temp.expiresAt).toISOString(),
+      expiresInSeconds: temp.ttlSeconds,
+    };
+    return {
+      structuredContent: metadata,
+      content: [{ type: "text" as const, text: JSON.stringify(metadata) }],
+    };
+  } catch {
+    return toolResult({ ok: false, body: JSON.stringify({ error: "invalid_artifact_result" }) });
+  }
+}
+
 async function listUserAgents(env: Env, user: AuthUser) {
   const { response, data } = await registryJson<any>(env, "/list-agents", { userId: user.id });
   if (!response.ok) return { ok: false, body: JSON.stringify(data) };
@@ -1254,6 +1359,35 @@ function createMcpServer(env: Env, user: AuthUser) {
     { pid: z.number().int().min(101) },
     ({ pid }) => ({ action: "process.kill", pid }),
     { destructiveHint: true },
+  );
+
+
+  server.registerTool(
+    "create_temp_artifact",
+    {
+      description: "Create a short-lived URL for one explicit local file inside the agent's allowed roots. The file is bounded to 40 KiB and the URL expires after 5 minutes by default.",
+      inputSchema: {
+        agentId: agentIdSchema,
+        path: z.string().min(1).max(2048),
+        maxBytes: z.number().int().min(1024).max(40960).optional(),
+        ttlSeconds: z.number().int().min(1).max(900).optional(),
+      },
+      annotations: annotationsForTool("create_temp_artifact"),
+    } as any,
+    async ({ agentId, path, maxBytes, ttlSeconds }: any) =>
+      instrumentTool(env, user, "create_temp_artifact", { agentId, path, maxBytes, ttlSeconds }, async () => {
+        const call = await callAgent(env, user, "read", agentId, {
+          action: "fs.artifact",
+          path,
+          maxBytes,
+        });
+        return {
+          value: await tempArtifactToolResult(env, call.agentId, call, ttlSeconds),
+          ok: call.ok,
+          agentId: call.agentId,
+          ...failureMetadata(call),
+        };
+      }),
   );
 
   server.registerTool(
@@ -1615,6 +1749,22 @@ export default {
       const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
       return stub.fetch("https://relay.internal/temp-shot/" + token);
     }
+    if (path.startsWith("/tmp-artifact/")) {
+      if (request.method !== "GET") return error(405, "method_not_allowed");
+      const parts = path.split("/").filter(Boolean);
+      if (parts.length !== 3) return error(404, "not_found");
+
+      const agentId = decodeURIComponent(parts[1]);
+      const token = parts[2];
+      if (!/^[a-z0-9_-]{1,64}$/.test(agentId) || !/^[a-f0-9]{32}$/.test(token)) {
+        return error(404, "not_found");
+      }
+
+      const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
+      return stub.fetch("https://relay.internal/temp-artifact/" + token);
+    }
+
+
 
     if ((path === "/" || path === "/admin") && env.ASSETS) {
       return Response.redirect(url.origin + "/dashboard/", 302);

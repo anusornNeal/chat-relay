@@ -112,6 +112,8 @@ async function handlePayload(payload) {
       return files.readMany(payload.paths, payload.maxTotalBytes);
     case "fs.batch":
       return files.batch(payload.operations, payload.maxTotalBytes);
+    case "fs.artifact":
+      return files.exportArtifact(payload.path, payload.maxBytes);
     case "fs.write":
       return files.write(payload.path, payload.content, payload.mode);
     case "fs.edit":

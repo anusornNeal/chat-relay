@@ -161,7 +161,7 @@ async function waitForText(token, sessionId, expected, timeoutMs = 4000) {
 const tools = await rpc(ownerToken, 1, "tools/list");
 const names = new Set(tools.result.tools.map((item) => item.name));
 for (const required of [
-  "list_agents", "get_config", "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
+  "list_agents", "get_config", "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch", "create_temp_artifact",
   "write_file", "edit_block", "create_directory", "move_path", "delete_path",
   "start_search", "get_more_search_results", "list_processes", "kill_process",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_read",
@@ -192,6 +192,7 @@ if (configPayload?.desktop?.enabled !== false) throw new Error("desktop should b
 if (configPayload?.protocol?.protocolVersion !== AGENT_PROTOCOL_VERSION) throw new Error("agent protocol version missing from config");
 if (!configPayload?.protocol?.agentVersion) throw new Error("agent package version missing from config");
 if (!configPayload?.protocol?.capabilities?.includes("filesystem.batch")) throw new Error("filesystem batch capability missing from config");
+if (!configPayload?.protocol?.capabilities?.includes("filesystem.artifact")) throw new Error("filesystem artifact capability missing from config");
 if (configPayload.protocol.capabilities.includes("desktop.control")) throw new Error("disabled desktop capability advertised");
 
 const disabledShot = await tool(ownerToken, 30, "screenshot", {}, true);
@@ -224,6 +225,44 @@ await tool(ownerToken, 8, "move_path", { source: fileA, destination: fileB });
 const many = await tool(ownerToken, 9, "read_multiple_files", { paths: [fileB, "README.md"] });
 if (many.payload.files?.length !== 2) throw new Error("read_multiple_files failed");
 console.log("filesystem read/write/edit/move ok");
+const artifact = await tool(ownerToken, 127, "create_temp_artifact", {
+  path: fileB,
+  ttlSeconds: 1,
+});
+if (typeof artifact.tempUrl !== "string" || !artifact.tempUrl.includes("/tmp-artifact/")) {
+  throw new Error(`artifact URL missing: ${JSON.stringify(artifact)}`);
+}
+if (artifact.tempUrl.includes(root) || artifact.tempUrl.includes(fileB)) {
+  throw new Error("artifact URL leaked a local path");
+}
+const artifactPath = artifact.tempUrl.startsWith("http") ? new URL(artifact.tempUrl).pathname : artifact.tempUrl;
+const artifactResponse = await fetch(base + artifactPath);
+if (!artifactResponse.ok || await artifactResponse.text() !== "alpha\ngamma\n") {
+  throw new Error("artifact content mismatch");
+}
+if (!String(artifactResponse.headers.get("cache-control")).includes("no-store")) {
+  throw new Error("artifact cache policy missing");
+}
+await new Promise((resolve) => setTimeout(resolve, 1100));
+const expiredArtifact = await fetch(base + artifactPath);
+if (expiredArtifact.status !== 410) throw new Error("artifact did not expire");
+
+const outsideArtifact = await tool(ownerToken, 128, "create_temp_artifact", {
+  path: process.execPath,
+}, true);
+if (outsideArtifact.payload?.error !== "path_not_allowed") {
+  throw new Error(`outside-root artifact was not blocked: ${JSON.stringify(outsideArtifact)}`);
+}
+const oversizedArtifactPath = path.join(root, "artifact-too-large.bin");
+fs.writeFileSync(oversizedArtifactPath, Buffer.alloc(41 * 1024, 1));
+const oversizedArtifact = await tool(ownerToken, 129, "create_temp_artifact", {
+  path: oversizedArtifactPath,
+}, true);
+if (oversizedArtifact.payload?.error !== "artifact_too_large") {
+  throw new Error(`oversized artifact was not blocked: ${JSON.stringify(oversizedArtifact)}`);
+}
+console.log("temporary artifact URL/expiry/bounds ok");
+
 const directBatchStat = await tool(ownerToken, 122, "stat_path", { path: fileB });
 const directBatchRead = await tool(ownerToken, 123, "read_file", { path: fileB, offset: 0, length: 10 });
 const directBatchList = await tool(ownerToken, 124, "list_directory", { path: root, depth: 0, limit: 20 });

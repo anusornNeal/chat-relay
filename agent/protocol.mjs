@@ -28,6 +28,7 @@ export function getAgentCapabilities(options = {}) {
     "filesystem.read",
     "filesystem.readMany",
     "filesystem.batch",
+    "filesystem.artifact",
     "filesystem.write",
     "filesystem.edit",
     "filesystem.mkdir",

@@ -7,6 +7,17 @@ const DEFAULT_READ_RESPONSE_BYTES = 32 * 1024;
 const DEFAULT_MULTI_READ_RESPONSE_BYTES = 48 * 1024;
 const DEFAULT_BATCH_RESPONSE_BYTES = 48 * 1024;
 const MAX_BATCH_OPERATIONS = 20;
+const MAX_ARTIFACT_BYTES = 40 * 1024;
+const ARTIFACT_MIME_TYPES = new Map([
+  [".txt", "text/plain; charset=utf-8"],
+  [".log", "text/plain; charset=utf-8"],
+  [".md", "text/markdown; charset=utf-8"],
+  [".json", "application/json"],
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+]);
+
 const MAX_READ_RESPONSE_BYTES = 48 * 1024;
 const MIN_READ_RESPONSE_BYTES = 1024;
 const MAX_WRITE_BYTES = 256 * 1024;
@@ -339,6 +350,31 @@ export class FileManager {
       nextIndex,
       truncated: nextIndex !== null || nestedTruncated,
       maxTotalBytes: totalBudget,
+    };
+  }
+
+
+  async exportArtifact(input, maxBytes = MAX_ARTIFACT_BYTES) {
+    const target = await this.#resolveExisting(input);
+    const info = await fs.stat(target);
+    if (!info.isFile()) throw new Error("not_a_file");
+
+    const requested = Number(maxBytes);
+    const byteLimit = Number.isFinite(requested)
+      ? Math.min(Math.max(Math.trunc(requested), 1024), MAX_ARTIFACT_BYTES)
+      : MAX_ARTIFACT_BYTES;
+    if (info.size <= 0) throw new Error("artifact_empty");
+    if (info.size > byteLimit) throw new Error("artifact_too_large");
+
+    const bytes = await fs.readFile(target);
+    const extension = path.extname(target).toLowerCase();
+    const mimeType = ARTIFACT_MIME_TYPES.get(extension) || "application/octet-stream";
+    return {
+      ok: true,
+      filename: path.basename(target).slice(0, 180),
+      mimeType,
+      byteLength: bytes.byteLength,
+      data: bytes.toString("base64"),
     };
   }
 
