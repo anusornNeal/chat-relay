@@ -114,12 +114,23 @@ export class FileManager {
     await this.#walkList(target, 0, maxDepth, entries, start + pageLimit + 1);
 
     const selected = entries.slice(start, start + pageLimit);
-    while (selected.length > 1 && byteSize({ path: target, entries: selected, offset: start }) > responseBudget) selected.pop();
-    if (selected.length === 1 && byteSize({ path: target, entries: selected, offset: start }) > responseBudget) throw new Error("list_entry_too_large");
+    const payloadFor = (items) => {
+      const nextOffset = start + items.length;
+      const hasMore = nextOffset < entries.length;
+      return {
+        path: target,
+        entries: items,
+        offset: start,
+        limit: pageLimit,
+        maxBytes: responseBudget,
+        truncated: hasMore,
+        nextOffset: hasMore ? nextOffset : null,
+      };
+    };
+    while (selected.length > 1 && byteSize(payloadFor(selected)) > responseBudget) selected.pop();
+    if (selected.length === 1 && byteSize(payloadFor(selected)) > responseBudget) throw new Error("list_entry_too_large");
 
-    const nextOffset = start + selected.length;
-    const hasMore = nextOffset < entries.length;
-    return { path: target, entries: selected, offset: start, limit: pageLimit, maxBytes: responseBudget, truncated: hasMore, nextOffset: hasMore ? nextOffset : null };
+    return payloadFor(selected);
   }
 
   async #walkList(current, level, maxDepth, output, stopAfter = 1001) {
