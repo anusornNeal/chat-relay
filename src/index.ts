@@ -38,6 +38,69 @@ type Pending = {
 
 type AuthUser = { id: string; name: string };
 
+type AgentSocketAttachment = {
+  connectedAt?: number;
+  lastSeenAt?: number;
+  heartbeatEnabled?: boolean;
+  heartbeatMs?: number;
+  processId?: number;
+};
+
+const DEFAULT_AGENT_HEARTBEAT_TTL_MS = 45_000;
+const MAX_AGENT_HEARTBEAT_TTL_MS = 180_000;
+
+function readAgentAttachment(socket: WebSocket | null): AgentSocketAttachment {
+  if (!socket) return {};
+  try {
+    const value = (socket as any).deserializeAttachment?.();
+    return value && typeof value === "object" ? value as AgentSocketAttachment : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAgentAttachment(socket: WebSocket, patch: AgentSocketAttachment): void {
+  try {
+    const current = readAgentAttachment(socket);
+    (socket as any).serializeAttachment?.({ ...current, ...patch });
+  } catch {}
+}
+
+function agentLiveness(socket: WebSocket | null) {
+  if (!socket) {
+    return {
+      online: false,
+      connected: false,
+      stale: false,
+      heartbeatEnabled: false,
+      connectedAt: null,
+      lastSeenAt: null,
+      heartbeatTtlMs: null,
+    };
+  }
+  const attachment = readAgentAttachment(socket);
+  const heartbeatEnabled = attachment.heartbeatEnabled === true;
+  const heartbeatMs = Number.isFinite(Number(attachment.heartbeatMs))
+    ? Math.min(Math.max(Number(attachment.heartbeatMs), 5_000), 60_000)
+    : null;
+  const heartbeatTtlMs = heartbeatEnabled
+    ? Math.min(MAX_AGENT_HEARTBEAT_TTL_MS, Math.max(DEFAULT_AGENT_HEARTBEAT_TTL_MS, (heartbeatMs ?? 15_000) * 3))
+    : null;
+  const lastSeenMs = Number.isFinite(Number(attachment.lastSeenAt)) ? Number(attachment.lastSeenAt) : null;
+  const stale = heartbeatEnabled && (lastSeenMs === null || Date.now() - lastSeenMs > heartbeatTtlMs!);
+  return {
+    online: !stale,
+    connected: true,
+    stale,
+    heartbeatEnabled,
+    connectedAt: Number.isFinite(Number(attachment.connectedAt)) ? new Date(Number(attachment.connectedAt)).toISOString() : null,
+    lastSeenAt: lastSeenMs === null ? null : new Date(lastSeenMs).toISOString(),
+    heartbeatTtlMs,
+    processId: Number.isFinite(Number(attachment.processId)) ? Number(attachment.processId) : null,
+  };
+}
+
+
 const MAX_BYTES = 64 * 1024;
 const TIMEOUT_MS = 30_000;
 const error = (status: number, code: string, details?: unknown) =>
@@ -97,7 +160,7 @@ export class Relay extends DurableObject {
     }
     switch (path) {
       case "/agent": return this.connectAgent(request);
-      case "/status": return Response.json({ online: this.agent !== null });
+      case "/status": return Response.json(agentLiveness(this.agent));
       case "/disconnect": return this.disconnectAgent();
       case "/relay": return this.relay(request);
       case "/temp-shot": return this.storeTempShot(request);
@@ -204,6 +267,8 @@ export class Relay extends DurableObject {
     }
 
     this.ctx.acceptWebSocket(server);
+    const connectedAt = Date.now();
+    writeAgentAttachment(server, { connectedAt, lastSeenAt: connectedAt, heartbeatEnabled: false });
     this.agent = server;
     this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents"]));
     return new Response(null, { status: 101, webSocket: client });
@@ -258,6 +323,21 @@ export class Relay extends DurableObject {
 
     let message: unknown;
     try { message = JSON.parse(data); } catch { return; }
+    const control = typeof message === "object" && message !== null
+      ? String((message as any).control ?? "")
+      : "";
+    if (control === "agent_heartbeat") {
+      writeAgentAttachment(socket, {
+        lastSeenAt: Date.now(),
+        heartbeatEnabled: true,
+        heartbeatMs: Number((message as any).heartbeatMs),
+        processId: Number((message as any).processId),
+      });
+      return;
+    }
+    if (readAgentAttachment(socket).heartbeatEnabled === true) {
+      writeAgentAttachment(socket, { lastSeenAt: Date.now() });
+    }
     if (!hasPayload(message) || typeof (message as { requestId?: unknown }).requestId !== "string") return;
 
     const requestId = (message as { requestId: string }).requestId;
@@ -288,6 +368,15 @@ export class Relay extends DurableObject {
     const body: unknown = await request.json();
     if (!hasPayload(body)) return error(400, "payload_required");
     if (!this.agent) return error(503, "agent_offline");
+    const liveness = agentLiveness(this.agent);
+    if (liveness.stale) {
+      const staleAgent = this.agent;
+      this.agent = null;
+      try { staleAgent.close(4000, "heartbeat_timeout"); } catch {}
+      this.failPending(503, "agent_stale");
+      this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents", "calls"]));
+      return error(503, "agent_stale", { lastSeenAt: liveness.lastSeenAt, heartbeatTtlMs: liveness.heartbeatTtlMs });
+    }
 
     const requestId = crypto.randomUUID();
     const agent = this.agent;

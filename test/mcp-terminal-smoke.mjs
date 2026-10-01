@@ -1,3 +1,35 @@
+import { AgentConnectionState, computeReconnectDelay } from "../agent/connection-state.mjs";
+import { shouldRestartAgent } from "../cli/remote.mjs";
+
+function connectionStateTests() {
+  const options = { baseMs: 1000, maxMs: 4000, jitterRatio: 0.2, random: () => 0.5 };
+  if (computeReconnectDelay(1, options) !== 1000) throw new Error("first reconnect delay failed");
+  if (computeReconnectDelay(2, options) !== 2000) throw new Error("second reconnect delay failed");
+  if (computeReconnectDelay(4, options) !== 4000) throw new Error("reconnect cap failed");
+
+  const state = new AgentConnectionState({ baseReconnectMs: 1000, maxReconnectMs: 4000, heartbeatMs: 5000 });
+  state.markConnecting(1000);
+  state.markConnected(2000);
+  state.markHeartbeat(2500);
+  state.markDisconnected(1006, "network drop", 3000);
+  if (state.nextDelay(() => 0.5) !== 1000) throw new Error("state reconnect delay failed");
+  state.scheduleReconnect(1000, 3000);
+  const waiting = state.snapshot();
+  if (waiting.state !== "waiting" || waiting.lastCloseCode !== 1006 || !waiting.nextReconnectAt) {
+    throw new Error("connection waiting state failed");
+  }
+  state.markConnected(4000);
+  if (state.snapshot().reconnectAttempt !== 0) throw new Error("reconnect attempt did not reset");
+  state.markReauthorization("credential_revoked", 5000);
+  if (state.snapshot().state !== "reauthorization-required") throw new Error("reauthorization state failed");
+
+  if (shouldRestartAgent({ code: 2 }) !== false) throw new Error("reauthorization restart loop guard failed");
+  if (shouldRestartAgent({ code: 1 }) !== true) throw new Error("crash restart policy failed");
+  if (shouldRestartAgent({ code: 1 }, true) !== false) throw new Error("intentional stop restart guard failed");
+}
+
+connectionStateTests();
+
 import { CapabilityScheduler } from "../agent/capability-scheduler.mjs";
 
 async function schedulerTests() {

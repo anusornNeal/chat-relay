@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { loadConfig, saveConfig } from "./config.mjs";
@@ -6,6 +6,26 @@ import { login, requestJson } from "./device-login.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let stopping = false;
+
+export function shouldRestartAgent(result, stoppingNow = false) {
+  return !stoppingNow && result?.code !== 2;
+}
+
+function terminateChildTree(child) {
+  if (child.killed) return;
+  if (process.platform === "win32" && child.pid) {
+    const pid = child.pid;
+    execFile("taskkill.exe", ["/PID", String(pid), "/T"], { windowsHide: true }, () => {
+      setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          execFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
+        }
+      }, 1000);
+    });
+    return;
+  }
+  child.kill("SIGTERM");
+}
 
 async function validateConfig(config) {
   if (!config?.relayUrl || !config?.userToken || !config?.agentToken || !config?.agentId) return false;
@@ -49,6 +69,7 @@ function spawnAgent(config) {
 }
 
 export async function remote(options = {}) {
+  stopping = false;
   let config = loadConfig();
   if (!(await validateConfig(config))) {
     console.log("No valid Chat Relay login found. Starting sign in...");
@@ -71,7 +92,7 @@ export async function remote(options = {}) {
 
     const stop = () => {
       stopping = true;
-      if (!child.killed) child.kill();
+      terminateChildTree(child);
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
@@ -84,10 +105,18 @@ export async function remote(options = {}) {
     process.removeListener("SIGTERM", stop);
     if (stopping) break;
 
-    console.error(
-      `Agent stopped (code=${result.code ?? "null"}, signal=${result.signal ?? "none"}). Restarting in 2s...`,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    if (result.code === 2) {
+      stopping = true;
+      console.error("Agent authorization is no longer valid. Run chat-relay login --force, then chat-relay remote.");
+      break;
+    }
+
+    if (shouldRestartAgent(result, stopping)) {
+      console.error(
+        `Agent stopped (code=${result.code ?? "null"}, signal=${result.signal ?? "none"}). Restarting in 2s...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
   }
 }
 

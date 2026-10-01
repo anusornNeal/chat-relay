@@ -4,6 +4,7 @@ import { FileManager } from "./file-manager.mjs";
 import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
 import { CapabilityScheduler } from "./capability-scheduler.mjs";
+import { AgentConnectionState } from "./connection-state.mjs";
 
 const relayUrl = process.env.RELAY_URL;
 const agentToken = process.env.AGENT_TOKEN;
@@ -26,6 +27,11 @@ const scheduler = new CapabilityScheduler({
   terminalControlConcurrency: process.env.AGENT_TERMINAL_CONTROL_CONCURRENCY,
   desktopReadConcurrency: process.env.AGENT_DESKTOP_READ_CONCURRENCY,
 });
+const connectionState = new AgentConnectionState({
+  baseReconnectMs: reconnectMs,
+  maxReconnectMs: process.env.RECONNECT_MAX_MS,
+  heartbeatMs: process.env.AGENT_HEARTBEAT_MS,
+});
 const files = new FileManager(process.env.ALLOWED_ROOTS);
 const processes = new ProcessManager();
 const desktop = new DesktopManager({
@@ -35,6 +41,10 @@ const desktop = new DesktopManager({
 });
 const recentCalls = [];
 let reauthorizationRequired = false;
+let activeSocket = null;
+let reconnectTimer = null;
+let heartbeatTimer = null;
+let stopping = false;
 
 if (!relayUrl || !agentToken) {
   console.error("RELAY_URL and AGENT_TOKEN are required");
@@ -73,7 +83,12 @@ async function handlePayload(payload) {
         concurrency: scheduler.snapshot(),
         desktop: desktop.getConfig(),
         allowedRoots: files.getRoots(),
-        reconnectMs,
+        reconnectMs: connectionState.baseReconnectMs,
+        connection: { ...connectionState.snapshot(), processId: process.pid },
+        terminalContinuity: {
+          processId: process.pid,
+          activeSessions: terminals.list().filter((session) => session.status === "running").length,
+        },
       });
     case "agent.recentCalls":
       return recentCalls.slice(-(Math.min(Math.max(Number(payload.limit) || 50, 1), 100)));
@@ -157,27 +172,94 @@ async function handlePayload(payload) {
   }
 }
 
-function requireReauthorization() {
+function clearReconnectTimer() {
+  if (!reconnectTimer) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
+function stopHeartbeat() {
+  if (!heartbeatTimer) return;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+function sendHeartbeat(socket) {
+  if (socket !== activeSocket || socket.readyState !== WebSocket.OPEN) return;
+  const now = Date.now();
+  try {
+    socket.send(JSON.stringify({
+      control: "agent_heartbeat",
+      at: now,
+      agentId,
+      processId: process.pid,
+      heartbeatMs: connectionState.heartbeatMs,
+    }));
+    connectionState.markHeartbeat(now);
+  } catch {}
+}
+
+function startHeartbeat(socket) {
+  stopHeartbeat();
+  sendHeartbeat(socket);
+  heartbeatTimer = setInterval(() => sendHeartbeat(socket), connectionState.heartbeatMs);
+}
+
+function sendSocketResponse(socket, requestId, payload) {
+  if (socket !== activeSocket || socket.readyState !== WebSocket.OPEN) return;
+  try { socket.send(serializeResponse(requestId, payload)); } catch {}
+}
+
+function scheduleReconnect(code, reason) {
+  if (stopping || reauthorizationRequired) return;
+  connectionState.markDisconnected(code, reason);
+  const delay = connectionState.nextDelay();
+  connectionState.scheduleReconnect(delay);
+  clearReconnectTimer();
+  console.log(`Reconnect scheduled in ${delay}ms`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, delay);
+}
+
+function requireReauthorization(reason = "credential_revoked") {
   if (reauthorizationRequired) return;
   reauthorizationRequired = true;
+  connectionState.markReauthorization(reason);
+  clearReconnectTimer();
+  stopHeartbeat();
+  const socket = activeSocket;
+  activeSocket = null;
+  try { socket?.terminate(); } catch {}
   desktop.close();
-  process.exitCode = 2;
   console.error("Agent credential was revoked or rejected.");
   console.error('Recovery: run "chat-relay login --force", then "chat-relay remote".');
+  setImmediate(() => process.exit(2));
 }
 
 function connect() {
-  if (reauthorizationRequired) return;
+  if (stopping || reauthorizationRequired) return;
+  clearReconnectTimer();
+  connectionState.markConnecting();
   console.log(`Connecting to ${wsUrl}`);
   console.log(`Terminal access: ${terminalEnabled ? "enabled" : "disabled"}`);
   console.log("Desktop access: " + (desktopEnabled ? "enabled" : "disabled"));
+
   const socket = new WebSocket(wsUrl, {
     headers: { Authorization: `Bearer ${agentToken}` },
   });
+  activeSocket = socket;
 
-  socket.on("open", () => console.log("Agent connected"));
+  socket.on("open", () => {
+    if (socket !== activeSocket) return;
+    connectionState.markConnected();
+    startHeartbeat(socket);
+    console.log("Agent connected");
+  });
 
   socket.on("message", async (raw) => {
+    if (socket !== activeSocket) return;
     let message;
     try {
       message = JSON.parse(raw.toString());
@@ -186,8 +268,7 @@ function connect() {
     }
 
     if (message?.control === "credential_revoked") {
-      requireReauthorization();
-      try { socket.close(4001, "credential_revoked"); } catch {}
+      requireReauthorization("credential_revoked");
       return;
     }
 
@@ -206,7 +287,7 @@ function connect() {
         ok: !(result && typeof result === "object" && result.ok === false),
       });
       if (recentCalls.length > 100) recentCalls.shift();
-      socket.send(serializeResponse(message.requestId, result));
+      sendSocketResponse(socket, message.requestId, result);
     } catch (error) {
       recentCalls.push({
         at: new Date().toISOString(),
@@ -216,42 +297,55 @@ function connect() {
         error: error instanceof Error ? error.message : "agent_error",
       });
       if (recentCalls.length > 100) recentCalls.shift();
-      socket.send(serializeResponse(message.requestId, {
+      sendSocketResponse(socket, message.requestId, {
         ok: false,
         error: error instanceof Error ? error.message : "agent_error",
-      }));
+      });
     }
   });
 
   socket.on("unexpected-response", (_request, response) => {
     if (response.statusCode === 401 || response.statusCode === 403) {
       response.resume();
-      requireReauthorization();
-      socket.terminate();
+      requireReauthorization("credential_rejected");
     }
   });
 
   socket.on("close", (code, reason) => {
+    if (socket !== activeSocket) return;
+    activeSocket = null;
+    stopHeartbeat();
     const reasonText = reason.toString();
     console.log("Agent disconnected (" + code + ") " + reasonText);
     if (code === 4001 || reasonText === "credential_revoked") {
-      requireReauthorization();
+      requireReauthorization("credential_revoked");
       return;
     }
-    if (!reauthorizationRequired) setTimeout(connect, reconnectMs);
+    scheduleReconnect(code, reasonText || "socket_closed");
   });
 
   socket.on("error", (error) => {
-    if (!reauthorizationRequired) console.error("WebSocket error:", error.message);
+    if (socket === activeSocket && !stopping && !reauthorizationRequired) {
+      console.error("WebSocket error:", error.message);
+    }
   });
 }
 
-function shutdown() {
+function shutdown(reason) {
+  if (stopping) return;
+  stopping = true;
+  connectionState.markStopping(reason);
+  clearReconnectTimer();
+  stopHeartbeat();
+  const socket = activeSocket;
+  activeSocket = null;
+  try { socket?.close(1000, "client_shutdown"); } catch {}
   desktop.close();
+  setTimeout(() => process.exit(0), 50);
 }
 
-process.once("SIGINT", shutdown);
-process.once("SIGTERM", shutdown);
-process.once("exit", shutdown);
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+process.once("exit", () => desktop.close());
 
 connect();
