@@ -38,8 +38,16 @@ async function managerTests() {
         desktopHeight: 1080,
         scaleX: 1920,
         scaleY: 1080,
+        virtualDesktopOriginX: -1920,
+        virtualDesktopOriginY: 0,
+        virtualDesktopWidth: 3840,
+        virtualDesktopHeight: 1080,
+        monitorCount: 2,
+        jpegQuality: args.quality ?? 58,
       };
     }
+    if (operation === "clipboard_read") return { ok: true, text: "clip", truncated: false };
+    if (operation === "window_list") return { ok: true, windows: [{ WindowId: "123", ProcessId: 42, Title: "Editor", X: 10, Y: 20, Width: 800, Height: 600, IsForeground: true }], Count: 1 };
     return { ok: true };
   };
 
@@ -53,10 +61,21 @@ async function managerTests() {
   const manager = new DesktopManager({ enabled: true, platform: "win32", runner });
   const screenshot = await manager.screenshot();
   assert(screenshot.ok && screenshot.mimeType === "image/jpeg" && screenshot.data === tinyJpeg, "controlled screenshot failed");
-  const secondaryScreenshot = await manager.screenshot({ monitor: "secondary" });
+  const secondaryScreenshot = await manager.screenshot({ monitor: "secondary", maxWidth: 720, quality: 50 });
   assert(secondaryScreenshot.ok, "secondary screenshot failed");
-  assert(runnerCalls.some((item) => item.operation === "screenshot" && item.args.monitor === "secondary"), "secondary monitor was not forwarded");
+  assert(secondaryScreenshot.virtualDesktopWidth === 3840 && secondaryScreenshot.monitorCount === 2, "virtual desktop metadata missing");
+  assert(runnerCalls.some((item) => item.operation === "screenshot" && item.args.monitor === "secondary" && item.args.maxWidth === 720 && item.args.quality === 50), "screenshot options were not forwarded");
   assert((await manager.screenshot({ monitor: "bogus" })).error === "invalid_monitor", "invalid monitor accepted");
+  assert((await manager.screenshot({ maxWidth: 200 })).error === "invalid_max_width", "invalid screenshot width accepted");
+  assert((await manager.screenshot({ quality: 90 })).error === "invalid_quality", "invalid screenshot quality accepted");
+  const clipboard = await manager.clipboardRead();
+  assert(clipboard.ok && clipboard.text === "clip", "clipboard read failed");
+  assert((await manager.clipboardWrite({ text: "hello" })).ok, "clipboard write failed");
+  assert((await manager.clipboardWrite({ text: "x".repeat(8193) })).error === "text_too_large", "oversize clipboard accepted");
+  const windows = await manager.listWindows({ limit: 10 });
+  assert(windows.ok && windows.windows[0]?.windowId === "123", "window list failed");
+  assert((await manager.focusWindow({ windowId: "123" })).ok, "window focus failed");
+  assert((await manager.focusWindow({ windowId: "bad" })).error === "invalid_window_id", "invalid window id accepted");
   assert((await manager.mouseClick({ x: 1.2, y: 2 })).error === "invalid_coordinates", "invalid coordinates accepted");
   assert((await manager.mouseClick({ x: 1, y: 2, button: "side" })).error === "invalid_button", "invalid button accepted");
   assert((await manager.mouseClick({ x: 1, y: 2, clicks: 3 })).error === "invalid_click_count", "invalid click count accepted");
@@ -76,11 +95,14 @@ async function managerTests() {
     ],
     captureAfter: true,
     monitor: "secondary",
+    maxWidth: 640,
+    quality: 45,
   });
   assert(step.ok, "desktop step failed");
   const stepCall = runnerCalls.find((item) => item.operation === "step");
   assert(stepCall?.args.actions.length === 4, "desktop step actions were not batched");
   assert(stepCall?.args.monitor === "secondary", "desktop step monitor was not forwarded");
+  assert(stepCall?.args.maxWidth === 640 && stepCall?.args.quality === 45, "desktop step capture options were not forwarded");
 
   let activeControls = 0;
   let maxActiveControls = 0;
@@ -209,6 +231,12 @@ async function mcpTests() {
         desktopHeight: 1080,
         scaleX: 1920,
         scaleY: 1080,
+        virtualDesktopOriginX: -1920,
+        virtualDesktopOriginY: 0,
+        virtualDesktopWidth: 3840,
+        virtualDesktopHeight: 1080,
+        monitorCount: 2,
+        jpegQuality: message.payload?.quality ?? 58,
         byteLength: Buffer.from(tinyJpeg, "base64").byteLength,
       };
     } else if (action === "desktop.step") {
@@ -229,9 +257,23 @@ async function mcpTests() {
           desktopHeight: 1080,
           scaleX: 1920,
           scaleY: 1080,
+          virtualDesktopOriginX: -1920,
+          virtualDesktopOriginY: 0,
+          virtualDesktopWidth: 3840,
+          virtualDesktopHeight: 1080,
+          monitorCount: 2,
+          jpegQuality: message.payload?.quality ?? 58,
           byteLength: Buffer.from(tinyJpeg, "base64").byteLength,
         };
       }
+    } else if (action === "desktop.clipboard.read") {
+      payload = { ok: true, text: "mock clipboard", truncated: false };
+    } else if (action === "desktop.clipboard.write") {
+      payload = { ok: true, action, length: message.payload?.text?.length || 0 };
+    } else if (action === "desktop.window.list") {
+      payload = { ok: true, windows: [{ windowId: "123", processId: 42, title: "Editor", x: 10, y: 20, width: 800, height: 600, isForeground: true }], count: 1 };
+    } else if (action === "desktop.window.focus") {
+      payload = { ok: true, action, windowId: message.payload?.windowId };
     } else if (action === "desktop.mouse.click" || action === "desktop.keyboard.input") {
       payload = { ok: true, action };
     } else {
@@ -248,16 +290,20 @@ async function mcpTests() {
 
   const listed = await rpc(reader.token, 1, "tools/list");
   const byName = new Map((listed.result?.tools || []).map((tool) => [tool.name, tool]));
-  for (const name of ["screenshot", "mouse_click", "keyboard_input", "desktop_step"]) {
+  for (const name of ["screenshot", "clipboard_read", "clipboard_write", "list_windows", "focus_window", "mouse_click", "keyboard_input", "desktop_step"]) {
     assert(byName.has(name), "missing desktop tool " + name);
   }
   assert(byName.get("screenshot")?.annotations?.readOnlyHint === true, "screenshot readOnlyHint missing");
+  assert(byName.get("clipboard_read")?.annotations?.readOnlyHint === true, "clipboard readOnlyHint missing");
+  assert(byName.get("list_windows")?.annotations?.readOnlyHint === true, "window list readOnlyHint missing");
+  assert(byName.get("clipboard_write")?.annotations?.destructiveHint === true, "clipboard write destructiveHint missing");
+  assert(byName.get("focus_window")?.annotations?.destructiveHint === true, "window focus destructiveHint missing");
   assert(byName.get("mouse_click")?.annotations?.destructiveHint === true, "mouse destructiveHint missing");
   assert(byName.get("keyboard_input")?.annotations?.destructiveHint === true, "keyboard destructiveHint missing");
 
   const shot = await rpc(reader.token, 2, "tools/call", {
     name: "screenshot",
-    arguments: { agentId },
+    arguments: { agentId, maxWidth: 720, quality: 50 },
   });
   assert(!shot.result?.isError, "desktop_read screenshot failed");
   const imageBlock = shot.result?.content?.find((item) => item.type === "image");
@@ -266,6 +312,8 @@ async function mcpTests() {
   assert(textBlock?.type === "text", "screenshot did not return temporary URL metadata");
   const metadata = JSON.parse(textBlock?.text || "{}");
   assert(metadata.desktopWidth === 1920 && metadata.scaleX === 1920, "screenshot metadata missing");
+  assert(metadata.virtualDesktopOriginX === -1920 && metadata.virtualDesktopWidth === 3840 && metadata.monitorCount === 2, "virtual desktop metadata missing");
+  assert(metadata.jpegQuality === 50, "screenshot quality metadata missing");
   assert(typeof metadata.tempUrl === "string" && metadata.tempUrl.includes("/tmp-shot/"), "temporary screenshot URL missing");
   assert(metadata.expiresInSeconds === 300, "temporary screenshot TTL invalid");
 
@@ -278,6 +326,16 @@ async function mcpTests() {
   const tempBytes = Buffer.from(await tempShot.arrayBuffer());
   assert(tempBytes.equals(Buffer.from(tinyJpeg, "base64")), "temporary screenshot bytes mismatch");
 
+  const readerClipboard = await rpc(reader.token, 30, "tools/call", { name: "clipboard_read", arguments: { agentId } });
+  assert(!readerClipboard.result?.isError && JSON.parse(readerClipboard.result?.content?.[0]?.text || "{}").payload?.text === "mock clipboard", "desktop_read clipboard failed");
+  const readerWindows = await rpc(reader.token, 31, "tools/call", { name: "list_windows", arguments: { agentId, limit: 10 } });
+  assert(!readerWindows.result?.isError && JSON.parse(readerWindows.result?.content?.[0]?.text || "{}").payload?.windows?.[0]?.windowId === "123", "desktop_read window list failed");
+  const readerClipboardWrite = await rpc(reader.token, 32, "tools/call", { name: "clipboard_write", arguments: { agentId, text: "x" } });
+  assert(readerClipboardWrite.result?.isError === true, "desktop_read unexpectedly gained clipboard control");
+  const readerFocus = await rpc(reader.token, 33, "tools/call", { name: "focus_window", arguments: { agentId, windowId: "123" } });
+  assert(readerFocus.result?.isError === true, "desktop_read unexpectedly gained window focus control");
+
+
   const readerClick = await rpc(reader.token, 3, "tools/call", {
     name: "mouse_click",
     arguments: { agentId, x: 10, y: 10 },
@@ -289,6 +347,16 @@ async function mcpTests() {
     arguments: { agentId },
   });
   assert(controllerShot.result?.isError === true, "desktop_control unexpectedly gained screenshot permission");
+
+  const controllerClipboardRead = await rpc(controller.token, 34, "tools/call", { name: "clipboard_read", arguments: { agentId } });
+  assert(controllerClipboardRead.result?.isError === true, "desktop_control unexpectedly gained clipboard read permission");
+  const controllerWindows = await rpc(controller.token, 35, "tools/call", { name: "list_windows", arguments: { agentId } });
+  assert(controllerWindows.result?.isError === true, "desktop_control unexpectedly gained window list permission");
+  const controllerClipboardWrite = await rpc(controller.token, 36, "tools/call", { name: "clipboard_write", arguments: { agentId, text: "hello" } });
+  assert(!controllerClipboardWrite.result?.isError, "desktop_control clipboard write failed");
+  const controllerFocus = await rpc(controller.token, 37, "tools/call", { name: "focus_window", arguments: { agentId, windowId: "123" } });
+  assert(!controllerFocus.result?.isError, "desktop_control window focus failed");
+
 
   const controllerClick = await rpc(controller.token, 5, "tools/call", {
     name: "mouse_click",
@@ -332,6 +400,8 @@ async function mcpTests() {
         { type: "key", key: "Enter" },
       ],
       captureAfter: true,
+      maxWidth: 640,
+      quality: 45,
     },
   });
   assert(!operatorStep.result?.isError, "combined desktop_step failed");
@@ -349,7 +419,16 @@ async function mcpTests() {
             : { agentId, actions: [{ type: "click", x: 10, y: 10 }], captureAfter: false },
     });
     assert(denied.result?.isError === true, "legacy scopes unexpectedly authorized " + name);
+  }  for (const [name, args] of [
+    ["clipboard_read", { agentId }],
+    ["clipboard_write", { agentId, text: "x" }],
+    ["list_windows", { agentId }],
+    ["focus_window", { agentId, windowId: "123" }],
+  ]) {
+    const denied = await rpc(legacy.token, 50 + name.length, "tools/call", { name, arguments: args });
+    assert(denied.result?.isError === true, "legacy scopes unexpectedly authorized " + name);
   }
+
 
   const wildcardShot = await rpc(wildcard.token, 20, "tools/call", {
     name: "screenshot",

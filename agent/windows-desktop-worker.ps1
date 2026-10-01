@@ -8,7 +8,9 @@ Add-Type -AssemblyName System.Drawing
 
 Add-Type @"
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class ChatRelayNative {
   public const uint INPUT_MOUSE = 0;
@@ -47,10 +49,78 @@ public static class ChatRelayNative {
     public INPUTUNION U;
   }
 
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+
+  public sealed class WindowInfo {
+    public string WindowId;
+    public uint ProcessId;
+    public string Title;
+    public int X;
+    public int Y;
+    public int Width;
+    public int Height;
+    public bool IsForeground;
+  }
+
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
   [DllImport("user32.dll")] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+
+  public static WindowInfo[] ListWindows(int limit) {
+    var items = new List<WindowInfo>();
+    var foreground = GetForegroundWindow();
+    EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+      if (items.Count >= limit) return false;
+      if (!IsWindowVisible(hWnd)) return true;
+      int titleLength = GetWindowTextLength(hWnd);
+      if (titleLength <= 0) return true;
+      var title = new StringBuilder(titleLength + 1);
+      if (GetWindowText(hWnd, title, title.Capacity) <= 0) return true;
+      uint pid;
+      GetWindowThreadProcessId(hWnd, out pid);
+      RECT rect;
+      if (!GetWindowRect(hWnd, out rect)) return true;
+      items.Add(new WindowInfo {
+        WindowId = unchecked((ulong)hWnd.ToInt64()).ToString(),
+        ProcessId = pid,
+        Title = title.ToString(),
+        X = rect.Left,
+        Y = rect.Top,
+        Width = Math.Max(0, rect.Right - rect.Left),
+        Height = Math.Max(0, rect.Bottom - rect.Top),
+        IsForeground = hWnd == foreground,
+      });
+      return true;
+    }, IntPtr.Zero);
+    return items.ToArray();
+  }
+
+  public static bool FocusWindow(string windowId) {
+    ulong raw;
+    if (!UInt64.TryParse(windowId, out raw) || raw == 0) return false;
+    var hWnd = new IntPtr(unchecked((long)raw));
+    if (!IsWindow(hWnd)) return false;
+    ShowWindowAsync(hWnd, 9);
+    return SetForegroundWindow(hWnd);
+  }
 
   public static bool MouseButton(uint downFlag, uint upFlag) {
     var inputs = new INPUT[2];
@@ -154,12 +224,17 @@ function Invoke-Screenshot($Payload) {
     if ($null -eq $codec) { return Result-Error "capture_failed" }
 
     $maxBytes = 32768
-    $targetWidth = [Math]::Min($bounds.Width, 960)
+    $requestedMaxWidth = if ($null -eq $Payload.maxWidth) { 960 } else { [int]$Payload.maxWidth }
+    if ($requestedMaxWidth -lt 320 -or $requestedMaxWidth -gt 1920) { return Result-Error "invalid_max_width" }
+    $requestedQuality = if ($null -eq $Payload.quality) { 58 } else { [int]$Payload.quality }
+    if ($requestedQuality -lt 20 -or $requestedQuality -gt 85) { return Result-Error "invalid_quality" }
+    $targetWidth = [Math]::Min($bounds.Width, $requestedMaxWidth)
     $targetHeight = [Math]::Max(1, [int][Math]::Round($bounds.Height * ($targetWidth / [double]$bounds.Width)))
-    $qualities = @(58L, 42L, 30L, 22L)
+    $qualities = @([long]$requestedQuality, [long][Math]::Min($requestedQuality, 42), [long][Math]::Min($requestedQuality, 30), 20L) | Select-Object -Unique
     $bytes = $null
     $finalWidth = $targetWidth
     $finalHeight = $targetHeight
+    $finalQuality = $requestedQuality
 
     for ($sizeAttempt = 0; $sizeAttempt -lt 3 -and $null -eq $bytes; $sizeAttempt++) {
       $resized = New-Object System.Drawing.Bitmap $targetWidth, $targetHeight
@@ -188,6 +263,7 @@ function Invoke-Screenshot($Payload) {
               $bytes = $stream.ToArray()
               $finalWidth = $targetWidth
               $finalHeight = $targetHeight
+              $finalQuality = [int]$quality
               break
             }
           } finally {
@@ -206,6 +282,8 @@ function Invoke-Screenshot($Payload) {
     }
 
     if ($null -eq $bytes) { return Result-Error "screenshot_too_large" }
+    $virtualBounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $monitorCount = @([System.Windows.Forms.Screen]::AllScreens).Count
 
     return [pscustomobject]@{
       ok = $true
@@ -213,6 +291,12 @@ function Invoke-Screenshot($Payload) {
       data = [Convert]::ToBase64String($bytes)
       width = $finalWidth
       height = $finalHeight
+      virtualDesktopOriginX = $virtualBounds.Left
+      virtualDesktopOriginY = $virtualBounds.Top
+      virtualDesktopWidth = $virtualBounds.Width
+      virtualDesktopHeight = $virtualBounds.Height
+      monitorCount = $monitorCount
+      jpegQuality = $finalQuality
       desktopOriginX = $bounds.Left
       desktopOriginY = $bounds.Top
       desktopWidth = $bounds.Width
@@ -295,6 +379,46 @@ function Invoke-KeyboardInput($Payload) {
   return [pscustomobject]@{ ok = $true; action = "keyboard_input" }
 }
 
+function Invoke-ClipboardRead($Payload) {
+  if (-not [System.Windows.Forms.SystemInformation]::UserInteractive) { return Result-Error "session_unavailable" }
+  try {
+    $text = if ([System.Windows.Forms.Clipboard]::ContainsText()) { [System.Windows.Forms.Clipboard]::GetText() } else { "" }
+    $truncated = $text.Length -gt 8192
+    if ($truncated) { $text = $text.Substring(0, 8192) }
+    return [pscustomobject]@{ ok = $true; text = $text; truncated = $truncated }
+  } catch { return Result-Error "clipboard_failed" }
+}
+
+function Invoke-ClipboardWrite($Payload) {
+  if (-not (Test-InteractiveSession)) { return Result-Error "session_unavailable" }
+  try {
+    $text = [string]$Payload.text
+    if ($text.Length -gt 8192) { return Result-Error "text_too_large" }
+    if ($text.Length -eq 0) { [System.Windows.Forms.Clipboard]::Clear() } else { [System.Windows.Forms.Clipboard]::SetText($text) }
+    return [pscustomobject]@{ ok = $true; action = "clipboard_write"; length = $text.Length }
+  } catch { return Result-Error "clipboard_failed" }
+}
+
+function Invoke-WindowList($Payload) {
+  if (-not [System.Windows.Forms.SystemInformation]::UserInteractive) { return Result-Error "session_unavailable" }
+  $limit = if ($null -eq $Payload.limit) { 50 } else { [int]$Payload.limit }
+  if ($limit -lt 1 -or $limit -gt 100) { return Result-Error "invalid_window_limit" }
+  try {
+    $windows = @([ChatRelayNative]::ListWindows($limit))
+    return [pscustomobject]@{ ok = $true; windows = $windows; count = $windows.Count }
+  } catch { return Result-Error "window_list_failed" }
+}
+
+function Invoke-WindowFocus($Payload) {
+  if (-not (Test-InteractiveSession)) { return Result-Error "session_unavailable" }
+  $windowId = [string]$Payload.windowId
+  if ($windowId -notmatch '^[1-9][0-9]{0,19}$') { return Result-Error "invalid_window_id" }
+  try {
+    if (-not [ChatRelayNative]::FocusWindow($windowId)) { return Result-Error "focus_failed" }
+    return [pscustomobject]@{ ok = $true; action = "window_focus"; windowId = $windowId }
+  } catch { return Result-Error "focus_failed" }
+}
+
 function Invoke-Step($Payload) {
   $completed = 0
   foreach ($action in @($Payload.actions)) {
@@ -332,7 +456,7 @@ function Invoke-Step($Payload) {
     }
   }
 
-  $shotPayload = [pscustomobject]@{ monitor = $Payload.monitor }
+  $shotPayload = [pscustomobject]@{ monitor = $Payload.monitor; maxWidth = $Payload.maxWidth; quality = $Payload.quality }
   $shot = Invoke-Screenshot $shotPayload
   if (-not $shot.ok) {
     return [pscustomobject]@{
@@ -350,6 +474,10 @@ function Invoke-Step($Payload) {
 function Invoke-Operation([string]$Operation, $Payload) {
   switch ($Operation) {
     "screenshot" { return Invoke-Screenshot $Payload }
+    "clipboard_read" { return Invoke-ClipboardRead $Payload }
+    "clipboard_write" { return Invoke-ClipboardWrite $Payload }
+    "window_list" { return Invoke-WindowList $Payload }
+    "window_focus" { return Invoke-WindowFocus $Payload }
     "mouse_click" { return Invoke-MouseClick $Payload }
     "keyboard_input" { return Invoke-KeyboardInput $Payload }
     "step" { return Invoke-Step $Payload }

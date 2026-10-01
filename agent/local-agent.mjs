@@ -136,6 +136,14 @@ async function handlePayload(payload) {
 
     case "desktop.screenshot":
       return desktop.screenshot(payload);
+    case "desktop.clipboard.read":
+      return desktop.clipboardRead(payload);
+    case "desktop.clipboard.write":
+      return desktop.clipboardWrite(payload);
+    case "desktop.window.list":
+      return desktop.listWindows(payload);
+    case "desktop.window.focus":
+      return desktop.focusWindow(payload);
     case "desktop.mouse.click":
       return desktop.mouseClick(payload);
     case "desktop.keyboard.input":

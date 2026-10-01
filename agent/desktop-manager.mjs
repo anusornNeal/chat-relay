@@ -8,6 +8,12 @@ import { BoundedLane } from "./capability-scheduler.mjs";
 const MAX_SCREENSHOT_BINARY_BYTES = 32 * 1024;
 const POWERSHELL_TIMEOUT_MS = 15_000;
 const MAX_TEXT_LENGTH = 8192;
+const MAX_CLIPBOARD_TEXT_LENGTH = 8192;
+const MIN_SCREENSHOT_WIDTH = 320;
+const MAX_SCREENSHOT_WIDTH = 1920;
+const MIN_SCREENSHOT_QUALITY = 20;
+const MAX_SCREENSHOT_QUALITY = 85;
+const MAX_WINDOW_LIST_LIMIT = 100;
 const helperPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "windows-desktop-worker.ps1");
 
 const KEY_CODES = new Map([
@@ -82,6 +88,7 @@ class PersistentDesktopRunner {
       "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
+      "-Sta",
       "-ExecutionPolicy",
       "Bypass",
       "-File",
@@ -211,7 +218,16 @@ export class DesktopManager {
       return { ok: false, error: "invalid_monitor" };
     }
 
-    const result = await this.runner("screenshot", { monitor });
+    const maxWidth = input.maxWidth === undefined ? 960 : Number(input.maxWidth);
+    if (!Number.isInteger(maxWidth) || maxWidth < MIN_SCREENSHOT_WIDTH || maxWidth > MAX_SCREENSHOT_WIDTH) {
+      return { ok: false, error: "invalid_max_width" };
+    }
+    const quality = input.quality === undefined ? 58 : Number(input.quality);
+    if (!Number.isInteger(quality) || quality < MIN_SCREENSHOT_QUALITY || quality > MAX_SCREENSHOT_QUALITY) {
+      return { ok: false, error: "invalid_quality" };
+    }
+
+    const result = await this.runner("screenshot", { monitor, maxWidth, quality });
     return this.normalizeScreenshotResult(result);
   }
 
@@ -240,8 +256,58 @@ export class DesktopManager {
       monitorIndex: Number(result.monitorIndex),
       isPrimary: result.isPrimary === true,
       deviceName: typeof result.deviceName === "string" ? result.deviceName : undefined,
+      virtualDesktopOriginX: Number(result.virtualDesktopOriginX),
+      virtualDesktopOriginY: Number(result.virtualDesktopOriginY),
+      virtualDesktopWidth: Number(result.virtualDesktopWidth),
+      virtualDesktopHeight: Number(result.virtualDesktopHeight),
+      monitorCount: Number(result.monitorCount),
+      jpegQuality: Number(result.jpegQuality),
       byteLength: binaryBytes,
     };
+  }
+
+  async clipboardRead() {
+    const gate = this.gate();
+    if (gate) return gate;
+    const result = await this.runner("clipboard_read", {});
+    if (!result?.ok || typeof result.text !== "string") return result || { ok: false, error: "clipboard_failed" };
+    return { ok: true, text: result.text.slice(0, MAX_CLIPBOARD_TEXT_LENGTH), truncated: result.truncated === true };
+  }
+
+  async clipboardWrite(input = {}) {
+    const gate = this.gate();
+    if (gate) return gate;
+    if (typeof input.text !== "string") return { ok: false, error: "invalid_clipboard_text" };
+    if (input.text.length > MAX_CLIPBOARD_TEXT_LENGTH) return { ok: false, error: "text_too_large" };
+    return this.runControl(() => this.runner("clipboard_write", { text: input.text }));
+  }
+
+  async listWindows(input = {}) {
+    const gate = this.gate();
+    if (gate) return gate;
+    const limit = input.limit === undefined ? 50 : Number(input.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_WINDOW_LIST_LIMIT) return { ok: false, error: "invalid_window_limit" };
+    const result = await this.runner("window_list", { limit });
+    if (!result?.ok || !Array.isArray(result.windows)) return result || { ok: false, error: "window_list_failed" };
+    const windows = result.windows.slice(0, limit).map((window) => ({
+      windowId: String(window.windowId ?? window.WindowId ?? ""),
+      processId: Number(window.processId ?? window.ProcessId),
+      title: String(window.title ?? window.Title ?? ""),
+      x: Number(window.x ?? window.X),
+      y: Number(window.y ?? window.Y),
+      width: Number(window.width ?? window.Width),
+      height: Number(window.height ?? window.Height),
+      isForeground: (window.isForeground ?? window.IsForeground) === true,
+    }));
+    return { ok: true, windows, count: Math.min(Number(result.count ?? result.Count) || windows.length, limit) };
+  }
+
+  async focusWindow(input = {}) {
+    const gate = this.gate();
+    if (gate) return gate;
+    const windowId = String(input.windowId ?? "").trim();
+    if (!/^[1-9][0-9]{0,19}$/.test(windowId)) return { ok: false, error: "invalid_window_id" };
+    return this.runControl(() => this.runner("window_focus", { windowId }));
   }
 
   async mouseClick(input = {}) {
@@ -316,11 +382,22 @@ export class DesktopManager {
     const settleMs = input.settleMs === undefined ? 120 : Number(input.settleMs);
     if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 5000) return { ok: false, error: "invalid_settle_ms" };
 
+    const wantsCapture = input.captureAfter !== false;
+    const maxWidth = input.maxWidth === undefined ? 960 : Number(input.maxWidth);
+    const quality = input.quality === undefined ? 58 : Number(input.quality);
+    if (wantsCapture && (!Number.isInteger(maxWidth) || maxWidth < MIN_SCREENSHOT_WIDTH || maxWidth > MAX_SCREENSHOT_WIDTH)) {
+      return { ok: false, error: "invalid_max_width" };
+    }
+    if (wantsCapture && (!Number.isInteger(quality) || quality < MIN_SCREENSHOT_QUALITY || quality > MAX_SCREENSHOT_QUALITY)) {
+      return { ok: false, error: "invalid_quality" };
+    }
+
     const result = await this.runControl(() => this.runner("step", {
       actions: normalizedActions,
-      captureAfter: input.captureAfter !== false,
+      captureAfter: wantsCapture,
       settleMs,
       monitor,
+      ...(wantsCapture ? { maxWidth, quality } : {}),
     }));
 
     if (input.captureAfter === false) return result;

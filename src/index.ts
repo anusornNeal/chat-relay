@@ -977,6 +977,12 @@ async function screenshotToolResult(env: Env, agentId: string | undefined, resul
       monitorIndex: payload.monitorIndex,
       isPrimary: payload.isPrimary === true,
       deviceName: payload.deviceName,
+      virtualDesktopOriginX: payload.virtualDesktopOriginX,
+      virtualDesktopOriginY: payload.virtualDesktopOriginY,
+      virtualDesktopWidth: payload.virtualDesktopWidth,
+      virtualDesktopHeight: payload.virtualDesktopHeight,
+      monitorCount: payload.monitorCount,
+      jpegQuality: payload.jpegQuality,
       tempUrl: baseUrl ? baseUrl + tempPath : tempPath,
       expiresAt: new Date(temp.expiresAt).toISOString(),
       expiresInSeconds: 300,
@@ -1064,11 +1070,11 @@ const agentIdSchema = z.string().regex(/^[a-z0-9_-]{1,64}$/).optional();
 const READ_ONLY_TOOLS = new Set([
   "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls",
   "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
-  "start_search", "get_more_search_results", "list_processes", "screenshot",
+  "start_search", "get_more_search_results", "list_processes", "screenshot", "clipboard_read", "list_windows",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
 ]);
 const OPEN_WORLD_TOOLS = new Set([
-  "mouse_click", "keyboard_input", "desktop_step",
+  "mouse_click", "keyboard_input", "desktop_step", "clipboard_write", "focus_window",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write",
   "terminal_batch_start", "terminal_batch_cancel",
   "start_process", "interact_with_process",
@@ -1076,7 +1082,7 @@ const OPEN_WORLD_TOOLS = new Set([
 
 const DESTRUCTIVE_TOOLS = new Set([
   "write_file", "edit_block", "move_path", "delete_path", "kill_process",
-  "mouse_click", "keyboard_input", "desktop_step",
+  "mouse_click", "keyboard_input", "desktop_step", "clipboard_write", "focus_window",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write", "terminal_kill",
   "terminal_batch_start", "terminal_batch_cancel",
   "start_process", "interact_with_process", "force_terminate",
@@ -1397,11 +1403,13 @@ function createMcpServer(env: Env, user: AuthUser) {
       inputSchema: {
         agentId: agentIdSchema,
         monitor: z.union([z.enum(["primary", "secondary"]), z.number().int().min(0).max(15)]).optional(),
+        maxWidth: z.number().int().min(320).max(1920).optional(),
+        quality: z.number().int().min(20).max(85).optional(),
       },
       annotations: annotationsForTool("screenshot"),
     } as any,
-    async ({ agentId, monitor }: any) => instrumentTool(env, user, "screenshot", { agentId, monitor }, async () => {
-      const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot", monitor });
+    async ({ agentId, monitor, maxWidth, quality }: any) => instrumentTool(env, user, "screenshot", { agentId, monitor, maxWidth, quality }, async () => {
+      const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot", monitor, maxWidth, quality });
       return {
         value: await screenshotToolResult(env, call.agentId, call),
         ok: call.ok,
@@ -1409,6 +1417,40 @@ function createMcpServer(env: Env, user: AuthUser) {
         ...failureMetadata(call),
       };
     }),
+  );
+
+  register(
+    "clipboard_read",
+    "Read up to 8192 characters from the Windows clipboard. Requires desktop_read permission.",
+    "desktop_read",
+    {},
+    () => ({ action: "desktop.clipboard.read" }),
+  );
+
+  register(
+    "clipboard_write",
+    "Replace the Windows clipboard text. Requires desktop_control permission.",
+    "desktop_control",
+    { text: z.string().max(8192) },
+    ({ text }) => ({ action: "desktop.clipboard.write", text }),
+    { destructiveHint: true },
+  );
+
+  register(
+    "list_windows",
+    "List visible top-level Windows application windows with stable window ids and desktop bounds.",
+    "desktop_read",
+    { limit: z.number().int().min(1).max(100).optional() },
+    ({ limit }) => ({ action: "desktop.window.list", limit }),
+  );
+
+  register(
+    "focus_window",
+    "Restore and focus one visible Windows window by window id. Requires desktop_control permission.",
+    "desktop_control",
+    { windowId: z.string().regex(/^[1-9][0-9]{0,19}$/) },
+    ({ windowId }) => ({ action: "desktop.window.focus", windowId }),
+    { destructiveHint: true },
   );
 
   register(
@@ -1491,14 +1533,16 @@ function createMcpServer(env: Env, user: AuthUser) {
         captureAfter: z.boolean().optional(),
         settleMs: z.number().int().min(0).max(5000).optional(),
         monitor: z.union([z.enum(["primary", "secondary"]), z.number().int().min(0).max(15)]).optional(),
+        maxWidth: z.number().int().min(320).max(1920).optional(),
+        quality: z.number().int().min(20).max(85).optional(),
       },
       annotations: annotationsForTool("desktop_step", { destructiveHint: true }),
     } as any,
-    async ({ agentId, actions, captureAfter, settleMs, monitor }: any) => instrumentTool(
+    async ({ agentId, actions, captureAfter, settleMs, monitor, maxWidth, quality }: any) => instrumentTool(
       env,
       user,
       "desktop_step",
-      { agentId, actions, captureAfter, settleMs, monitor },
+      { agentId, actions, captureAfter, settleMs, monitor, maxWidth, quality },
       async () => {
         const wantsCapture = captureAfter !== false;
         const call = await callAgent(
@@ -1506,7 +1550,7 @@ function createMcpServer(env: Env, user: AuthUser) {
           user,
           wantsCapture ? ["desktop_control", "desktop_read"] : "desktop_control",
           agentId,
-          { action: "desktop.step", actions, captureAfter, settleMs, monitor },
+          { action: "desktop.step", actions, captureAfter, settleMs, monitor, maxWidth, quality },
         );
         return {
           value: wantsCapture ? await screenshotToolResult(env, call.agentId, call) : toolResult(call),
