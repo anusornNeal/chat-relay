@@ -81,6 +81,46 @@ async function managerTests() {
   const stepCall = runnerCalls.find((item) => item.operation === "step");
   assert(stepCall?.args.actions.length === 4, "desktop step actions were not batched");
   assert(stepCall?.args.monitor === "secondary", "desktop step monitor was not forwarded");
+
+  let activeControls = 0;
+  let maxActiveControls = 0;
+  let controlCalls = 0;
+  let releaseFirstControl;
+  const firstControlGate = new Promise((resolve) => { releaseFirstControl = resolve; });
+  const serialized = new DesktopManager({
+    enabled: true,
+    platform: "win32",
+    controlMaxQueued: 1,
+    controlQueueTimeoutMs: 120,
+    runner: async (operation) => {
+      if (operation === "screenshot") {
+        return {
+          ok: true, mimeType: "image/jpeg", data: tinyJpeg,
+          width: 1, height: 1, desktopOriginX: 0, desktopOriginY: 0,
+          desktopWidth: 1920, desktopHeight: 1080, scaleX: 1920, scaleY: 1080,
+        };
+      }
+      activeControls += 1;
+      maxActiveControls = Math.max(maxActiveControls, activeControls);
+      controlCalls += 1;
+      if (controlCalls === 1) await firstControlGate;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      activeControls -= 1;
+      return { ok: true };
+    },
+  });
+  const firstControl = serialized.mouseClick({ x: 1, y: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const secondControl = serialized.keyboardInput({ text: "x" });
+  const overflowControl = await serialized.mouseClick({ x: 2, y: 2 });
+  assert(overflowControl.error === "queue_full", "desktop control queue limit failed");
+  const concurrentRead = await serialized.screenshot();
+  assert(concurrentRead.ok, "desktop read was blocked by control queue");
+  assert(controlCalls === 1, "desktop controls were not queued exclusively");
+  releaseFirstControl();
+  await Promise.all([firstControl, secondControl]);
+  assert(maxActiveControls === 1 && controlCalls === 2, "desktop control serialization failed");
+  assert(serialized.getConfig().controlQueue.concurrency === 1, "desktop control queue config missing");
 }
 
 async function request(path, options = {}) {

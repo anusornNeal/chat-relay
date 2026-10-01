@@ -3,6 +3,7 @@ import { DesktopManager } from "./desktop-manager.mjs";
 import { FileManager } from "./file-manager.mjs";
 import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
+import { CapabilityScheduler } from "./capability-scheduler.mjs";
 
 const relayUrl = process.env.RELAY_URL;
 const agentToken = process.env.AGENT_TOKEN;
@@ -16,9 +17,22 @@ const terminals = new TerminalManager({
   batchConcurrency: process.env.TERMINAL_BATCH_CONCURRENCY,
   maxQueuedJobs: process.env.TERMINAL_BATCH_MAX_QUEUED,
 });
+const scheduler = new CapabilityScheduler({
+  maxQueued: process.env.AGENT_MAX_QUEUED,
+  queueTimeoutMs: process.env.AGENT_QUEUE_TIMEOUT_MS,
+  fileConcurrency: process.env.AGENT_FILE_CONCURRENCY,
+  processConcurrency: process.env.AGENT_PROCESS_CONCURRENCY,
+  terminalExecConcurrency: process.env.AGENT_TERMINAL_EXEC_CONCURRENCY,
+  terminalControlConcurrency: process.env.AGENT_TERMINAL_CONTROL_CONCURRENCY,
+  desktopReadConcurrency: process.env.AGENT_DESKTOP_READ_CONCURRENCY,
+});
 const files = new FileManager(process.env.ALLOWED_ROOTS);
 const processes = new ProcessManager();
-const desktop = new DesktopManager({ enabled: desktopEnabled });
+const desktop = new DesktopManager({
+  enabled: desktopEnabled,
+  controlMaxQueued: process.env.DESKTOP_CONTROL_MAX_QUEUED,
+  controlQueueTimeoutMs: process.env.AGENT_QUEUE_TIMEOUT_MS,
+});
 const recentCalls = [];
 let reauthorizationRequired = false;
 
@@ -56,6 +70,7 @@ async function handlePayload(payload) {
         agentName,
         terminalEnabled,
         terminalBatch: terminals.getBatchConfig(),
+        concurrency: scheduler.snapshot(),
         desktop: desktop.getConfig(),
         allowedRoots: files.getRoots(),
         reconnectMs,
@@ -183,7 +198,7 @@ function connect() {
       ? String(message.payload.action ?? "unknown")
       : "unknown";
     try {
-      const result = await handlePayload(message.payload);
+      const result = await scheduler.run(action, () => handlePayload(message.payload));
       recentCalls.push({
         at: new Date().toISOString(),
         action,

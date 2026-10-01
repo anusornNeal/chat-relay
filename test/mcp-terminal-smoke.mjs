@@ -1,3 +1,43 @@
+import { CapabilityScheduler } from "../agent/capability-scheduler.mjs";
+
+async function schedulerTests() {
+  let releaseFile;
+  const fileGate = new Promise((resolve) => { releaseFile = resolve; });
+  const scheduler = new CapabilityScheduler({
+    fileConcurrency: 1,
+    terminalExecConcurrency: 1,
+    maxQueued: 1,
+    queueTimeoutMs: 120,
+  });
+
+  const firstFile = scheduler.run("fs.read", async () => { await fileGate; return "first"; });
+  const secondFile = scheduler.run("fs.stat", async () => "second");
+  let overflow = null;
+  try { await scheduler.run("fs.list", async () => "third"); }
+  catch (error) { overflow = error instanceof Error ? error.message : String(error); }
+  if (overflow !== "queue_full") throw new Error(`scheduler overflow failed: ${overflow}`);
+
+  const terminal = await scheduler.run("terminal.exec", async () => "terminal");
+  if (terminal !== "terminal") throw new Error("scheduler cross-lane fairness failed");
+  releaseFile();
+  const fileResults = await Promise.all([firstFile, secondFile]);
+  if (fileResults.join(",") !== "first,second") throw new Error("scheduler FIFO failed");
+
+  let releaseTimeout;
+  const timeoutGate = new Promise((resolve) => { releaseTimeout = resolve; });
+  const timeoutScheduler = new CapabilityScheduler({ fileConcurrency: 1, maxQueued: 2, queueTimeoutMs: 120 });
+  const blocker = timeoutScheduler.run("fs.read", async () => { await timeoutGate; return "done"; });
+  const timed = timeoutScheduler.run("fs.stat", async () => "late")
+    .then(() => "unexpected")
+    .catch((error) => error instanceof Error ? error.message : String(error));
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  if (await timed !== "queue_timeout") throw new Error("scheduler queue timeout failed");
+  releaseTimeout();
+  await blocker;
+}
+
+await schedulerTests();
+
 const base = "http://127.0.0.1:8794/mcp?key=test-caller";
 
 async function rpc(id, method, params = {}) {

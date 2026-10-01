@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import readline from "node:readline";
 import { randomUUID } from "node:crypto";
+import { BoundedLane } from "./capability-scheduler.mjs";
 
 const MAX_SCREENSHOT_BINARY_BYTES = 32 * 1024;
 const POWERSHELL_TIMEOUT_MS = 15_000;
@@ -169,6 +170,12 @@ export class DesktopManager {
     this.platform = options.platform ?? process.platform;
     this.persistentRunner = options.persistentRunner ?? new PersistentDesktopRunner({ platform: this.platform });
     this.runner = options.runner ?? ((operation, args) => this.persistentRunner.run(operation, args));
+    this.controlLane = options.controlLane ?? new BoundedLane({
+      name: "desktop_control",
+      concurrency: 1,
+      maxQueued: options.controlMaxQueued ?? process.env.DESKTOP_CONTROL_MAX_QUEUED,
+      queueTimeoutMs: options.controlQueueTimeoutMs ?? process.env.AGENT_QUEUE_TIMEOUT_MS,
+    });
   }
 
   getConfig() {
@@ -177,6 +184,7 @@ export class DesktopManager {
       supported: this.platform === "win32",
       platform: this.platform,
       transport: this.platform === "win32" ? "persistent-worker" : "unsupported",
+      controlQueue: this.controlLane.snapshot(),
     };
   }
 
@@ -184,6 +192,14 @@ export class DesktopManager {
     if (!this.enabled) return { ok: false, error: "desktop_disabled" };
     if (this.platform !== "win32") return { ok: false, error: "unsupported_platform" };
     return null;
+  }
+
+  async runControl(work) {
+    try {
+      return await this.controlLane.run(work);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "desktop_queue_error" };
+    }
   }
 
   async screenshot(input = {}) {
@@ -241,7 +257,7 @@ export class DesktopManager {
     if (!["left", "right", "middle"].includes(button)) return { ok: false, error: "invalid_button" };
     if (clicks !== 1 && clicks !== 2) return { ok: false, error: "invalid_click_count" };
 
-    return this.runner("mouse_click", { x, y, button, clicks });
+    return this.runControl(() => this.runner("mouse_click", { x, y, button, clicks }));
   }
 
   async keyboardInput(input = {}) {
@@ -250,7 +266,7 @@ export class DesktopManager {
 
     const normalized = normalizeKeyboardInput(input);
     if (!normalized.ok) return normalized;
-    return this.runner("keyboard_input", normalized.payload);
+    return this.runControl(() => this.runner("keyboard_input", normalized.payload));
   }
 
   async step(input = {}) {
@@ -300,12 +316,12 @@ export class DesktopManager {
     const settleMs = input.settleMs === undefined ? 120 : Number(input.settleMs);
     if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 5000) return { ok: false, error: "invalid_settle_ms" };
 
-    const result = await this.runner("step", {
+    const result = await this.runControl(() => this.runner("step", {
       actions: normalizedActions,
       captureAfter: input.captureAfter !== false,
       settleMs,
       monitor,
-    });
+    }));
 
     if (input.captureAfter === false) return result;
     return this.normalizeScreenshotResult(result);
