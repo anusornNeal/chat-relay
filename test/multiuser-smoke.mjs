@@ -1,6 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { FileManager } from "../agent/file-manager.mjs";
+
+async function fsBatchBoundaryTests() {
+  const manager = new FileManager(process.cwd());
+  let rejected = false;
+  try {
+    await manager.batch(Array.from({ length: 21 }, () => ({ op: "stat", path: "README.md" })));
+  } catch (error) {
+    rejected = error instanceof Error && error.message === "invalid_batch";
+  }
+  if (!rejected) throw new Error("fs batch item cap was not enforced");
+}
+
+await fsBatchBoundaryTests();
+
 const vars = Object.fromEntries(
   fs.readFileSync(".dev.vars", "utf8").split(/\r?\n/)
     .filter((line) => line && line.includes("="))
@@ -70,7 +85,7 @@ async function waitForText(token, sessionId, expected, timeoutMs = 4000) {
 const tools = await rpc(ownerToken, 1, "tools/list");
 const names = new Set(tools.result.tools.map((item) => item.name));
 for (const required of [
-  "list_agents", "get_config", "list_directory", "read_file", "read_multiple_files",
+  "list_agents", "get_config", "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
   "write_file", "edit_block", "create_directory", "move_path", "delete_path",
   "start_search", "get_more_search_results", "list_processes", "kill_process",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_read",
@@ -122,6 +137,30 @@ await tool(ownerToken, 8, "move_path", { source: fileA, destination: fileB });
 const many = await tool(ownerToken, 9, "read_multiple_files", { paths: [fileB, "README.md"] });
 if (many.payload.files?.length !== 2) throw new Error("read_multiple_files failed");
 console.log("filesystem read/write/edit/move ok");
+const directBatchStat = await tool(ownerToken, 122, "stat_path", { path: fileB });
+const directBatchRead = await tool(ownerToken, 123, "read_file", { path: fileB, offset: 0, length: 10 });
+const directBatchList = await tool(ownerToken, 124, "list_directory", { path: root, depth: 0, limit: 20 });
+const fsBatch = await tool(ownerToken, 125, "fs_batch", {
+  operations: [
+    { id: "stat", op: "stat", path: fileB },
+    { id: "read", op: "read", path: fileB, offset: 0, length: 10 },
+    { id: "list", op: "list", path: root, depth: 0, limit: 20 },
+    { id: "missing", op: "stat", path: path.join(root, "missing.txt") },
+  ],
+});
+const batchById = Object.fromEntries(fsBatch.payload.results.map((entry) => [entry.id, entry]));
+if (!batchById.stat?.ok || batchById.stat.result.size !== directBatchStat.payload.size) {
+  throw new Error("fs_batch stat parity failed");
+}
+if (!batchById.read?.ok || batchById.read.result.content !== directBatchRead.payload.content) {
+  throw new Error("fs_batch read parity failed");
+}
+if (!batchById.list?.ok || batchById.list.result.entries.length !== directBatchList.payload.entries.length) {
+  throw new Error("fs_batch list parity failed");
+}
+if (batchById.missing?.ok !== false) throw new Error("fs_batch mixed failure semantics failed");
+console.log("filesystem batch mixed-result parity ok");
+
 
 const largeLinesA = Array.from({ length: 1200 }, (_, index) =>
   `A-${String(index).padStart(4, "0")} ${"x".repeat(48)}`
@@ -181,6 +220,27 @@ if (Buffer.byteLength(JSON.stringify(tinyMany.payload), "utf8") > 4096) {
   throw new Error("tiny read_multiple_files exceeded aggregate budget");
 }
 console.log("bounded file read continuation ok");
+const tinyBatch = await tool(ownerToken, 126, "fs_batch", {
+  operations: Array.from({ length: 20 }, (_, index) => ({
+    id: `read-${index}`,
+    op: "read",
+    path: index % 2 === 0 ? largeA : largeB,
+    offset: 0,
+    length: 1000,
+    maxBytes: 8192,
+  })),
+  maxTotalBytes: 4096,
+});
+if (!Number.isInteger(tinyBatch.payload.nextIndex) ||
+    tinyBatch.payload.nextIndex <= 0 ||
+    tinyBatch.payload.nextIndex >= 20) {
+  throw new Error(`fs_batch aggregate continuation missing: ${JSON.stringify(tinyBatch.payload)}`);
+}
+if (Buffer.byteLength(JSON.stringify(tinyBatch.payload), "utf8") > 4096) {
+  throw new Error("fs_batch exceeded aggregate response budget");
+}
+console.log("filesystem batch aggregate continuation ok");
+
 
 const hiddenNoise = path.join(root, ".generated-noise");
 fs.mkdirSync(hiddenNoise, { recursive: true });

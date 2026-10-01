@@ -880,7 +880,7 @@ const agentIdSchema = z.string().regex(/^[a-z0-9_-]{1,64}$/).optional();
 
 const READ_ONLY_TOOLS = new Set([
   "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls",
-  "stat_path", "list_directory", "read_file", "read_multiple_files",
+  "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
   "start_search", "get_more_search_results", "list_processes", "screenshot",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
 ]);
@@ -1048,6 +1048,27 @@ function createMcpServer(env: Env, user: AuthUser) {
       maxTotalBytes: z.number().int().min(4096).max(49152).optional(),
     },
     ({ paths, maxTotalBytes }) => ({ action: "fs.readMany", paths, maxTotalBytes }),
+  );
+
+
+  register(
+    "fs_batch",
+    "Run up to 20 bounded read-only filesystem stat/read/list operations in one relay round trip. Per-item failures are isolated; use nextIndex and nested continuation fields when results are truncated.",
+    "read",
+    {
+      operations: z.array(z.object({
+        id: z.string().min(1).max(128).optional(),
+        op: z.enum(["stat", "read", "list"]),
+        path: z.string().min(1).max(2048),
+        depth: z.number().int().min(0).max(3).optional(),
+        offset: z.number().int().min(0).optional(),
+        length: z.number().int().min(1).max(1000).optional(),
+        limit: z.number().int().min(1).max(500).optional(),
+        maxBytes: z.number().int().min(1024).max(49152).optional(),
+      })).min(1).max(20),
+      maxTotalBytes: z.number().int().min(4096).max(49152).optional(),
+    },
+    ({ operations, maxTotalBytes }) => ({ action: "fs.batch", operations, maxTotalBytes }),
   );
 
   register(

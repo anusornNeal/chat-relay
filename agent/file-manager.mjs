@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 const MAX_READ_BYTES = 256 * 1024;
 const DEFAULT_READ_RESPONSE_BYTES = 32 * 1024;
 const DEFAULT_MULTI_READ_RESPONSE_BYTES = 48 * 1024;
+const DEFAULT_BATCH_RESPONSE_BYTES = 48 * 1024;
+const MAX_BATCH_OPERATIONS = 20;
 const MAX_READ_RESPONSE_BYTES = 48 * 1024;
 const MIN_READ_RESPONSE_BYTES = 1024;
 const MAX_WRITE_BYTES = 256 * 1024;
@@ -240,6 +242,102 @@ export class FileManager {
       totalFiles: requests.length,
       nextIndex,
       truncated,
+      maxTotalBytes: totalBudget,
+    };
+  }
+
+
+  async batch(operations, maxTotalBytes = DEFAULT_BATCH_RESPONSE_BYTES) {
+    if (!Array.isArray(operations) || operations.length === 0 || operations.length > MAX_BATCH_OPERATIONS) {
+      throw new Error("invalid_batch");
+    }
+
+    const totalBudget = boundedReadBytes(maxTotalBytes, DEFAULT_BATCH_RESPONSE_BYTES, 4 * 1024);
+    const results = [];
+    let nextIndex = null;
+
+    for (let index = 0; index < operations.length; index++) {
+      const operation = operations[index] || {};
+      const op = String(operation.op || "");
+      const base = {
+        index,
+        ...(typeof operation.id === "string" && operation.id ? { id: operation.id.slice(0, 128) } : {}),
+        op,
+        ...(typeof operation.path === "string" ? { path: operation.path } : {}),
+      };
+      const minimumBudget = op === "list" ? 4 * 1024 : MIN_READ_RESPONSE_BYTES;
+      const fallbackBudget = op === "list" ? DEFAULT_LIST_RESPONSE_BYTES : DEFAULT_READ_RESPONSE_BYTES;
+      let operationBudget = boundedReadBytes(operation.maxBytes, fallbackBudget, minimumBudget);
+      let candidate;
+
+      try {
+        if (typeof operation.path !== "string" || operation.path.length === 0) {
+          throw new Error("invalid_path");
+        }
+
+        for (let attempt = 0; attempt < 8; attempt++) {
+          let result;
+          if (op === "stat") {
+            result = await this.stat(operation.path);
+          } else if (op === "read") {
+            result = await this.read(operation.path, operation.offset, operation.length, operationBudget);
+          } else if (op === "list") {
+            result = await this.list(operation.path, operation.depth, operation.offset, operation.limit, operationBudget);
+          } else {
+            throw new Error("invalid_batch_operation");
+          }
+
+          candidate = { ...base, ok: true, result };
+          const projected = {
+            results: [...results, candidate],
+            totalOperations: operations.length,
+            nextIndex: index + 1 < operations.length ? index + 1 : null,
+            truncated: false,
+            maxTotalBytes: totalBudget,
+          };
+          if (byteSize(projected) <= totalBudget) break;
+          if (op === "stat") {
+            candidate = undefined;
+            break;
+          }
+
+          operationBudget = Math.floor(operationBudget * 0.65);
+          candidate = undefined;
+          if (operationBudget < minimumBudget) break;
+        }
+      } catch (error) {
+        candidate = {
+          ...base,
+          ok: false,
+          error: error instanceof Error ? error.message : "batch_operation_failed",
+        };
+      }
+
+      if (!candidate) {
+        nextIndex = index;
+        break;
+      }
+
+      const projected = {
+        results: [...results, candidate],
+        totalOperations: operations.length,
+        nextIndex: index + 1 < operations.length ? index + 1 : null,
+        truncated: false,
+        maxTotalBytes: totalBudget,
+      };
+      if (byteSize(projected) > totalBudget) {
+        nextIndex = index;
+        break;
+      }
+      results.push(candidate);
+    }
+
+    const nestedTruncated = results.some((entry) => entry.ok && entry.result?.truncated === true);
+    return {
+      results,
+      totalOperations: operations.length,
+      nextIndex,
+      truncated: nextIndex !== null || nestedTruncated,
       maxTotalBytes: totalBudget,
     };
   }
