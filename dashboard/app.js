@@ -16,7 +16,11 @@ const pendingLiveTopics = new Set();
 let pendingDeleteUser = null;
 let dashboardPeriod = null;
 let adminUsersCache = [];
-let callFilters = { userId: "", status: "", query: "", from: "", to: "", drilldown: false };
+const PAGE_SIZE = 50;
+let callFilters = { userId: "", status: "", query: "", activityId: "", from: "", to: "", drilldown: false };
+const callPaging = { cursor: "", stack: [], nextCursor: null };
+const errorPaging = { cursor: "", stack: [], nextCursor: null };
+let runningClockTimer = null;
 
 const BKK_TZ = "Asia/Bangkok";
 const $ = (id) => document.getElementById(id);
@@ -24,20 +28,36 @@ const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"
 const fmtNum = (v) => new Intl.NumberFormat("en-US").format(Number(v || 0));
 const fmtMs = (v) => Number(v || 0) >= 1000 ? (Number(v) / 1000).toFixed(1) + "s" : Math.round(Number(v || 0)) + " ms";
 const fmtPct = (v) => ((Number(v || 0)) * 100).toFixed(1) + "%";
-const bkkDateTime = (iso) => new Intl.DateTimeFormat("en-GB", {
-  timeZone: BKK_TZ, day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit",
-}).format(new Date(iso));
 const bkkTime = (iso) => new Intl.DateTimeFormat("en-GB", {
+  timeZone: BKK_TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+}).format(new Date(iso));
+const bkkHourMinute = (iso) => new Intl.DateTimeFormat("en-GB", {
   timeZone: BKK_TZ, hour: "2-digit", minute: "2-digit", hour12: false,
 }).format(new Date(iso));
-const age = (iso) => {
-  const ms = Date.now() - Date.parse(iso || "");
-  if (!Number.isFinite(ms)) return "-";
-  if (ms < 60000) return Math.max(0, Math.floor(ms / 1000)) + "s";
-  if (ms < 3600000) return Math.floor(ms / 60000) + "m";
-  if (ms < 86400000) return Math.floor(ms / 3600000) + "h";
-  return Math.floor(ms / 86400000) + "d";
+const elapsedClock = (iso) => {
+  const total = Math.max(0, Math.floor((Date.now() - Date.parse(iso || "")) / 1000));
+  if (!Number.isFinite(total)) return "--:--";
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  return hours > 0
+    ? [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":")
+    : [minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
 };
+function updateRunningTimers() {
+  document.querySelectorAll("[data-running-start]").forEach((node) => {
+    node.textContent = elapsedClock(node.dataset.runningStart);
+  });
+}
+function ensureRunningClock() {
+  if (!document.querySelector("[data-running-start]")) {
+    clearInterval(runningClockTimer);
+    runningClockTimer = null;
+    return;
+  }
+  if (!runningClockTimer) runningClockTimer = setInterval(updateRunningTimers, 1000);
+  updateRunningTimers();
+}
 
 const ICONS = {
   overview: '<path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/>',
@@ -87,7 +107,7 @@ let detailSeq = 0;
 const SAFE_DETAIL_KEYS = [
   "userId", "tool", "agentId", "activityId", "toolCallId", "timestamp", "startedAt",
   "durationMs", "status", "statusCode", "exitCode", "errorClass", "errorSource", "errorCode",
-  "requestBytes", "responseBytes", "ok",
+  "failureStage", "retryable", "agentName", "requestBytes", "responseBytes", "ok",
 ];
 function registerDetail(event) {
   const safe = {};
@@ -96,13 +116,34 @@ function registerDetail(event) {
   detailRecords.set(id, safe);
   return id;
 }
+function activityLabel(value) {
+  const id = String(value || "");
+  if (!id) return "Single call";
+  if (id.startsWith("call_")) return "Call " + id.slice(5, 13).toUpperCase();
+  if (id.startsWith("act_")) return "Activity " + id.slice(-8).toUpperCase();
+  return id.length > 16 ? id.slice(0, 8) + "…" + id.slice(-5) : id;
+}
 function showDetail(id, title = "Safe metadata") {
   const data = detailRecords.get(id);
   if (!data) return;
   $("detailTitle").textContent = title;
-  $("detailBody").innerHTML = Object.entries(data).map(([key, value]) =>
+  const rows = Object.entries(data).map(([key, value]) =>
     '<div class="detail-row"><span class="detail-key">' + esc(key) + '</span><strong class="' + (key.endsWith("Id") ? "mono" : "") + '">' + esc(value) + "</strong></div>"
   ).join("");
+  const related = data.activityId
+    ? '<div class="detail-actions"><button id="detailRelated" class="button subtle" type="button">' + icon("activity") + "View related tool calls</button></div>"
+    : "";
+  $("detailBody").innerHTML = rows + related;
+  const relatedButton = $("detailRelated");
+  if (relatedButton) relatedButton.onclick = async () => {
+    $("detailDialog").close();
+    callFilters.activityId = String(data.activityId || "");
+    resetCallPaging();
+    activeView = "calls";
+    renderNav();
+    showLoading();
+    await loadCalls({ patch: false });
+  };
   $("detailDialog").showModal();
 }
 function bindDetailRows() {
@@ -305,6 +346,10 @@ function showLoading() {
 }
 async function switchView(view) {
   if (!navItems().some(([id]) => id === view)) view = "overview";
+  if (view !== "calls") {
+    clearInterval(runningClockTimer);
+    runningClockTimer = null;
+  }
   activeView = view;
   renderNav();
   showLoading();
@@ -344,9 +389,9 @@ async function refreshActiveIncrementally() {
 function topicsTouchActiveView(topics) {
   const set = new Set(topics);
   if (activeView === "overview") return ["overview", "calls", "users", "errors", "agents"].some((topic) => set.has(topic));
-  if (activeView === "calls") return set.has("calls") || set.has("agents");
+  if (activeView === "calls") return callPaging.stack.length === 0 && (set.has("calls") || set.has("agents"));
   if (activeView === "users") return set.has("users") || set.has("agents");
-  if (activeView === "errors") return set.has("errors");
+  if (activeView === "errors") return errorPaging.stack.length === 0 && set.has("errors");
   return false;
 }
 function queueLiveRefresh(topics = []) {
@@ -393,6 +438,8 @@ function stopLiveChannel() {
   liveRefreshTimer = null;
   clearInterval(heartbeatTimer);
   heartbeatTimer = null;
+  clearInterval(runningClockTimer);
+  runningClockTimer = null;
   lastPongAt = 0;
   stopFallbackPolling();
   pendingLiveTopics.clear();
@@ -463,39 +510,81 @@ function metricCard(label, value, meta = "", tone = "") {
     '<div class="metric-value">' + esc(value) + '</div><div class="metric-meta">' + esc(meta) + "</div></div>";
 }
 function periodChips(period) {
-  return '<div class="period-chips"><span class="period-chip primary">' + icon("clock") + esc(period?.label || "Today") + '</span>' +
-    '<span class="period-chip">' + esc(period?.timezoneLabel || "BKK · UTC+7") + "</span></div>";
+  return '<div class="period-chips"><span class="period-chip primary">' + icon("clock") + esc(period?.label || "Today") + "</span></div>";
+}
+
+function resetCallPaging() {
+  callPaging.cursor = "";
+  callPaging.stack = [];
+  callPaging.nextCursor = null;
+}
+function resetErrorPaging() {
+  errorPaging.cursor = "";
+  errorPaging.stack = [];
+  errorPaging.nextCursor = null;
+}
+function paginationMarkup(kind, paging, hasMore) {
+  const page = paging.stack.length + 1;
+  return '<div class="pagination-bar" data-live-key="' + kind + '-pagination">' +
+    '<span class="pagination-summary">Page ' + page + ' · up to ' + PAGE_SIZE + ' rows</span>' +
+    '<div class="pagination-actions">' +
+      '<button class="button small" type="button" data-page-newer="' + kind + '"' + (page === 1 ? " disabled" : "") + '>← Newer</button>' +
+      '<button class="button small" type="button" data-page-older="' + kind + '"' + (!hasMore ? " disabled" : "") + '>Older →</button>' +
+    "</div></div>";
+}
+function bindPaging(kind, paging, load) {
+  const newer = document.querySelector('[data-page-newer="' + kind + '"]');
+  const older = document.querySelector('[data-page-older="' + kind + '"]');
+  if (newer) newer.onclick = async () => {
+    if (!paging.stack.length) return;
+    paging.cursor = paging.stack.pop() || "";
+    await load({ patch: true });
+  };
+  if (older) older.onclick = async () => {
+    if (!paging.nextCursor) return;
+    paging.stack.push(paging.cursor);
+    paging.cursor = paging.nextCursor;
+    await load({ patch: true });
+  };
 }
 
 function chartMarkup(buckets = []) {
   const max = Math.max(1, ...buckets.map((bucket) => Number(bucket.calls || 0)));
-  const half = Math.ceil(max / 2);
-  const yLabels = '<div class="chart-y-axis" aria-hidden="true"><span>' + fmtNum(max) + '</span><span>' + fmtNum(half) + '</span><span>0</span></div>';
+  const yTicks = [1, .75, .5, .25, 0].map((ratio) => Math.round(max * ratio));
+  const yLabels = '<div class="chart-y-axis" aria-hidden="true">' +
+    yTicks.map((value) => '<span>' + fmtNum(value) + "</span>").join("") +
+    "</div>";
   const bars = buckets.map((bucket, index) => {
     const calls = Number(bucket.calls || 0);
     const errors = Number(bucket.errors || 0);
-    const height = Math.max(calls ? 6 : 2, (calls / max) * 100);
-    const start = bkkTime(bucket.from);
-    const end = bkkTime(new Date(Date.parse(bucket.to) + 1).toISOString());
+    const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
+    const start = bkkHourMinute(bucket.from);
+    const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
     const label = start + "–" + end;
-    return '<button class="chart-bar" data-chart-from="' + esc(bucket.from) + '" data-chart-to="' + esc(bucket.to) + '"' +
-      ' aria-label="' + esc(label + ", " + calls + " tool calls, " + errors + " errors") + '">' +
-      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' calls · ' + fmtNum(errors) + ' errors</span><small>Open filtered tool calls</small></span>' +
-      '<span class="bar-fill" style="height:' + height + '%"></span>' +
-      (index % 4 === 0 || index === buckets.length - 1 ? '<span class="chart-x-label">' + esc(start) + "</span>" : "") +
+    const current = index === buckets.length - 1 ? " current" : "";
+    return '<button class="chart-bar' + current + '" style="--bar-height:' + height + '%" data-chart-from="' + esc(bucket.from) + '" data-chart-to="' + esc(bucket.to) + '"' +
+      ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " errors") + '">' +
+      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations · ' + fmtNum(errors) + ' errors</span><small>Open filtered tool calls</small></span>' +
+      '<span class="bar-fill"></span>' +
       "</button>";
   }).join("");
-  return '<div class="chart-frame">' + yLabels + '<div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i></div><div class="chart-bars">' + bars + "</div></div></div>";
+  const xLabels = buckets.map((bucket, index) => {
+    const show = index % 3 === 0 || index === buckets.length - 1;
+    return '<span class="' + (show ? "" : "muted") + '">' + (show ? esc(bkkHourMinute(bucket.from)) : "") + "</span>";
+  }).join("");
+  return '<div class="chart-frame">' + yLabels +
+    '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div><div class="chart-bars">' + bars +
+    '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
 }
 
 async function loadOverview({ patch = false } = {}) {
   setHeader(isAdmin() ? "System overview" : "My overview", isAdmin() ? "Today across Chat Relay" : "Your activity today");
   const data = await api("/admin/api/overview");
-  dashboardPeriod = data.period || dashboardPeriod || { label: "Today", timezoneLabel: "BKK · UTC+7" };
+  dashboardPeriod = data.period || dashboardPeriod || { label: "Today" };
   const m = data.usage || {};
   const exactMeta = data.bounded ? "partial — safety bound reached" : "today";
   const cards = [
-    metricCard(isAdmin() ? "Tool calls" : "My tool calls", fmtNum(m.calls), exactMeta),
+    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only · excludes Worker HTTP requests"),
     metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
     metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), exactMeta),
     metricCard(isAdmin() ? "Error rate" : "My error rate", fmtPct(m.errorRate), fmtNum(m.errors) + " failed calls", Number(m.errors || 0) ? "metric-alert" : ""),
@@ -513,13 +602,13 @@ async function loadOverview({ patch = false } = {}) {
       '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
     boundedNotice +
     '<div class="metric-grid">' + cards.join("") + "</div>" +
-    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by hour</h2></div><span class="panel-meta">Click a bar to inspect calls</span></div>' +
+    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by hour</h2></div><span class="panel-meta">Click a bar to inspect invocations</span></div>' +
       chartMarkup(data.buckets || []) + "</section>" +
     '<section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Breakdown</div><h2>Top tools</h2></div></div><div class="list top-tools">' +
       (top.length ? top.map((item, index) =>
         '<div class="list-row"><div class="tool-rank">' + (index + 1) + '</div><div class="list-copy"><div class="primary-text">' + esc(item.tool) +
         '</div><div class="secondary-text">' + esc(humanTool(item.tool)) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + "</strong></div>"
-      ).join("") : '<div class="empty-inline">No tool calls yet today.</div>') +
+      ).join("") : '<div class="empty-inline">No tool invocations yet today.</div>') +
     "</div></section></div>";
   renderContent(liveMarkup, patch);
 
@@ -528,6 +617,8 @@ async function loadOverview({ patch = false } = {}) {
       callFilters.from = bar.dataset.chartFrom;
       callFilters.to = bar.dataset.chartTo;
       callFilters.drilldown = true;
+      callFilters.activityId = "";
+      resetCallPaging();
       activeView = "calls";
       renderNav();
       showLoading();
@@ -549,7 +640,8 @@ function activeTerminalRows(terminals = []) {
       userId: session.userId || "",
       tool: session.type === "shell" ? "terminal_start_shell" : "terminal_start",
       agentId: agent.agentId,
-      activityId: session.activityId,
+      agentName: agent.agentName || agent.agentId,
+      activityId: session.activityId || (session.toolCallId ? "call_" + String(session.toolCallId).replace(/^tc_/, "").slice(0, 12) : ""),
       toolCallId: session.toolCallId,
       startedAt: session.startedAt,
       timestamp: session.startedAt,
@@ -562,7 +654,8 @@ function activeTerminalRows(terminals = []) {
       userId: batch.userId || "",
       tool: "terminal_batch_start",
       agentId: agent.agentId,
-      activityId: batch.activityId,
+      agentName: agent.agentName || agent.agentId,
+      activityId: batch.activityId || (batch.toolCallId ? "call_" + String(batch.toolCallId).replace(/^tc_/, "").slice(0, 12) : ""),
       toolCallId: batch.toolCallId,
       startedAt: batch.startedAt,
       timestamp: batch.startedAt,
@@ -592,13 +685,17 @@ function callFilterMarkup() {
   const statusOptions = [["", "All statuses"], ["running", "Running"], ["success", "Success"], ["error", "Error"]]
     .map(([value, label]) => '<option value="' + value + '"' + (callFilters.status === value ? " selected" : "") + ">" + label + "</option>").join("");
   const windowLabel = callFilters.drilldown && callFilters.from
-    ? bkkTime(callFilters.from) + "–" + bkkTime(new Date(Date.parse(callFilters.to) + 1).toISOString()) + " BKK"
-    : "Today · BKK UTC+7";
+    ? bkkHourMinute(callFilters.from) + "–" + bkkHourMinute(new Date(Date.parse(callFilters.to) + 1).toISOString())
+    : "Today";
+  const related = callFilters.activityId
+    ? '<button id="clearActivity" class="button subtle activity-filter-chip" type="button">' + icon("activity") + esc(activityLabel(callFilters.activityId)) + ' ' + icon("x") + "</button>"
+    : "";
   return '<div class="filters-panel"><div class="filters-row">' +
     '<label class="filter-control grow"><span>Search</span><div class="input-with-icon">' + icon("search") + '<input id="toolSearch" value="' + esc(callFilters.query) + '" placeholder="Tool, agent, activity"></div></label>' +
     userSelect +
     '<label class="filter-control"><span>Status</span><select id="callStatus">' + statusOptions + "</select></label>" +
     '<div class="filter-window"><span>Window</span><div class="window-chip">' + icon("clock") + esc(windowLabel) + "</div></div>" +
+    related +
     (callFilters.drilldown ? '<button id="clearDrilldown" class="button subtle" type="button">' + icon("x") + "Clear bucket</button>" : "") +
     "</div></div>";
 }
@@ -606,20 +703,24 @@ function callFilterMarkup() {
 async function loadCalls({ patch = false } = {}) {
   detailRecords.clear();
   detailSeq = 0;
-  setHeader(isAdmin() ? "Tool calls" : "My tool calls", "Running and completed activity in one timeline");
+  setHeader(isAdmin() ? "Tool calls" : "My tool calls", "Live running and completed activity");
   await ensureCallPeriod();
   await loadAdminUsersForFilter();
   const from = callFilters.from || dashboardPeriod?.from;
   const to = callFilters.to || new Date().toISOString();
-  const params = new URLSearchParams({ state: "all", limit: "250" });
+  const params = new URLSearchParams({ state: "all", limit: String(PAGE_SIZE) });
   if (from) params.set("from", from);
   if (to) params.set("to", to);
+  if (callPaging.cursor) params.set("cursor", callPaging.cursor);
   if (callFilters.status) params.set("status", callFilters.status);
+  if (callFilters.activityId) params.set("activityId", callFilters.activityId);
   if (isAdmin() && callFilters.userId) params.set("userId", callFilters.userId);
   const data = await api("/admin/api/tool-calls?" + params);
+  callPaging.nextCursor = data.nextCursor || null;
   const rawItems = Array.isArray(data.items) ? data.items : [];
-  const terminalItems = (callFilters.status && callFilters.status !== "running" ? [] : activeTerminalRows(data.terminals || []))
-    .filter((item) => !isAdmin() || !callFilters.userId || item.userId === callFilters.userId);
+  const terminalItems = (!callPaging.cursor && (!callFilters.status || callFilters.status === "running")
+    ? activeTerminalRows(data.terminals || [])
+    : []).filter((item) => !isAdmin() || !callFilters.userId || item.userId === callFilters.userId);
   const seen = new Set(rawItems.map((item) => item.toolCallId).filter(Boolean));
   const items = [...terminalItems.filter((item) => !item.toolCallId || !seen.has(item.toolCallId)), ...rawItems]
     .sort((a, b) => Date.parse(b.timestamp || b.startedAt || "") - Date.parse(a.timestamp || a.startedAt || ""));
@@ -627,18 +728,20 @@ async function loadCalls({ patch = false } = {}) {
   const tableRows = items.length ? items.map((event) => {
     const detailId = registerDetail(event);
     const when = event.timestamp || event.startedAt;
-    const duration = event.status === "running" ? age(event.startedAt || event.timestamp) : fmtMs(event.durationMs);
     const rowKey = event.toolCallId || [when, event.userId, event.tool, event.agentId].join(":");
+    const duration = event.status === "running"
+      ? '<span class="running-duration" data-running-start="' + esc(event.startedAt || event.timestamp) + '">' + esc(elapsedClock(event.startedAt || event.timestamp)) + "</span>"
+      : esc(fmtMs(event.durationMs));
     return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Tool call detail">' +
-      '<td class="time-cell"><strong>' + esc(when ? bkkTime(when) : "-") + '</strong><span>' + esc(when ? bkkDateTime(when) : "") + "</span></td>" +
+      '<td class="time-cell"><strong>' + esc(when ? bkkTime(when) : "-") + "</strong></td>" +
       (isAdmin() ? '<td><span class="user-cell">' + esc(event.userId || "-") + "</span></td>" : "") +
       '<td><div class="tool-cell"><span class="tool-icon">' + icon(event.tool?.startsWith("terminal") ? "terminal" : "activity") + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
-      '<td>' + esc(event.agentId || "-") + "</td>" +
-      '<td class="mono">' + esc(event.activityId || "Ungrouped") + "</td>" +
-      '<td>' + esc(duration) + "</td>" +
-      '<td>' + statusBadge(event.status || (event.ok ? "success" : "error")) + "</td>" +
+      '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving…") + "</strong></div></td>" +
+      '<td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
+      "<td>" + duration + "</td>" +
+      "<td>" + statusBadge(event.status || (event.ok ? "success" : "error")) + "</td>" +
       '<td class="row-chevron">' + icon("chevron") + "</td></tr>";
-  }).join("") : '<tr><td colspan="' + (isAdmin() ? "8" : "7") + '"><div class="table-empty">' + icon("activity") + '<strong>No tool calls in this window</strong><span>Activity will appear on the next refresh.</span></div></td></tr>';
+  }).join("") : '<tr><td colspan="' + (isAdmin() ? "8" : "7") + '"><div class="table-empty">' + icon("activity") + '<strong>No tool calls in this window</strong><span>New activity appears here in realtime.</span></div></td></tr>';
 
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) +
@@ -646,8 +749,10 @@ async function loadCalls({ patch = false } = {}) {
     (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>History reached its safe bound; results are partial.</span></div>" : "") +
     callFilterMarkup() +
     '<div class="table-wrap calls-table"><table><thead><tr><th>Time</th>' + (isAdmin() ? "<th>User</th>" : "") +
-      "<th>Tool</th><th>Agent</th><th>Activity</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody>" + tableRows + "</tbody></table></div>";
+      "<th>Tool</th><th>Agent</th><th>Activity</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody>" + tableRows + "</tbody></table></div>" +
+    paginationMarkup("calls", callPaging, Boolean(data.hasMore));
   renderContent(liveMarkup, patch);
+  ensureRunningClock();
 
   const search = $("toolSearch");
   if (search) {
@@ -660,14 +765,29 @@ async function loadCalls({ patch = false } = {}) {
     };
     search.dispatchEvent(new Event("input"));
   }
-  if ($("callUser")) $("callUser").onchange = async () => { callFilters.userId = $("callUser").value; await loadCalls({ patch: true }); };
-  if ($("callStatus")) $("callStatus").onchange = async () => { callFilters.status = $("callStatus").value; await loadCalls({ patch: true }); };
+  if ($("callUser")) $("callUser").onchange = async () => {
+    callFilters.userId = $("callUser").value;
+    resetCallPaging();
+    await loadCalls({ patch: true });
+  };
+  if ($("callStatus")) $("callStatus").onchange = async () => {
+    callFilters.status = $("callStatus").value;
+    resetCallPaging();
+    await loadCalls({ patch: true });
+  };
+  if ($("clearActivity")) $("clearActivity").onclick = async () => {
+    callFilters.activityId = "";
+    resetCallPaging();
+    await loadCalls({ patch: true });
+  };
   if ($("clearDrilldown")) $("clearDrilldown").onclick = async () => {
     callFilters.from = "";
     callFilters.to = "";
     callFilters.drilldown = false;
+    resetCallPaging();
     await loadCalls({ patch: true });
   };
+  bindPaging("calls", callPaging, loadCalls);
   bindDetailRows();
 }
 
@@ -712,40 +832,63 @@ async function loadUsers({ patch = false } = {}) {
   });
 }
 
+function diagnosticStageLabel(stage) {
+  return ({
+    validation: "Validation",
+    policy: "Policy",
+    process: "Process",
+    worker: "Worker",
+    relay: "Relay",
+    agent: "Agent",
+    timeout: "Timeout",
+    tool: "Tool",
+  })[stage] || "Tool";
+}
+function diagnosticResult(event) {
+  if (event.exitCode !== null && event.exitCode !== undefined) return "Exit " + event.exitCode;
+  if (event.statusCode !== null && event.statusCode !== undefined) return "HTTP " + event.statusCode;
+  return "—";
+}
 async function loadErrors({ patch = false } = {}) {
   detailRecords.clear();
   detailSeq = 0;
   if (!isAdmin()) return switchView("overview");
-  setHeader("Errors", "Safe failure metadata for today");
+  setHeader("Errors", "Safe diagnostics for failed tool invocations");
   await ensureCallPeriod();
-  const params = new URLSearchParams({ limit: "150" });
+  const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
   if (dashboardPeriod?.from) params.set("from", dashboardPeriod.from);
   params.set("to", new Date().toISOString());
+  if (errorPaging.cursor) params.set("cursor", errorPaging.cursor);
   const data = await api("/admin/api/errors?" + params);
+  errorPaging.nextCursor = data.nextCursor || null;
   const items = data.items || [];
   const rows = items.length ? items.map((event) => {
     const detailId = registerDetail(event);
     const code = event.errorCode || event.errorClass || "tool_error";
-    const source = event.errorSource || "tool";
+    const stage = diagnosticStageLabel(event.failureStage);
+    const retry = event.retryable ? "Retryable" : "Not retryable";
     const rowKey = event.toolCallId || [event.timestamp, event.userId, event.tool, event.agentId].join(":");
-    return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Error detail">' +
-      '<td class="time-cell"><strong>' + esc(bkkTime(event.timestamp)) + '</strong><span>' + esc(bkkDateTime(event.timestamp)) + "</span></td>" +
-      '<td><div class="error-cell"><span class="error-icon">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(source + " · " + (event.errorClass || "tool_error")) + "</span></div></div></td>" +
-      '<td>' + esc(event.userId) + "</td><td>" + esc(event.tool) + "</td><td>" + esc(event.agentId || "-") + "</td>" +
-      '<td>' + esc(fmtMs(event.durationMs)) + '</td><td class="mono">' + esc(event.activityId || "Ungrouped") + "</td>" +
-      '<td>' + esc(event.exitCode ?? event.statusCode ?? "-") + '</td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
-  }).join("") : '<tr><td colspan="9"><div class="table-empty">' + icon("check") + '<strong>No errors today</strong><span>Safe error metadata will appear here if a call fails.</span></div></td></tr>';
+    return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Error diagnostic">' +
+      '<td class="time-cell"><strong>' + esc(bkkTime(event.timestamp)) + "</strong></td>" +
+      '<td><div class="error-cell"><span class="error-icon">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(stage + " · " + retry) + "</span></div></div></td>" +
+      "<td>" + esc(event.userId) + "</td><td>" + esc(event.tool) + "</td>" +
+      '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving…") + "</strong></div></td>" +
+      "<td>" + esc(fmtMs(event.durationMs)) + '</td><td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
+      '<td><span class="diagnostic-result">' + esc(diagnosticResult(event)) + '</span></td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
+  }).join("") : '<tr><td colspan="9"><div class="table-empty">' + icon("check") + '<strong>No errors today</strong><span>Safe diagnostics will appear here if a tool invocation fails.</span></div></td></tr>';
 
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) + '<span class="privacy-chip">' + icon("info") + "No commands, args, payloads, or output stored</span></div>" +
     (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>Error history reached its safe bound; results are partial.</span></div>" : "") +
     '<div class="filters-panel compact"><div class="filters-row"><label class="filter-control grow"><span>Search errors</span><div class="input-with-icon">' + icon("search") +
-      '<input id="errorSearch" placeholder="Code, source, user, tool, agent"></div></label></div></div>' +
-    '<div class="table-wrap error-table"><table><thead><tr><th>Time</th><th>Error</th><th>User</th><th>Tool</th><th>Agent</th><th>Duration</th><th>Activity</th><th>Code</th><th></th></tr></thead><tbody>' +
-      rows + "</tbody></table></div>";
+      '<input id="errorSearch" placeholder="Code, stage, user, tool, agent"></div></label></div></div>' +
+    '<div class="table-wrap error-table"><table><thead><tr><th>Time</th><th>Diagnostic</th><th>User</th><th>Tool</th><th>Agent</th><th>Duration</th><th>Activity</th><th>Result</th><th></th></tr></thead><tbody>' +
+      rows + "</tbody></table></div>" +
+    paginationMarkup("errors", errorPaging, Boolean(data.hasMore));
   renderContent(liveMarkup, patch);
   bindDetailRows();
   bindTableFilter("errorSearch");
+  bindPaging("errors", errorPaging, loadErrors);
 }
 
 $("loginForm").onsubmit = async (event) => {

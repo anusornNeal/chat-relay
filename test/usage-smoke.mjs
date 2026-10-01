@@ -28,7 +28,11 @@ async function admin(path, method = "GET", body) {
 async function rpc(token, id, method, params = {}, sessionId = "usage-smoke-session") {
   const response = await fetch(`${base}/mcp?key=${encodeURIComponent(token)}`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-session-id": sessionId },
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+    },
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
   });
   const text = await response.text();
@@ -68,6 +72,9 @@ socket.on("message", (raw) => {
     result = { ok: false, error: "synthetic_failure", content: "PRIVATE_ERROR_OUTPUT" };
   } else if (payload.action === "fs.read") {
     result = { ok: true, content: "PRIVATE_FILE_OUTPUT", path: payload.path };
+  } else if (payload.action === "terminal.exec") {
+    setTimeout(() => socket.send(JSON.stringify({ requestId: message.requestId, payload: { ok: true, exitCode: 0, stdout: "PRIVATE_TERMINAL_OUTPUT" } })), 1200);
+    return;
   } else result = { ok: true };
   socket.send(JSON.stringify({ requestId: message.requestId, payload: result }));
 });
@@ -77,6 +84,16 @@ await tool(ownerToken, 2, "ping_agent", { agentId: "default" });
 await tool(ownerToken, 3, "read_file", { path: "SENSITIVE_PATH_SECRET.txt" });
 await tool(ownerToken, 4, "read_file", { path: "fail-SENSITIVE_FAILURE_PATH.txt" }, true);
 await tool(ownerToken, 41, "ping_agent", { agentId: "missing-agent" }, true);
+await tool(ownerToken, 42, "whoami", {}, false, null);
+
+const runningPromise = tool(ownerToken, 43, "terminal_exec", { command: "echo realtime-running" }, false, "usage-running-session");
+await new Promise((resolve) => setTimeout(resolve, 180));
+const running = await admin("/admin/api/tool-calls?state=all&status=running&limit=50");
+const runningTerminal = (running.data.items || []).find((event) => event.tool === "terminal_exec" && event.status === "running");
+if (!runningTerminal || !runningTerminal.activityId) {
+  throw new Error(`running tool visibility failed: ${running.text}`);
+}
+await runningPromise;
 
 const suffix = Date.now().toString(36);
 const created = await admin("/admin/users", "POST", { name: "Usage Reader", id: `usage-reader-${suffix}` });
@@ -127,12 +144,28 @@ if (callIds.size !== concurrentWhoami.length) throw new Error("toolCallId is not
 for (const event of correlated.data.recent || []) {
   if (!event.toolCallId || !String(event.toolCallId).startsWith("tc_")) throw new Error("missing toolCallId in raw usage event");
 }
+const fallbackActivity = (correlated.data.recent || []).find((event) => event.tool === "whoami" && String(event.activityId || "").startsWith("call_"));
+if (!fallbackActivity) throw new Error("missing safe per-call activity fallback for uncorrelated tool call");
 
 const errors = await admin("/admin/api/errors?limit=100");
 const syntheticError = (errors.data.items || []).find((event) => event.tool === "read_file" && event.errorCode === "synthetic_failure");
-if (!syntheticError || syntheticError.errorSource !== "agent") {
+if (!syntheticError || syntheticError.errorSource !== "agent" || syntheticError.failureStage !== "agent" || syntheticError.retryable !== false || !syntheticError.agentName || syntheticError.agentName === syntheticError.agentId) {
   throw new Error(`safe structured error metadata missing: ${errors.text}`);
 }
+
+const firstPage = await admin("/admin/api/tool-calls?state=history&agentId=default&limit=2");
+if (!firstPage.response.ok || firstPage.data.items?.length !== 2 || !firstPage.data.nextCursor || firstPage.data.items.some((event) => !event.agentName || event.agentName === event.agentId)) {
+  throw new Error(`cursor page 1 failed: ${firstPage.text}`);
+}
+const secondPage = await admin("/admin/api/tool-calls?state=history&agentId=default&limit=2&cursor=" + encodeURIComponent(firstPage.data.nextCursor));
+if (!secondPage.response.ok || !secondPage.data.items?.length) throw new Error(`cursor page 2 failed: ${secondPage.text}`);
+const firstIds = new Set(firstPage.data.items.map((event) => event.toolCallId));
+if (secondPage.data.items.some((event) => firstIds.has(event.toolCallId))) throw new Error("cursor pages overlap");
+const invalidCursor = await admin("/admin/api/tool-calls?state=history&limit=2&cursor=not-a-valid-cursor");
+if (invalidCursor.response.status !== 400) throw new Error("invalid activity cursor was accepted");
+
+const errorPage = await admin("/admin/api/errors?limit=1");
+if (!errorPage.response.ok || errorPage.data.items?.length !== 1 || !errorPage.data.nextCursor) throw new Error(`error cursor page failed: ${errorPage.text}`);
 
 const serialized = JSON.stringify(total.data.recent || []);
 for (const forbidden of [
@@ -140,6 +173,7 @@ for (const forbidden of [
   "SENSITIVE_FAILURE_PATH",
   "PRIVATE_FILE_OUTPUT",
   "PRIVATE_ERROR_OUTPUT",
+  "PRIVATE_TERMINAL_OUTPUT",
   ownerToken,
   agentToken,
 ]) {

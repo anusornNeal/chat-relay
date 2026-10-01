@@ -278,17 +278,19 @@ async function terminalActivity(env: AdminEnv, selfUserId?: string) {
       }));
       const envelope = await response.json<any>().catch(() => null);
       const payload = envelope?.payload;
-      if (!response.ok || !payload?.ok) return { agentId, sessions: [], batches: [] };
+      if (!response.ok || !payload?.ok) return { agentId, agentName: (state.agents ?? []).find((agent: any) => agent.id === agentId)?.name || agentId, sessions: [], batches: [] };
       const belongs = (item: any) => !selfUserId || item.userId === selfUserId;
+      const agentName = (state.agents ?? []).find((agent: any) => agent.id === agentId)?.name || agentId;
       return {
         agentId,
+        agentName,
         sessions: (payload.sessions ?? []).filter((item: any) => belongs(item) && item.status === "running"),
         batches: (payload.batches ?? []).filter((item: any) =>
           belongs(item) && (Number(item.counts?.running || 0) > 0 || Number(item.counts?.queued || 0) > 0)
         ),
       };
     } catch {
-      return { agentId, sessions: [], batches: [] };
+      return { agentId, agentName: (state.agents ?? []).find((agent: any) => agent.id === agentId)?.name || agentId, sessions: [], batches: [] };
     }
   }));
   return snapshots;
@@ -589,7 +591,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
   if (path === "/admin/api/tool-calls" && request.method === "GET") {
     const query = new URLSearchParams();
-    for (const key of ["state", "limit", "tool", "agentId", "from", "to", "activityId", "status"]) {
+    for (const key of ["state", "limit", "cursor", "tool", "agentId", "from", "to", "activityId", "status"]) {
       const value = url.searchParams.get(key);
       if (value) query.set(key, value);
     }
@@ -602,20 +604,39 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const response = await usageStub(env).fetch("https://usage.internal/activity/query?" + query);
     const data = await response.json<any>().catch(() => ({}));
     if (!response.ok) return Response.json(data, { status: response.status });
-    if (query.get("state") === "history") return Response.json(data);
+    const state = await registryState(env);
+    const agentNames = new Map((state.agents ?? []).map((agent: any) => [agent.id, agent.name]));
+    const enriched = {
+      ...data,
+      items: (data.items ?? []).map((item: any) => ({
+        ...item,
+        ...(item.agentId ? { agentName: agentNames.get(item.agentId) || item.agentId } : {}),
+      })),
+    };
+    if (query.get("state") === "history" || query.get("cursor")) return Response.json(enriched);
     const terminalUserId = adminAuthorized ? (query.get("userId") || undefined) : selfUserId;
     const terminals = await terminalActivity(env, terminalUserId);
-    return Response.json({ ...data, terminals });
+    return Response.json({ ...enriched, terminals });
   }
 
   if (path === "/admin/api/errors" && request.method === "GET") {
     const query = new URLSearchParams();
-    for (const key of ["limit", "tool", "agentId", "userId", "errorClass", "from", "to"]) {
+    for (const key of ["limit", "cursor", "tool", "agentId", "userId", "errorClass", "from", "to"]) {
       const value = url.searchParams.get(key);
       if (value) query.set(key, value);
     }
     const response = await usageStub(env).fetch("https://usage.internal/errors/query?" + query);
-    return new Response(response.body, { status: response.status, headers: response.headers });
+    const data = await response.json<any>().catch(() => ({}));
+    if (!response.ok) return Response.json(data, { status: response.status });
+    const state = await registryState(env);
+    const agentNames = new Map((state.agents ?? []).map((agent: any) => [agent.id, agent.name]));
+    return Response.json({
+      ...data,
+      items: (data.items ?? []).map((item: any) => ({
+        ...item,
+        ...(item.agentId ? { agentName: agentNames.get(item.agentId) || item.agentId } : {}),
+      })),
+    });
   }
 
   if (path === "/admin/api/users" && request.method === "POST") {

@@ -27,6 +27,8 @@ export type UsageEvent = {
   errorClass?: string;
   errorSource?: string;
   errorCode?: string;
+  failureStage?: string;
+  retryable?: boolean;
   statusCode?: number;
   exitCode?: number | null;
   requestBytes: number;
@@ -131,6 +133,85 @@ function percentile95(values: number[]) {
 
 function safePart(value: string) {
   return encodeURIComponent(value.slice(0, 160));
+}
+
+function fallbackActivityId(toolCallId: string) {
+  const clean = toolCallId.replace(/^tc_/, "").replace(/[^a-zA-Z0-9]/g, "");
+  return "call_" + (clean.slice(0, 12) || "unknown");
+}
+
+function normalizeFailureDiagnostics(event: UsageEvent): Pick<UsageEvent, "errorCode" | "failureStage" | "retryable"> {
+  if (event.ok) return {};
+  let errorCode = String(event.errorCode || event.errorClass || "tool_error").toLowerCase().slice(0, 80);
+  let failureStage = "tool";
+
+  if (errorCode === "path_not_allowed" || errorCode === "permission_denied" || errorCode.startsWith("invalid_")) {
+    failureStage = "validation";
+  } else if (errorCode === "rate_limited" || errorCode === "quota_exceeded" || event.statusCode === 429) {
+    failureStage = "policy";
+  } else if (event.exitCode !== null && event.exitCode !== undefined && Number(event.exitCode) !== 0) {
+    failureStage = "process";
+    if (!errorCode || errorCode === "tool_error") errorCode = "process_exit_nonzero";
+  } else if (String(event.errorSource || "").toLowerCase() === "worker") {
+    failureStage = "worker";
+  } else if (String(event.errorSource || "").toLowerCase() === "relay") {
+    failureStage = "relay";
+  } else if (String(event.errorSource || "").toLowerCase() === "agent") {
+    failureStage = "agent";
+  }
+
+  if (/timeout|timed_out/.test(errorCode)) failureStage = "timeout";
+  if (/agent_(offline|stale|unavailable)|http_5\d\d/.test(errorCode)) failureStage = "relay";
+
+  const retryable =
+    event.statusCode === 429 ||
+    Number(event.statusCode || 0) >= 500 ||
+    failureStage === "timeout" ||
+    failureStage === "relay" ||
+    /temporar|busy|rate_limited/.test(errorCode);
+
+  return { errorCode, failureStage, retryable };
+}
+
+type ActivityCursor = { timestamp: string; id: string };
+
+function activityTimestamp(event: any) {
+  return String(event.timestamp || event.startedAt || "");
+}
+
+function activityStableId(event: any) {
+  return String(event.toolCallId || event.activityId || [event.userId, event.tool, event.agentId || "", activityTimestamp(event)].join(":"));
+}
+
+function sortActivityDesc(a: any, b: any) {
+  const time = Date.parse(activityTimestamp(b)) - Date.parse(activityTimestamp(a));
+  if (time) return time;
+  return activityStableId(b).localeCompare(activityStableId(a));
+}
+
+function encodeActivityCursor(event: any) {
+  const raw = JSON.stringify({ timestamp: activityTimestamp(event), id: activityStableId(event) } satisfies ActivityCursor);
+  return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeActivityCursor(value: string | null): ActivityCursor | null {
+  if (!value || value.length > 512) return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+    const parsed = JSON.parse(atob(padded));
+    if (typeof parsed?.timestamp !== "string" || typeof parsed?.id !== "string" || !Number.isFinite(Date.parse(parsed.timestamp))) return null;
+    return { timestamp: parsed.timestamp, id: parsed.id.slice(0, 200) };
+  } catch {
+    return null;
+  }
+}
+
+function olderThanCursor(event: any, cursor: ActivityCursor) {
+  const eventTime = Date.parse(activityTimestamp(event));
+  const cursorTime = Date.parse(cursor.timestamp);
+  if (eventTime !== cursorTime) return eventTime < cursorTime;
+  return activityStableId(event).localeCompare(cursor.id) < 0;
 }
 
 function nextUtcDay(nowMs: number) {
@@ -292,7 +373,7 @@ export class Usage extends DurableObject {
         toolCallId,
         startedAt,
         ...(body?.agentId ? { agentId: String(body.agentId).slice(0, 128) } : {}),
-        ...(body?.activityId ? { activityId: String(body.activityId).slice(0, 96) } : {}),
+        activityId: body?.activityId ? String(body.activityId).slice(0, 96) : fallbackActivityId(toolCallId),
       };
       await this.ctx.storage.put("active:" + safePart(toolCallId), event);
       this.ctx.waitUntil(publishDashboard(this.usageEnv, ["calls"], event.userId));
@@ -309,7 +390,11 @@ export class Usage extends DurableObject {
         tool: String(body.tool).slice(0, 160),
         ...(body.agentId ? { agentId: String(body.agentId).slice(0, 128) } : {}),
         ...(body.toolCallId ? { toolCallId: String(body.toolCallId).slice(0, 96) } : {}),
-        ...(body.activityId ? { activityId: String(body.activityId).slice(0, 96) } : {}),
+        ...(body.activityId
+          ? { activityId: String(body.activityId).slice(0, 96) }
+          : body.toolCallId
+            ? { activityId: fallbackActivityId(String(body.toolCallId).slice(0, 96)) }
+            : {}),
         ...(body.startedAt ? { startedAt: String(body.startedAt) } : {}),
         timestamp: String(body.timestamp),
         durationMs: Number(body.durationMs) || 0,
@@ -322,6 +407,7 @@ export class Usage extends DurableObject {
         requestBytes: Number(body.requestBytes) || 0,
         responseBytes: Number(body.responseBytes) || 0,
       };
+      if (!event.ok) Object.assign(event, normalizeFailureDiagnostics(event));
       const day = event.timestamp.slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
         return Response.json({ error: "invalid_usage_timestamp" }, { status: 400 });
@@ -471,7 +557,10 @@ export class Usage extends DurableObject {
     if (url.pathname === "/activity/query" && request.method === "GET") {
       const requestedState = url.searchParams.get("state") || "all";
       const state = requestedState === "active" || requestedState === "history" ? requestedState : "all";
-      const limit = boundedInt(url.searchParams.get("limit"), 100, 1, 500);
+      const limit = boundedInt(url.searchParams.get("limit"), 50, 1, 100);
+      const cursorValue = url.searchParams.get("cursor");
+      const cursor = decodeActivityCursor(cursorValue);
+      if (cursorValue && !cursor) return Response.json({ error: "invalid_cursor" }, { status: 400 });
       const userId = url.searchParams.get("userId");
       const tool = url.searchParams.get("tool");
       const agentId = url.searchParams.get("agentId");
@@ -492,7 +581,7 @@ export class Usage extends DurableObject {
       const activeRecords = state === "history"
         ? new Map<string, ActiveUsageEvent>()
         : await this.ctx.storage.list<ActiveUsageEvent>({ prefix: "active:", limit: 1000 });
-      const activeCutoffMs = Date.now() - 5 * 60 * 1000;
+      const activeCutoffMs = Date.now() - 60 * 60 * 1000;
       const staleKeys: string[] = [];
       const activeItems = [...activeRecords.entries()]
         .filter(([key, event]) => {
@@ -500,7 +589,12 @@ export class Usage extends DurableObject {
           if (!fresh) staleKeys.push(key);
           return fresh && matches(event);
         })
-        .map(([, event]) => ({ ...event, timestamp: event.startedAt, status: "running" as const }));
+        .map(([, event]) => ({
+          ...event,
+          activityId: event.activityId || fallbackActivityId(event.toolCallId),
+          timestamp: event.startedAt,
+          status: "running" as const,
+        }));
       if (staleKeys.length) await this.ctx.storage.delete(staleKeys);
 
       let historyEvents: UsageEvent[] = [];
@@ -518,21 +612,39 @@ export class Usage extends DurableObject {
       }
       const historyItems = historyEvents
         .filter(matches)
-        .map((event) => ({ ...event, status: event.ok ? "success" as const : "error" as const }));
+        .map((event) => ({
+          ...event,
+          ...(event.activityId ? {} : event.toolCallId ? { activityId: fallbackActivityId(event.toolCallId) } : {}),
+          status: event.ok ? "success" as const : "error" as const,
+        }));
 
-      const combined = [
+      const matched = [
         ...(state === "history" ? [] : activeItems),
         ...(state === "active" ? [] : historyItems),
       ]
         .filter((event: any) => !status || event.status === status)
-        .sort((a: any, b: any) => Date.parse(b.timestamp || b.startedAt || "") - Date.parse(a.timestamp || a.startedAt || ""))
-        .slice(0, limit);
+        .sort(sortActivityDesc);
+      const cursorFiltered = cursor ? matched.filter((event: any) => olderThanCursor(event, cursor)) : matched;
+      const pageItems = cursorFiltered.slice(0, limit);
+      const hasMore = cursorFiltered.length > limit;
+      const nextCursor = hasMore && pageItems.length ? encodeActivityCursor(pageItems[pageItems.length - 1]) : null;
 
-      return Response.json({ state, items: combined, total: combined.length, bounded });
+      return Response.json({
+        state,
+        items: pageItems,
+        pageSize: pageItems.length,
+        matchedTotal: matched.length,
+        hasMore,
+        nextCursor,
+        bounded,
+      });
     }
 
     if (url.pathname === "/errors/query" && request.method === "GET") {
-      const limit = boundedInt(url.searchParams.get("limit"), 100, 1, 500);
+      const limit = boundedInt(url.searchParams.get("limit"), 50, 1, 100);
+      const cursorValue = url.searchParams.get("cursor");
+      const cursor = decodeActivityCursor(cursorValue);
+      if (cursorValue && !cursor) return Response.json({ error: "invalid_cursor" }, { status: 400 });
       const userId = url.searchParams.get("userId");
       const tool = url.searchParams.get("tool");
       const agentId = url.searchParams.get("agentId");
@@ -552,16 +664,18 @@ export class Usage extends DurableObject {
         bounded = records.size >= 1000;
       }
 
-      const items = events.filter((event) => {
+      const matched = events.filter((event) => {
         const when = Date.parse(event.timestamp);
         return !event.ok && (!userId || event.userId === userId) &&
           (!tool || event.tool === tool) && (!agentId || event.agentId === agentId) &&
           (!errorClass || event.errorClass === errorClass) &&
           (!Number.isFinite(fromMs) || when >= fromMs) && (!Number.isFinite(toMs) || when <= toMs);
-      })
-        .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
-        .slice(0, limit);
-      return Response.json({ items, total: items.length, bounded });
+      }).sort(sortActivityDesc);
+      const cursorFiltered = cursor ? matched.filter((event) => olderThanCursor(event, cursor)) : matched;
+      const items = cursorFiltered.slice(0, limit);
+      const hasMore = cursorFiltered.length > limit;
+      const nextCursor = hasMore && items.length ? encodeActivityCursor(items[items.length - 1]) : null;
+      return Response.json({ items, pageSize: items.length, matchedTotal: matched.length, hasMore, nextCursor, bounded });
     }
 
     if (url.pathname === "/query" && request.method === "GET") {
