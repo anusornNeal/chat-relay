@@ -1,6 +1,6 @@
 import { clearConfig, configPath, loadConfig, saveConfig } from "./config.mjs";
 import { login, requestJson } from "./device-login.mjs";
-import { remote, validateConfig } from "./remote.mjs";
+import { protocolCompatibility, remote, validateConfig } from "./remote.mjs";
 
 function parseOptions(args) {
   const options = {};
@@ -31,6 +31,9 @@ Usage:
   chat-relay remote [options]   Connect this computer to ChatGPT
   chat-relay login [options]    Sign in and register this computer
   chat-relay status             Show account and connection status
+  chat-relay drain              Stop accepting new long-running work
+  chat-relay resume             Resume normal work admission
+  chat-relay restart            Restart after drain completes
   chat-relay logout             Revoke this computer login
   chat-relay help               Show this help
 
@@ -124,6 +127,15 @@ async function status() {
       "Scopes:   " +
       (Array.isArray(agentStatus.data.scopes) ? agentStatus.data.scopes.join(",") : "-"),
     );
+    const connection = agentStatus.data.connection || {};
+    const compatibility = protocolCompatibility(connection.protocolVersion, agentStatus.data.expectedProtocolVersion);
+    console.log("Version:  " + (connection.agentVersion || "-"));
+    console.log(`Protocol: ${connection.protocolVersion ?? "?"}/${agentStatus.data.expectedProtocolVersion ?? "?"} (${compatibility})`);
+    if (agentStatus.data.lifecycle) {
+      const lifecycle = agentStatus.data.lifecycle;
+      console.log("Lifecycle: " + lifecycle.state + (lifecycle.readyToRestart ? " (ready to restart)" : ""));
+      if (lifecycle.work?.total) console.log("ActiveWork: " + lifecycle.work.total);
+    }
   }
   console.log("Files:   " + config.allowedRoots);
   console.log("Desktop: " + (config.desktopEnabled === true ? "enabled" : "disabled"));
@@ -139,6 +151,31 @@ async function status() {
   }
   return 0;
 }
+async function lifecycleAction(action) {
+  const config = loadConfig();
+  if (!config) {
+    console.error("Chat Relay: not signed in");
+    return 1;
+  }
+  const result = await requestJson(config.relayUrl + "/relay?agentId=" + encodeURIComponent(config.agentId), {
+    method: "POST",
+    headers: { authorization: "Bearer " + config.userToken, "content-type": "application/json" },
+    body: JSON.stringify({ payload: { action: "agent.lifecycle." + action } }),
+  }).catch((error) => ({ response: { ok: false, status: 0 }, data: { error: error.message } }));
+  if (!result.response.ok) {
+    console.error("Lifecycle action failed: " + (result.data?.error || ("HTTP " + result.response.status)));
+    return 1;
+  }
+  const payload = result.data?.payload || result.data;
+  if (payload?.ok === false) {
+    console.error("Lifecycle action rejected: " + (payload.error || "unknown_error"));
+    if (payload.lifecycle?.work?.total) console.error("Active work remaining: " + payload.lifecycle.work.total);
+    return 1;
+  }
+  console.log("Agent lifecycle: " + (payload?.lifecycle?.state || "unknown"));
+  return 0;
+}
+
 async function logout() {
   const config = loadConfig();
   if (!config) {
@@ -190,6 +227,9 @@ export async function runCli(argv = process.argv.slice(2)) {
 
   if (command === "logout") return logout();
   if (command === "status") return status();
+  if (command === "drain") return lifecycleAction("drain");
+  if (command === "resume") return lifecycleAction("resume");
+  if (command === "restart") return lifecycleAction("restart");
   if (command === "remote") {
     await remote(options);
     return 0;

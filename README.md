@@ -325,3 +325,12 @@ The first registry publish still requires npm authorization for the @anusornneal
 npx @anusornneal/chat-relay@latest status
 npx @anusornneal/chat-relay@latest remote
 ```
+
+
+### Safe local-agent restart
+
+Agent updates remain explicit and user-controlled. Check the current agent version, protocol compatibility, and lifecycle with `chat-relay status`.
+
+Before restarting an active remote, run `chat-relay drain`. Drain mode rejects new long-running work while existing terminal/session control remains available so bounded work can finish or be stopped safely. When `status` reports the lifecycle is ready to restart, run `chat-relay restart`. Use `chat-relay resume` to cancel a drain before restart.
+
+To install a newer package, stop/restart the wrapper with the desired npm version (for example `npx @anusornneal/chat-relay@latest remote --desktop`). The agent does not self-modify or automatically cross an incompatible protocol version.

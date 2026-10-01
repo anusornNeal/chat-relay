@@ -1,5 +1,6 @@
 import { AgentConnectionState, computeReconnectDelay } from "../agent/connection-state.mjs";
-import { shouldRestartAgent } from "../cli/remote.mjs";
+import { protocolCompatibility, shouldRestartAgent } from "../cli/remote.mjs";
+import { AgentLifecycle } from "../agent/lifecycle.mjs";
 
 function connectionStateTests() {
   const options = { baseMs: 1000, maxMs: 4000, jitterRatio: 0.2, random: () => 0.5 };
@@ -24,11 +25,36 @@ function connectionStateTests() {
   if (state.snapshot().state !== "reauthorization-required") throw new Error("reauthorization state failed");
 
   if (shouldRestartAgent({ code: 2 }) !== false) throw new Error("reauthorization restart loop guard failed");
+  if (shouldRestartAgent({ code: 3 }) !== false) throw new Error("protocol mismatch restart loop guard failed");
+  if (shouldRestartAgent({ code: 4 }) !== true) throw new Error("explicit restart exit code failed");
+  if (protocolCompatibility(1, 1) !== "compatible" || protocolCompatibility(1, 2) !== "incompatible" || protocolCompatibility(null, 1) !== "unknown") throw new Error("protocol compatibility notice failed");
   if (shouldRestartAgent({ code: 1 }) !== true) throw new Error("crash restart policy failed");
   if (shouldRestartAgent({ code: 1 }, true) !== false) throw new Error("intentional stop restart guard failed");
 }
 
+function lifecycleTests() {
+  let activeSessions = 1;
+  const lifecycle = new AgentLifecycle({
+    now: () => 1000,
+    workSummary: () => ({ activeSessions }),
+  });
+  const drained = lifecycle.drain();
+  if (drained.lifecycle.state !== "draining") throw new Error("drain state failed");
+  if (!lifecycle.guard("terminal.start")?.error?.includes("agent_draining")) throw new Error("drain admission failed");
+  if (lifecycle.guard("terminal.read") !== null) throw new Error("existing terminal control blocked during drain");
+  if (lifecycle.requestRestart().error !== "active_work_remaining") throw new Error("active work restart guard failed");
+  activeSessions = 0;
+  if (!lifecycle.snapshot().readyToRestart) throw new Error("drain readiness failed");
+  if (!lifecycle.requestRestart().ok || lifecycle.snapshot().state !== "restart-pending") throw new Error("graceful restart request failed");
+  if (lifecycle.resume().error !== "restart_pending") throw new Error("restart pending resume guard failed");
+
+  const recovery = new AgentLifecycle();
+  recovery.drain();
+  if (!recovery.resume().ok || recovery.snapshot().state !== "running") throw new Error("failed update recovery resume failed");
+}
+
 connectionStateTests();
+lifecycleTests();
 
 import { CapabilityScheduler } from "../agent/capability-scheduler.mjs";
 

@@ -6,6 +6,7 @@ import { TerminalManager } from "./terminal-manager.mjs";
 import { CapabilityScheduler } from "./capability-scheduler.mjs";
 import { AgentConnectionState } from "./connection-state.mjs";
 import { buildAgentHello } from "./protocol.mjs";
+import { AgentLifecycle, AGENT_RESTART_EXIT_CODE } from "./lifecycle.mjs";
 
 const relayUrl = process.env.RELAY_URL;
 const agentToken = process.env.AGENT_TOKEN;
@@ -54,6 +55,20 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let stopping = false;
 
+function currentWorkSummary() {
+  const terminal = terminals.observability();
+  const terminalExec = scheduler.snapshot().terminalExec || {};
+  return {
+    activeSessions: terminal.sessions.filter((item) => item.status === "running").length,
+    activeBatchJobs: terminal.activeExecJobs,
+    queuedBatchJobs: terminal.queuedJobs,
+    activeTerminalExecs: terminalExec.active,
+    queuedTerminalExecs: terminalExec.queued,
+  };
+}
+
+const lifecycle = new AgentLifecycle({ workSummary: currentWorkSummary });
+
 if (!relayUrl || !agentToken) {
   console.error("RELAY_URL and AGENT_TOKEN are required");
   process.exit(1);
@@ -77,8 +92,11 @@ function serializeResponse(requestId, payload) {
 
 async function handlePayload(payload) {
   if (!payload || typeof payload !== "object") return payload;
+  const action = String(payload.action ?? "");
+  const lifecycleGate = lifecycle.guard(action);
+  if (lifecycleGate) return lifecycleGate;
 
-  switch (payload.action) {
+  switch (action) {
     case "ping":
       return { ok: true, action: "pong", at: new Date().toISOString(), agentId, agentName };
 
@@ -93,6 +111,7 @@ async function handlePayload(payload) {
         allowedRoots: files.getRoots(),
         reconnectMs: connectionState.baseReconnectMs,
         connection: { ...connectionState.snapshot(), processId: process.pid },
+        lifecycle: lifecycle.snapshot(),
         terminalContinuity: {
           processId: process.pid,
           activeSessions: terminals.list().filter((session) => session.status === "running").length,
@@ -107,6 +126,17 @@ async function handlePayload(payload) {
       });
     case "agent.recentCalls":
       return recentCalls.slice(-(Math.min(Math.max(Number(payload.limit) || 50, 1), 100)));
+    case "agent.lifecycle.status":
+      return { ok: true, lifecycle: lifecycle.snapshot() };
+    case "agent.lifecycle.drain":
+      return lifecycle.drain();
+    case "agent.lifecycle.resume":
+      return lifecycle.resume();
+    case "agent.lifecycle.restart": {
+      const result = lifecycle.requestRestart();
+      if (result.ok) setTimeout(restartAgentProcess, 150);
+      return result;
+    }
 
     case "fs.stat":
       return files.stat(payload.path);
@@ -221,6 +251,7 @@ function sendHeartbeat(socket) {
       agentId,
       processId: process.pid,
       heartbeatMs: connectionState.heartbeatMs,
+      lifecycle: lifecycle.snapshot(),
     }));
     connectionState.markHeartbeat(now);
   } catch {}
@@ -383,6 +414,19 @@ function connect() {
       console.error("WebSocket error:", error.message);
     }
   });
+}
+
+function restartAgentProcess() {
+  if (stopping) return;
+  stopping = true;
+  connectionState.markStopping("restart_requested");
+  clearReconnectTimer();
+  stopHeartbeat();
+  const socket = activeSocket;
+  activeSocket = null;
+  try { socket?.close(1012, "restart_requested"); } catch {}
+  desktop.close();
+  setTimeout(() => process.exit(AGENT_RESTART_EXIT_CODE), 50);
 }
 
 function shutdown(reason) {

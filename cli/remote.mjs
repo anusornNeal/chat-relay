@@ -11,6 +11,12 @@ export function shouldRestartAgent(result, stoppingNow = false) {
   return !stoppingNow && result?.code !== 2 && result?.code !== 3;
 }
 
+export function protocolCompatibility(agentProtocolVersion, expectedProtocolVersion) {
+  if (agentProtocolVersion === null || agentProtocolVersion === undefined || expectedProtocolVersion === null || expectedProtocolVersion === undefined) return "unknown";
+  if (!Number.isInteger(Number(agentProtocolVersion)) || !Number.isInteger(Number(expectedProtocolVersion))) return "unknown";
+  return Number(agentProtocolVersion) === Number(expectedProtocolVersion) ? "compatible" : "incompatible";
+}
+
 function terminateChildTree(child) {
   if (child.killed) return;
   if (process.platform === "win32" && child.pid) {
@@ -114,6 +120,11 @@ export async function remote(options = {}) {
       stopping = true;
       console.error("Agent protocol is incompatible with the relay. Update Chat Relay, then run chat-relay remote again.");
       break;
+    }
+
+    if (result.code === 4) {
+      console.log("Agent restart requested. Restarting local agent...");
+      continue;
     }
 
     if (shouldRestartAgent(result, stopping)) {

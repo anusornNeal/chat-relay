@@ -49,6 +49,7 @@ type AgentSocketAttachment = {
   platform?: string;
   arch?: string;
   capabilities?: string[];
+  lifecycle?: { state: string; drainStartedAt: string | null; restartRequestedAt: string | null; readyToRestart?: boolean; work: Record<string, number> };
 };
 
 const DEFAULT_AGENT_HEARTBEAT_TTL_MS = 45_000;
@@ -89,6 +90,26 @@ function normalizeAgentHello(message: any) {
 }
 
 
+function normalizeAgentLifecycle(value: any) {
+  const state = ["running", "draining", "restart-pending"].includes(String(value?.state)) ? String(value.state) : "running";
+  const work = value?.work && typeof value.work === "object" ? value.work : {};
+  const count = (key: string) => Math.max(0, Number(work[key]) || 0);
+  return {
+    state,
+    drainStartedAt: normalizeAgentText(value?.drainStartedAt, 64),
+    restartRequestedAt: normalizeAgentText(value?.restartRequestedAt, 64),
+    readyToRestart: value?.readyToRestart === true,
+    work: {
+      activeSessions: count("activeSessions"),
+      activeBatchJobs: count("activeBatchJobs"),
+      queuedBatchJobs: count("queuedBatchJobs"),
+      activeTerminalExecs: count("activeTerminalExecs"),
+      queuedTerminalExecs: count("queuedTerminalExecs"),
+      total: count("total"),
+    },
+  };
+}
+
 function readAgentAttachment(socket: WebSocket | null): AgentSocketAttachment {
   if (!socket) return {};
   try {
@@ -122,6 +143,7 @@ function agentLiveness(socket: WebSocket | null) {
       platform: null,
       arch: null,
       capabilities: [],
+      lifecycle: null,
     };
   }
   const attachment = readAgentAttachment(socket);
@@ -148,6 +170,7 @@ function agentLiveness(socket: WebSocket | null) {
     platform: attachment.platform ?? null,
     arch: attachment.arch ?? null,
     capabilities: Array.isArray(attachment.capabilities) ? attachment.capabilities : [],
+    lifecycle: attachment.lifecycle ?? null,
   };
 }
 
@@ -463,6 +486,7 @@ export class Relay extends DurableObject {
         heartbeatEnabled: true,
         heartbeatMs: Number((message as any).heartbeatMs),
         processId: Number((message as any).processId),
+        lifecycle: normalizeAgentLifecycle((message as any).lifecycle),
       });
       return;
     }
@@ -849,6 +873,7 @@ function scopeForAction(action: string): Scope {
       action.startsWith("fs.mkdir") || action.startsWith("fs.move") ||
       action.startsWith("fs.delete")) return "write";
   if (action.startsWith("terminal.")) return "terminal";
+  if (["agent.lifecycle.drain", "agent.lifecycle.resume", "agent.lifecycle.restart"].includes(action)) return "process";
   if (action === "process.kill" || action === "process.list") return "process";
   if (action === "desktop.screenshot") return "desktop_read";
   if (action === "desktop.mouse.click" || action === "desktop.keyboard.input" || action === "desktop.step") return "desktop_control";
@@ -1913,14 +1938,14 @@ export default {
         return Response.json(access.data, { status: access.response.status });
       }
 
-      let online = false;
+      let relayStatus: any = { online: false };
       if (access.data.authorized) {
         const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
-        const relayStatus = await stub.fetch("https://relay.internal/status")
+        relayStatus = await stub.fetch("https://relay.internal/status")
           .then((response) => response.json<any>())
           .catch(() => ({ online: false }));
-        online = Boolean(relayStatus.online);
       }
+      const online = Boolean(relayStatus.online);
 
       return Response.json({
         agentId,
@@ -1933,6 +1958,9 @@ export default {
         authorized: access.data.authorized === true,
         reauthorizationRequired: access.data.reauthorizationRequired === true,
         online,
+        connection: relayStatus,
+        lifecycle: relayStatus.lifecycle ?? null,
+        expectedProtocolVersion: AGENT_PROTOCOL_VERSION,
       });
     }
     if (path === "/relay") {
