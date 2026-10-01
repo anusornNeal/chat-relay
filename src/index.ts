@@ -1349,6 +1349,9 @@ export default {
       return stub.fetch("https://relay.internal/temp-shot/" + token);
     }
 
+    if ((path === "/" || path === "/admin") && env.ASSETS) {
+      return Response.redirect(url.origin + "/dashboard/", 302);
+    }
     if (path === "/dashboard" && env.ASSETS) {
       return Response.redirect(url.origin + "/dashboard/", 302);
     }
