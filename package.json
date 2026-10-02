@@ -30,6 +30,7 @@
         "agent": "node --env-file-if-exists=.dev.vars agent/local-agent.mjs",
         "admin": "node scripts/admin.mjs",
         "test:terminal": "node test/mcp-terminal-smoke.mjs",
+        "test:stability": "node --experimental-strip-types test/relay-stability-smoke.mjs",
         "test:platform": "node test/platform-smoke.mjs",
         "test:full": "node test/multiuser-smoke.mjs",
         "test:device-auth": "node test/device-auth-smoke.mjs",
