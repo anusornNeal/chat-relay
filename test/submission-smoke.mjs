@@ -83,6 +83,15 @@ for (const tool of tools) {
       throw new Error("missing " + key + " for tool " + tool.name);
     }
   }
+  const securitySchemes = tool.securitySchemes || tool._meta?.securitySchemes || [];
+  if (!securitySchemes.some((scheme) =>
+    scheme?.type === "oauth2" &&
+    Array.isArray(scheme.scopes) &&
+    scheme.scopes.includes("mcp") &&
+    scheme.scopes.includes("offline_access")
+  )) {
+    throw new Error("missing OAuth security metadata for tool " + tool.name);
+  }
 }
 
 const byName = new Map(tools.map((tool) => [tool.name, tool.annotations]));
