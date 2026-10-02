@@ -44,7 +44,25 @@ export class Relay extends DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.relayEnv = env;
-    this.agent = ctx.getWebSockets().at(-1) ?? null;
+    this.agent = this.recoverAgentSocket();
+  }
+
+  private recoverAgentSocket(): WebSocket | null {
+    const sockets = this.ctx.getWebSockets();
+    if (sockets.length === 0) return null;
+    return sockets.reduce((latest, socket) => {
+      const latestAttachment = readAgentAttachment(latest);
+      const socketAttachment = readAgentAttachment(socket);
+      const latestAt = Number(latestAttachment.lastSeenAt ?? latestAttachment.connectedAt ?? 0);
+      const socketAt = Number(socketAttachment.lastSeenAt ?? socketAttachment.connectedAt ?? 0);
+      return socketAt >= latestAt ? socket : latest;
+    });
+  }
+
+  private resolveAgent(): WebSocket | null {
+    if (this.agent) return this.agent;
+    this.agent = this.recoverAgentSocket();
+    return this.agent;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -57,7 +75,7 @@ export class Relay extends DurableObject {
     }
     switch (path) {
       case "/agent": return this.connectAgent(request);
-      case "/status": return Response.json(agentLiveness(this.agent));
+      case "/status": return Response.json(agentLiveness(this.resolveAgent()));
       case "/disconnect": return this.disconnectAgent();
       case "/relay": return this.relay(request);
       case "/temp-shot": return this.storeTempShot(request);
@@ -209,8 +227,9 @@ export class Relay extends DurableObject {
     const client = pair[0];
     const server = pair[1];
 
-    if (this.agent) {
-      this.agent.close(1000, "replaced");
+    const existingAgent = this.resolveAgent();
+    if (existingAgent) {
+      existingAgent.close(1000, "replaced");
       this.failPending(503, "agent_disconnected");
     }
 
@@ -223,8 +242,9 @@ export class Relay extends DurableObject {
   }
 
   private disconnectAgent(): Response {
+    const resolvedAgent = this.resolveAgent();
     const sockets = [...new Set([
-      ...(this.agent ? [this.agent] : []),
+      ...(resolvedAgent ? [resolvedAgent] : []),
       ...this.ctx.getWebSockets(),
     ])];
     this.agent = null;
@@ -309,6 +329,9 @@ export class Relay extends DurableObject {
         lifecycle: normalizeAgentLifecycle((message as any).lifecycle),
         health: normalizeAgentHealth((message as any).health),
       });
+      try {
+        socket.send(JSON.stringify({ control: "agent_heartbeat_ack", at: Date.now() }));
+      } catch {}
       return;
     }
     if (readAgentAttachment(socket).heartbeatEnabled === true) {
@@ -358,10 +381,11 @@ export class Relay extends DurableObject {
   private async relay(request: Request): Promise<Response> {
     const body: unknown = await request.json();
     if (!hasPayload(body)) return error(400, "payload_required");
-    if (!this.agent) return error(503, "agent_offline");
-    const liveness = agentLiveness(this.agent);
+    const currentAgent = this.resolveAgent();
+    if (!currentAgent) return error(503, "agent_offline");
+    const liveness = agentLiveness(currentAgent);
     if (liveness.stale) {
-      const staleAgent = this.agent;
+      const staleAgent = currentAgent;
       this.agent = null;
       try { staleAgent.close(4000, "heartbeat_timeout"); } catch {}
       this.failPending(503, "agent_stale");
@@ -370,7 +394,7 @@ export class Relay extends DurableObject {
     }
 
     const requestId = crypto.randomUUID();
-    const agent = this.agent;
+    const agent = currentAgent;
 
     return new Promise<Response>((resolve) => {
       const timeout = setTimeout(() => {

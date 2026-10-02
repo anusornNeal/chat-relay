@@ -68,12 +68,14 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let transportHeartbeatTimer = null;
 let transportPongDeadlineTimer = null;
+let lastHeartbeatAckAt = 0;
 let stopping = false;
 
 const TRANSPORT_PING_MS = Math.max(5000, Math.min(Number(process.env.AGENT_TRANSPORT_PING_MS) || 20000, 60000));
 const TRANSPORT_PONG_TIMEOUT_MS = Math.max(3000, Math.min(Number(process.env.AGENT_TRANSPORT_PONG_TIMEOUT_MS) || 8000, 30000));
 const FAST_RECONNECT_MS = Math.max(100, Math.min(Number(process.env.AGENT_FAST_RECONNECT_MS) || 250, 5000));
 const FAST_RECONNECT_STABLE_MS = Math.max(5000, Math.min(Number(process.env.AGENT_FAST_RECONNECT_STABLE_MS) || 30000, 300000));
+const HEARTBEAT_ACK_TIMEOUT_MS = Math.max(15000, Math.min(Number(process.env.AGENT_HEARTBEAT_ACK_TIMEOUT_MS) || 45000, 180000));
 
 function currentWorkSummary() {
   const terminal = terminals.observability();
@@ -294,6 +296,11 @@ function sendTransportPing(socket) {
 function sendHeartbeat(socket) {
   if (socket !== activeSocket || socket.readyState !== WebSocket.OPEN) return;
   const now = Date.now();
+  if (lastHeartbeatAckAt > 0 && now - lastHeartbeatAckAt > HEARTBEAT_ACK_TIMEOUT_MS) {
+    connectionState.markSocketError("heartbeat_ack_timeout");
+    try { socket.terminate(); } catch {}
+    return;
+  }
   try {
     socket.send(JSON.stringify({
       control: "agent_heartbeat",
@@ -400,6 +407,7 @@ function connect() {
     if (socket !== activeSocket) return;
     socket.send(JSON.stringify(agentHello));
     connectionState.markConnected();
+    lastHeartbeatAckAt = Date.now();
     startHeartbeat(socket);
     console.log("Agent connected");
   });
@@ -421,6 +429,10 @@ function connect() {
       return;
     }
 
+    if (message?.control === "agent_heartbeat_ack") {
+      lastHeartbeatAckAt = Date.now();
+      return;
+    }
     if (message?.control === "credential_revoked") {
       requireReauthorization("credential_revoked");
       return;
