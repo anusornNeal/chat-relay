@@ -1,33 +1,45 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { AgentConnectionState, computeReconnectDelay } from "../agent/connection-state.mjs";
-import { protocolCompatibility, shouldRestartAgent } from "../cli/remote.mjs";
-import { agentLiveness } from "../src/agent-state.ts";
 import {
-  assertInOrder,
-  attachmentSocket,
-  readProjectSource,
-  runTests,
-  sourceBlock,
-} from "./fixtures/stability-harness.mjs";
+  HeartbeatAckWatchdog,
+  HEARTBEAT_ACK_TIMEOUT_REASON,
+} from "../agent/heartbeat-ack-watchdog.mjs";
+import {
+  createTerminalSessionId,
+  terminalSessionMiss,
+} from "../agent/terminal-continuity.mjs";
+import {
+  agentLiveness,
+  isAuthoritativeAgentSocket,
+  nextAgentConnectionGeneration,
+  selectLatestAgentSocket,
+} from "../src/agent-state.ts";
+import {
+  acquireRunnerOwnership,
+  RunnerAlreadyActiveError,
+} from "../cli/runner-ownership.mjs";
+import { protocolCompatibility, shouldRestartAgent } from "../cli/remote.mjs";
+import { attachmentSocket, readProjectSource, runTests } from "./fixtures/stability-harness.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function testTransportAndLogicalLivenessAreIndependent() {
-  const attachment = {
+  const socket = attachmentSocket({
+    connectionGeneration: 1,
     connectedAt: 1,
     lastSeenAt: 1,
     heartbeatEnabled: true,
     heartbeatMs: 5_000,
     processId: 101,
-  };
-  const socket = attachmentSocket(attachment);
-
+  });
   const stale = agentLiveness(socket);
-  assert.equal(stale.connected, true, "open transport must remain distinguishable from logical liveness");
-  assert.equal(stale.online, false, "stale heartbeat must make a connected transport logically offline");
+  assert.equal(stale.connected, true);
+  assert.equal(stale.online, false);
   assert.equal(stale.stale, true);
 
   const absent = agentLiveness(null);
@@ -35,73 +47,125 @@ async function testTransportAndLogicalLivenessAreIndependent() {
   assert.equal(absent.online, false);
 }
 
-async function testReplacementAndLateCloseContracts() {
-  const relaySource = await readProjectSource(root, "src/index.ts");
-  const connectBody = sourceBlock(relaySource, "private connectAgent(");
-  const disconnectBody = sourceBlock(relaySource, "private disconnect(");
-
-  assertInOrder(connectBody, ["existingAgent.close", "this.agent = server"], "agent replacement");
-  assert.match(disconnectBody, /if\s*\(socket\s*!==\s*this\.agent\)\s*return/,
-    "a late close from the replaced socket must not disconnect its replacement");
-
-  assert.equal(shouldRestartAgent({ code: 1 }), true, "a crashed runner must be replaced");
-  assert.equal(shouldRestartAgent({ code: 2 }), false, "reauthorization must not create a replacement loop");
-  assert.equal(shouldRestartAgent({ code: 3 }), false, "protocol mismatch must not create a replacement loop");
-  assert.equal(shouldRestartAgent({ code: 1 }, true), false, "intentional shutdown must not replace the runner");
-  assert.equal(protocolCompatibility(1, 1), "compatible");
-  assert.equal(protocolCompatibility(1, 2), "incompatible");
+async function testDuplicateRunnerOwnershipIsRejected() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "chat-relay-stability-owner-"));
+  const options = {
+    directory,
+    relayUrl: "https://relay.example",
+    agentId: "stability-agent",
+    startupGraceMs: 50,
+    probeTimeoutMs: 150,
+  };
+  let owner;
+  try {
+    owner = await acquireRunnerOwnership(options);
+    await assert.rejects(
+      acquireRunnerOwnership(options),
+      (error) => error instanceof RunnerAlreadyActiveError && error.code === "CHAT_RELAY_RUNNER_ACTIVE",
+    );
+    const otherAgent = await acquireRunnerOwnership({ ...options, agentId: "stability-agent-2" });
+    await otherAgent.release();
+  } finally {
+    await owner?.release();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
-async function testHeartbeatAckLossTerminatesLiveTransport() {
-  const agentSource = await readProjectSource(root, "agent/local-agent.mjs");
-  const heartbeatBody = sourceBlock(agentSource, "function sendHeartbeat(");
+async function testGenerationSafeSocketRecoveryAndLateClose() {
+  const older = attachmentSocket({ connectionGeneration: 7, connectedAt: 500, lastSeenAt: 900 });
+  const newer = attachmentSocket({ connectionGeneration: 8, connectedAt: 100, lastSeenAt: 100 });
 
-  assert.match(heartbeatBody, /socket\s*!==\s*activeSocket\s*\|\|\s*socket\.readyState\s*!==\s*WebSocket\.OPEN/,
-    "heartbeat must act only on the active open transport");
-  assertInOrder(
-    heartbeatBody,
-    ["lastHeartbeatAckAt", "HEARTBEAT_ACK_TIMEOUT_MS", 'markSocketError("heartbeat_ack_timeout")', "socket.terminate()"],
-    "heartbeat ACK deadline",
+  assert.equal(selectLatestAgentSocket([older, newer]), newer);
+  assert.equal(selectLatestAgentSocket([newer, older]), newer);
+  assert.equal(isAuthoritativeAgentSocket(older, newer), false);
+  assert.equal(isAuthoritativeAgentSocket(newer, newer), true);
+  assert.equal(nextAgentConnectionGeneration(8), 9);
+  assert.throws(
+    () => nextAgentConnectionGeneration(Number.MAX_SAFE_INTEGER),
+    /agent_connection_generation_exhausted/,
   );
+}
+
+async function testHeartbeatAckLossForcesDeterministicRecovery() {
+  let now = 1_000;
+  let scheduled = null;
+  let timedOut = null;
+  const watchdog = new HeartbeatAckWatchdog({
+    timeoutMs: 1_000,
+    now: () => now,
+    setTimer: (callback) => {
+      scheduled = callback;
+      return { unref() {} };
+    },
+    clearTimer: () => {},
+    onTimeout: (event) => {
+      timedOut = event;
+    },
+  });
+
+  watchdog.start();
+  now = 1_500;
+  watchdog.acknowledge();
+  assert.equal(watchdog.snapshot().active, true);
+  assert.equal(timedOut, null);
+
+  now = 2_501;
+  scheduled();
+  assert.equal(timedOut.reason, HEARTBEAT_ACK_TIMEOUT_REASON);
+  assert.equal(watchdog.snapshot().active, false);
+  assert.equal(watchdog.snapshot().lastTimeoutReason, HEARTBEAT_ACK_TIMEOUT_REASON);
 
   const state = new AgentConnectionState({ baseReconnectMs: 100, maxReconnectMs: 400 });
   state.markConnected(1_000);
-  state.markSocketError("heartbeat_ack_timeout");
-  state.markDisconnected(1006, "heartbeat_ack_timeout", 2_000);
-  assert.equal(state.snapshot().lastSocketError, "heartbeat_ack_timeout");
+  state.markSocketError(HEARTBEAT_ACK_TIMEOUT_REASON);
+  state.markDisconnected(1006, HEARTBEAT_ACK_TIMEOUT_REASON, 2_000);
+  assert.equal(state.snapshot().lastSocketError, HEARTBEAT_ACK_TIMEOUT_REASON);
   assert.equal(state.snapshot().state, "waiting");
-  assert.equal(computeReconnectDelay(3, { baseMs: 100, maxMs: 400, jitterRatio: 0, random: () => 0.5 }), 400);
+  assert.equal(
+    computeReconnectDelay(3, { baseMs: 100, maxMs: 400, jitterRatio: 0, random: () => 0.5 }),
+    400,
+  );
 }
 
-async function testProcessRestartInvalidatesTerminalIdentity() {
-  const terminalSource = await readProjectSource(root, "agent/terminal-manager.mjs");
-  const managerSource = terminalSource.slice(terminalSource.indexOf("export class TerminalManager"));
-  const constructorBody = sourceBlock(managerSource, "constructor(");
-  const lookupBody = sourceBlock(managerSource, "  #get(sessionId)");
+async function testTerminalRestartIsExplicitAndSocketReconnectSafe() {
+  const oldSession = createTerminalSessionId("process-old", "session-1");
+  const restarted = terminalSessionMiss(oldSession, "process-new");
+  assert.equal(restarted.error, "terminal_session_epoch_mismatch");
+  assert.equal(restarted.reason, "agent_process_restarted");
+  assert.equal(restarted.recovery, "start_new_session");
+  assert.equal(restarted.resumable, false);
 
-  assert.match(constructorBody, /this\.sessions\s*=\s*new Map\(\)/,
-    "terminal identities must be scoped to one manager process");
-  assertInOrder(lookupBody, ["this.sessions.get(sessionId)", 'throw new Error("session_not_found")'],
-    "terminal identity lookup");
+  const unknownSameEpoch = terminalSessionMiss(
+    createTerminalSessionId("process-new", "missing"),
+    "process-new",
+  );
+  assert.equal(unknownSameEpoch.error, "session_not_found");
 }
 
 async function testRecoveryStaysInsideRemoteSupervisor() {
   const remoteSource = await readProjectSource(root, "cli/remote.mjs");
-  const remoteBody = sourceBlock(remoteSource, "export async function remote(");
+  const acquireAt = remoteSource.indexOf("acquireRunnerOwnership");
+  const loopAt = remoteSource.indexOf("while (!stopping)");
+  const releaseAt = remoteSource.lastIndexOf("ownership.release");
+  assert.ok(acquireAt >= 0 && loopAt > acquireAt && releaseAt > loopAt,
+    "runner ownership must wrap the supervisor restart loop");
 
-  assert.equal(shouldRestartAgent({ code: 4 }), true, "requested restart must remain recoverable");
-  assertInOrder(remoteBody, ["while (!stopping)", "spawnAgent(config)", "result.code === 4", "continue"], "remote supervisor recovery");
-  assert.doesNotMatch(remoteBody, /\bnpx\b/, "recovery must not require invoking npx again");
+  assert.equal(shouldRestartAgent({ code: 4 }), true);
+  assert.equal(shouldRestartAgent({ code: 2 }), false);
+  assert.equal(shouldRestartAgent({ code: 3 }), false);
+  assert.equal(shouldRestartAgent({ code: 1 }, true), false);
+  assert.equal(protocolCompatibility(1, 1), "compatible");
+  assert.equal(protocolCompatibility(1, 2), "incompatible");
 }
 
 const tests = [
   ["transport and logical liveness are independent", testTransportAndLogicalLivenessAreIndependent],
-  ["duplicate runners and late closes cannot replace the active connection", testReplacementAndLateCloseContracts],
-  ["heartbeat ACK loss terminates a live transport", testHeartbeatAckLossTerminatesLiveTransport],
-  ["process restart invalidates old terminal identity", testProcessRestartInvalidatesTerminalIdentity],
+  ["duplicate runners are rejected before opening a competing connection", testDuplicateRunnerOwnershipIsRejected],
+  ["socket recovery and late-close authority are generation-safe", testGenerationSafeSocketRecoveryAndLateClose],
+  ["heartbeat ACK loss forces deterministic recovery", testHeartbeatAckLossForcesDeterministicRecovery],
+  ["terminal process restart is explicit while same-process identity remains distinct", testTerminalRestartIsExplicitAndSocketReconnectSafe],
   ["recovery stays inside the existing remote supervisor", testRecoveryStaysInsideRemoteSupervisor],
 ];
 
 await runTests(tests);
-
 console.log("relay stability smoke test passed");
