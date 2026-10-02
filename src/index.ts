@@ -83,7 +83,11 @@ export class Relay extends DurableObject {
 
   private async readDiagnostics(): Promise<AgentDiagnostics> {
     await this.diagnosticsWrites;
-    return await this.ctx.storage.get<AgentDiagnostics>(AGENT_DIAGNOSTICS_KEY) ?? emptyAgentDiagnostics();
+    try {
+      return await this.ctx.storage.get<AgentDiagnostics>(AGENT_DIAGNOSTICS_KEY) ?? emptyAgentDiagnostics();
+    } catch {
+      return emptyAgentDiagnostics();
+    }
   }
 
   private queueDiagnosticsUpdate(update: (current: AgentDiagnostics) => AgentDiagnostics): Promise<void> {
@@ -91,9 +95,10 @@ export class Relay extends DurableObject {
       const current = await this.ctx.storage.get<AgentDiagnostics>(AGENT_DIAGNOSTICS_KEY) ?? emptyAgentDiagnostics();
       await this.ctx.storage.put(AGENT_DIAGNOSTICS_KEY, update(current));
     });
-    this.diagnosticsWrites = write.catch(() => {});
-    this.ctx.waitUntil(write);
-    return write;
+    const safeWrite = write.catch(() => {});
+    this.diagnosticsWrites = safeWrite;
+    this.ctx.waitUntil(safeWrite);
+    return safeWrite;
   }
 
   private recordConnectionEvent(type: AgentConnectionEventType, closeCode?: number): Promise<void> {
@@ -272,9 +277,9 @@ export class Relay extends DurableObject {
     if (existingAgent) {
       try { existingAgent.close(1000, "replaced"); } catch {}
       this.failPending(503, "agent_disconnected");
-      await this.recordConnectionEvent("replaced", 1000);
+      this.recordConnectionEvent("replaced", 1000);
     }
-    await this.recordConnectionEvent("accepted");
+    this.recordConnectionEvent("accepted");
     this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents"]));
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -297,7 +302,7 @@ export class Relay extends DurableObject {
       }
     }
     this.failPending(503, "agent_disconnected");
-    if (sockets.length > 0) await this.recordConnectionEvent("revoked", 4001);
+    if (sockets.length > 0) this.recordConnectionEvent("revoked", 4001);
     this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents", "calls"]));
     return Response.json({ ok: true, disconnected: sockets.length });
   }

@@ -18,6 +18,8 @@ export type AgentSocketAttachment = {
     connectedAt: string | null;
     lastDisconnectedAt: string | null;
     lastCloseCode: number | null;
+    lastDisconnectReason: string | null;
+    lastSocketError: string | null;
     lastConnectionDurationMs: number | null;
     queues: Record<string, { concurrency: number; active: number; queued: number; maxQueued: number; queueTimeoutMs: number }>;
   };
@@ -43,7 +45,10 @@ export type AgentDiagnostics = {
     firstSeenAt: string;
     lastSeenAt: string;
     maxReconnectCount: number;
+    lastDisconnectedAt: string | null;
     lastCloseCode: number | null;
+    lastDisconnectReason: string | null;
+    lastSocketError: string | null;
     lastConnectionDurationMs: number | null;
   }>;
 };
@@ -61,6 +66,24 @@ function safeIsoTimestamp(value: unknown): string | null {
 function boundedInteger(value: unknown, max: number): number {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(Math.max(0, Math.trunc(number)), max) : 0;
+}
+
+const SAFE_AGENT_DIAGNOSTIC_REASONS = new Set([
+  "heartbeat_ack_timeout", "transport_pong_timeout", "transport_ping_failed", "socket_closed",
+  "credential_revoked", "credential_rejected", "protocol_incompatible", "restart_requested",
+  "client_shutdown", "replaced", "heartbeat_timeout", "shutdown", "SIGINT", "SIGTERM",
+]);
+const SAFE_NETWORK_ERROR_CODES = ["ENOTFOUND", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"];
+
+export function normalizeAgentDiagnosticReason(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const reason = value.trim();
+  if (!reason) return null;
+  if (SAFE_AGENT_DIAGNOSTIC_REASONS.has(reason)) return reason;
+  for (const code of SAFE_NETWORK_ERROR_CODES) {
+    if (reason.includes(code)) return code;
+  }
+  return null;
 }
 
 export function appendAgentConnectionEvent(
@@ -103,6 +126,9 @@ export function recordAgentProcessEpoch(
 
   const seenAt = new Date(Number.isFinite(input.seenAt) ? input.seenAt : Date.now()).toISOString();
   const reconnectCount = boundedInteger(health.reconnectCount, 1_000_000);
+  const lastDisconnectedAt = safeIsoTimestamp(health.lastDisconnectedAt);
+  const lastDisconnectReason = normalizeAgentDiagnosticReason(health.lastDisconnectReason);
+  const lastSocketError = normalizeAgentDiagnosticReason(health.lastSocketError);
   const rawCloseCode = Number(health.lastCloseCode);
   const lastCloseCode = Number.isInteger(rawCloseCode) && rawCloseCode >= 0 && rawCloseCode <= 4999 ? rawCloseCode : null;
   const rawDuration = Number(health.lastConnectionDurationMs);
@@ -120,7 +146,10 @@ export function recordAgentProcessEpoch(
     firstSeenAt: previous?.firstSeenAt ?? seenAt,
     lastSeenAt: seenAt,
     maxReconnectCount: Math.max(previous?.maxReconnectCount ?? 0, reconnectCount),
+    lastDisconnectedAt,
     lastCloseCode,
+    lastDisconnectReason,
+    lastSocketError,
     lastConnectionDurationMs,
   });
   return {
@@ -213,6 +242,8 @@ export function normalizeAgentHealth(value: any) {
     connectedAt: normalizeAgentText(value?.connectedAt, 64),
     lastDisconnectedAt: normalizeAgentText(value?.lastDisconnectedAt, 64),
     lastCloseCode: Number.isInteger(closeCode) && closeCode >= 0 && closeCode <= 4999 ? closeCode : null,
+    lastDisconnectReason: normalizeAgentDiagnosticReason(value?.lastDisconnectReason),
+    lastSocketError: normalizeAgentDiagnosticReason(value?.lastSocketError),
     lastConnectionDurationMs: Number.isFinite(duration) && duration >= 0 ? Math.min(Math.trunc(duration), 365 * 24 * 60 * 60 * 1000) : null,
     queues,
   };

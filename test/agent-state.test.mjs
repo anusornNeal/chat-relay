@@ -34,7 +34,7 @@ test("disconnect diagnostics survive process epochs and exclude sensitive input"
   diagnostics = recordAgentProcessEpoch(diagnostics, {
     processId: 202,
     seenAt: 4,
-    health: { processStartedAt: "2026-10-02T00:00:00.000Z", reconnectCount: 1 },
+    health: { processStartedAt: "2026-10-02T00:00:00.000Z", reconnectCount: 1, lastDisconnectedAt: "2026-10-02T00:01:00.000Z", lastDisconnectReason: "socket_closed", lastSocketError: "getaddrinfo ENOTFOUND internal.example" },
   });
 
   assert.equal(diagnostics.processEpochs.length, 2);
@@ -42,13 +42,19 @@ test("disconnect diagnostics survive process epochs and exclude sensitive input"
   assert.equal(diagnostics.totalDisconnected, 1);
   assert.equal(JSON.stringify(diagnostics).includes("secret"), false);
   assert.equal(JSON.stringify(diagnostics).includes("private user content"), false);
+  assert.equal(JSON.stringify(diagnostics).includes("internal.example"), false);
+  assert.equal(diagnostics.processEpochs[1].lastDisconnectReason, "socket_closed");
+  assert.equal(diagnostics.processEpochs[1].lastSocketError, "ENOTFOUND");
+  assert.equal(diagnostics.processEpochs[1].lastDisconnectedAt, "2026-10-02T00:01:00.000Z");
   assert.equal(JSON.stringify(normalizeAgentHealth({
     lastDisconnectReason: "token=secret",
     lastSocketError: "Authorization: Bearer sensitive",
   })).includes("secret"), false);
+  assert.equal(normalizeAgentHealth({ lastSocketError: "connect ECONNRESET 10.0.0.1" }).lastSocketError, "ECONNRESET");
   assert.deepEqual(Object.keys(diagnostics.processEpochs[0]).sort(), [
-    "firstSeenAt", "lastCloseCode", "lastConnectionDurationMs", "lastSeenAt",
-    "maxReconnectCount", "processId", "processStartedAt",
+    "firstSeenAt", "lastCloseCode", "lastConnectionDurationMs", "lastDisconnectReason",
+    "lastDisconnectedAt", "lastSeenAt", "lastSocketError", "maxReconnectCount",
+    "processId", "processStartedAt",
   ]);
 });
 
