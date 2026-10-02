@@ -2,6 +2,7 @@ import { hashToken, newToken, normalizeAgentId } from "./registry";
 import { DEFAULT_QUOTA_POLICY, normalizeQuotaPolicy, type QuotaPolicy } from "./usage";
 import { clearGoogleStateCookie, finishGoogleLogin, googleLoginSuccessPage, startGoogleLogin } from "./google-auth";
 import { completeGoogleConnectorAuthorization } from "./oauth";
+import { completeGoogleDeviceAuthorization } from "./device-auth";
 
 type AdminEnv = {
   REGISTRY: DurableObjectNamespace;
@@ -342,7 +343,21 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const identityData = await identityResponse.json<any>().catch(() => ({}));
     if (!identityResponse.ok || !identityData.user?.id) {
       await recordAudit(env, { kind: "anonymous" }, "admin.google.login", { type: "google_identity" }, "failure", { status: identityResponse.status });
-      return error(identityResponse.status, identityData.error || "google_account_link_failed");
+      const response = error(identityResponse.status, identityData.error || "google_account_link_failed");
+      response.headers.append("set-cookie", clearGoogleStateCookie());
+      return response;
+    }
+
+    const deviceResponse = await completeGoogleDeviceAuthorization(
+      google.continuation,
+      String(identityData.user.id),
+      (registryPath, registryBody) => registryCall(env, registryPath, registryBody),
+    );
+    if (deviceResponse) {
+      await recordAudit(env, { kind: "user", userId: String(identityData.user.id) }, "device.google.authorize",
+        { type: "user", id: String(identityData.user.id) }, deviceResponse.ok ? "success" : "failure",
+        { status: deviceResponse.status });
+      return deviceResponse;
     }
 
     const sessionResponse = await registryCall(env, "/admin-session/create-for-user", { userId: identityData.user.id });

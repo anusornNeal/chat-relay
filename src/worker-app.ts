@@ -1412,6 +1412,7 @@ export default {
       request,
       (registryPath, body) => registryCall(env, registryPath, body),
       (authRequest) => authenticateUser(authRequest, env),
+      env,
     );
     if (authResponse) return authResponse;
 

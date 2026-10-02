@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { provisionOperatorFixture } from "./operator-fixture.mjs";
 
 const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8796").replace(/\/$/, "");
 const tarball = process.env.CHAT_RELAY_TARBALL;
@@ -11,7 +12,6 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-relay-npx-"));
 const configDir = path.join(tempDir, "config");
 const suffix = Date.now().toString(36);
 const login = `npx-test-${suffix}`;
-const password = `Npx-${suffix}-Password!`;
 const agentId = `npx-test-${suffix}`;
 
 async function jsonFetch(route, options = {}) {
@@ -23,36 +23,9 @@ async function jsonFetch(route, options = {}) {
   return { response, data };
 }
 
-async function provision() {
-  const started = await jsonFetch("/auth/device/start", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ agentId, agentName: "Zero Checkout Smoke" }),
-  });
-  if (!started.response.ok) throw new Error(`start failed: ${JSON.stringify(started.data)}`);
-
-  const approved = await fetch(base + "/auth/device/approve", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      userCode: started.data.userCode,
-      login,
-      password,
-      name: "Npx Test",
-    }),
-  });
-  if (!approved.ok) throw new Error(`approve failed: ${approved.status}`);
-
-  const exchanged = await jsonFetch("/auth/device/token", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ deviceCode: started.data.deviceCode }),
-  });
-  if (!exchanged.response.ok) throw new Error(`exchange failed: ${JSON.stringify(exchanged.data)}`);
-  return exchanged.data;
-}
-
-const credentials = await provision();
+const credentials = await provisionOperatorFixture(base, {
+  userId: login, name: "Npx Test", agentId, agentName: "Zero Checkout Smoke",
+});
 fs.mkdirSync(configDir, { recursive: true });
 fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({
   relayUrl: base,

@@ -35,7 +35,7 @@ From any directory:
 npx @anusornneal/chat-relay@latest remote
 ```
 
-On the first run, Chat Relay opens browser-based device authorization. Sign in, approve the computer, then return to the terminal.
+On the first run, Chat Relay opens browser-based device authorization. Choose **Continue with Google and authorize computer**, sign in with the same Google account used for the ChatGPT connector, then return to the terminal. Device sign-in requires configured Google OAuth and does not accept a local username/password.
 
 The CLI saves the device credentials in your user profile, so later you can reconnect with the same command:
 

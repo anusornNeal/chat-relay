@@ -1,6 +1,6 @@
 # Google login
 
-Chat Relay keeps the existing `owner` account as the legacy administrator/recovery account. Dashboard and ChatGPT connector sign-in can use the same verified Google identity.
+Chat Relay keeps the existing `owner` account as the legacy administrator/recovery account. Dashboard, ChatGPT connector, and local computer device sign-in use the same verified Google identity.
 
 ## Required Google OAuth client
 
@@ -20,6 +20,9 @@ Do not commit the client secret.
 
 ## Identity rules
 
+- Local computer sign-in (`/device`) only supports Google. Confirm the displayed device code and choose **Continue with Google and authorize computer**. Browser sessions do not automatically approve a computer. The shared `/admin/google/callback` completes approval; the terminal exchanges the code for credentials.
+- Unconfigured Google OAuth returns 503 for device sign-in; there is no password fallback or password account creation.
+- Use the same Google account for the local computer and ChatGPT connector so the connector can access that account's computers. Existing legacy device sessions remain valid until expired/revoked; `login --force` signs in through Google.
 - Google `sub` is the stable external identity.
 - Verified Google email is the user-facing account/login identifier.
 - Email collision never claims `owner` or an administrator.

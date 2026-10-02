@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { provisionOperatorFixture } from "./operator-fixture.mjs";
 
 const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8808").replace(/\/$/, "");
 const adminToken = process.env.TEST_ADMIN_TOKEN || "test-admin";
@@ -23,33 +24,8 @@ async function admin(path, method = "GET", body) {
   });
 }
 
-async function authorizeDevice({ agentId, agentName, login, password, name }) {
-  const started = await request("/auth/device/start", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ agentId, agentName }),
-  });
-  if (!started.response.ok) throw new Error("device start failed: " + started.text);
-
-  const approved = await fetch(base + "/auth/device/approve", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      userCode: started.data.userCode,
-      login,
-      password,
-      name,
-    }),
-  });
-  if (!approved.ok) throw new Error("device approval failed: " + approved.status);
-
-  const exchanged = await request("/auth/device/token", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ deviceCode: started.data.deviceCode }),
-  });
-  if (!exchanged.response.ok) throw new Error("device exchange failed: " + exchanged.text);
-  return exchanged.data;
+async function provisionManagedDevice({ agentId, agentName, login, name }) {
+  return provisionOperatorFixture(base, { userId: login, name, agentId, agentName });
 }
 
 function wsUrl(agentId) {
@@ -110,33 +86,28 @@ async function statusFor(userToken, agentId) {
 const suffix = Date.now().toString(36);
 const userALogin = "devices-a-" + suffix;
 const userBLogin = "devices-b-" + suffix;
-const passwordA = "Devices-A-" + suffix + "-Password!";
-const passwordB = "Devices-B-" + suffix + "-Password!";
 const agentA1Id = "pc-a1-" + suffix;
 const agentA2Id = "pc-a2-" + suffix;
 
-const a1 = await authorizeDevice({
+const a1 = await provisionManagedDevice({
   agentId: agentA1Id,
   agentName: "Alice Laptop",
   login: userALogin,
-  password: passwordA,
   name: "Alice",
 });
-const a2 = await authorizeDevice({
+const a2 = await provisionManagedDevice({
   agentId: agentA2Id,
   agentName: "Alice Desktop",
   login: userALogin,
-  password: passwordA,
   name: "Alice",
 });
-if (a1.user.id !== a2.user.id) throw new Error("same login produced different users");
+if (a1.user.id !== a2.user.id) throw new Error("same operator fixture produced different users");
 if (a1.agent.id === a2.agent.id) throw new Error("multiple PCs collapsed into one agent");
 
-const bOwn = await authorizeDevice({
+const bOwn = await provisionManagedDevice({
   agentId: agentA1Id,
   agentName: "Bob Collision Attempt",
   login: userBLogin,
-  password: passwordB,
   name: "Bob",
 });
 if (bOwn.user.id === a1.user.id) throw new Error("distinct login reused Alice identity");
@@ -225,22 +196,20 @@ if (enableRetired.response.status !== 409 || enableRetired.data.error !== "reaut
   throw new Error("retired agent was re-enabled without authorization: " + enableRetired.text);
 }
 
-const bCollisionAfterRetire = await authorizeDevice({
+const bCollisionAfterRetire = await provisionManagedDevice({
   agentId: agentA1Id,
   agentName: "Bob Retired Collision",
   login: userBLogin,
-  password: passwordB,
   name: "Bob",
 });
 if (bCollisionAfterRetire.agent.id === agentA1Id) {
   throw new Error("other owner reclaimed retired agent id");
 }
 
-const a1Reauthorized = await authorizeDevice({
+const a1Reauthorized = await provisionManagedDevice({
   agentId: agentA1Id,
   agentName: "Stale Local Name",
   login: userALogin,
-  password: passwordA,
   name: "Alice",
 });
 if (a1Reauthorized.agent.id !== agentA1Id) throw new Error("owner did not reclaim original agent id");
@@ -268,4 +237,4 @@ if (!finalDetail.response.ok ||
 
 socketA1Reauthorized.close();
 socketA2.close();
-console.log("device management lifecycle smoke test passed");
+console.log("operator-provisioned device management lifecycle smoke test passed");

@@ -210,6 +210,7 @@ export class Registry extends DurableObject {
       case "/users/rotate": return this.rotateUser(body);
       case "/agents/rotate": return this.rotateAgent(body);
       case "/device/start": return this.startDevice(body);
+      case "/device/lookup": return this.lookupDevice(body);
       case "/device/approve": return this.approveDevice(body);
       case "/device/exchange": return this.exchangeDevice(body);
       case "/oauth/client/register": return this.registerOAuthClient(body);
@@ -691,80 +692,38 @@ export class Registry extends DurableObject {
     await this.ctx.storage.put(key.loginAttempt(login), record);
   }
 
-  private async approveDevice(body: any): Promise<Response> {
-    const userCode = String(body?.userCode ?? "").trim().toUpperCase();
-    const loginRaw = String(body?.login ?? "");
-    const password = String(body?.password ?? "");
-    const name = String(body?.name ?? "").trim();
-    const sourceHash = String(body?.sourceHash ?? "unknown").slice(0, 128);
-
-    if (!(await this.consumeRateLimit(
-      key.deviceApproveRate(sourceHash),
-      DEVICE_APPROVE_MAX,
-      DEVICE_APPROVE_WINDOW_MS,
-    ))) {
-      return json({ error: "rate_limited" }, 429);
-    }
-
-    if (!userCode || password.length < 8 || password.length > 128) {
-      return json({ error: "invalid_credentials" }, 400);
-    }
-
-    let login: string;
-    try { login = normalizeLogin(loginRaw); }
-    catch { return json({ error: "invalid_login" }, 400); }
-
+  private async pendingDevice(userCode: string): Promise<DeviceAuthRecord | Response> {
     const deviceCodeHash = await this.ctx.storage.get<string>(key.deviceUserCode(userCode));
     if (!deviceCodeHash) return json({ error: "device_code_not_found" }, 404);
-
     const device = await this.ctx.storage.get<DeviceAuthRecord>(key.device(deviceCodeHash));
     if (!device || isExpired(device.expiresAt)) {
       await this.ctx.storage.delete([key.device(deviceCodeHash), key.deviceUserCode(userCode)]);
       return json({ error: "device_code_expired" }, 410);
     }
     if (device.status !== "pending") return json({ error: "device_code_already_used" }, 409);
+    return device;
+  }
 
-    let userId = await this.ctx.storage.get<string>(key.userLogin(login));
-    let user: UserRecord | undefined;
-
-    if (userId) {
-      if (await this.loginBlocked(login)) return json({ error: "too_many_attempts" }, 429);
-      user = await this.ctx.storage.get<UserRecord>(key.user(userId));
-      if (!user?.enabled || !user.passwordSalt || !user.passwordHash) {
-        return json({ error: "account_unavailable" }, 403);
-      }
-      const derived = await derivePasswordHash(
-        password,
-        user.passwordSalt,
-        user.passwordIterations ?? PASSWORD_ITERATIONS,
-      );
-      if (!secureEqual(derived, user.passwordHash)) {
-        await this.recordLoginFailure(login);
-        return json({ error: "invalid_credentials" }, 401);
-      }
-      await this.ctx.storage.delete(key.loginAttempt(login));
-    } else {
-      const userName = (name || login).slice(0, 120);
-      const salt = randomSalt();
-      userId = `user-${crypto.randomUUID().slice(0, 12)}`;
-      user = {
-        id: userId,
-        name: userName,
-        login,
-        passwordSalt: salt,
-        passwordHash: await derivePasswordHash(password, salt, PASSWORD_ITERATIONS),
-        passwordIterations: PASSWORD_ITERATIONS,
-        enabled: true,
-        createdAt: new Date().toISOString(),
-      };
-      await this.ctx.storage.put({
-        [key.user(user.id)]: user,
-        [key.userLogin(login)]: user.id,
-      });
+  private async lookupDevice(body: any): Promise<Response> {
+    const sourceHash = String(body?.sourceHash ?? "unknown").slice(0, 128);
+    if (!(await this.consumeRateLimit(key.deviceApproveRate(sourceHash), DEVICE_APPROVE_MAX, DEVICE_APPROVE_WINDOW_MS))) {
+      return json({ error: "rate_limited" }, 429);
     }
+    const device = await this.pendingDevice(String(body?.userCode ?? "").trim().toUpperCase());
+    return device instanceof Response ? device : json({ ok: true });
+  }
 
-    if (!user) return json({ error: "account_unavailable" }, 403);
-
+  private async approveDevice(body: any): Promise<Response> {
+    const userCode = String(body?.userCode ?? "").trim().toUpperCase();
+    const sourceHash = String(body?.sourceHash ?? "unknown").slice(0, 128);
+    if (!(await this.consumeRateLimit(key.deviceApproveRate(sourceHash), DEVICE_APPROVE_MAX, DEVICE_APPROVE_WINDOW_MS))) {
+      return json({ error: "rate_limited" }, 429);
+    }
+    const device = await this.pendingDevice(userCode);
+    if (device instanceof Response) return device;
+    // This internal endpoint is called only after Google validates the identity.
+    const user = await this.ctx.storage.get<UserRecord>(key.user(String(body?.userId ?? "")));
+    if (!user?.enabled || user.deletedAt || !user.googleSub) return json({ error: "account_unavailable" }, 403);
     device.status = "approved";
     device.userId = user.id;
     await this.ctx.storage.put(key.device(device.deviceCodeHash), device);
@@ -785,7 +744,7 @@ export class Registry extends DurableObject {
     if (device.status === "consumed" || !device.userId) return json({ error: "invalid_grant" }, 400);
 
     const user = await this.ctx.storage.get<UserRecord>(key.user(device.userId));
-    if (!user?.enabled) return json({ error: "account_unavailable" }, 403);
+    if (!user?.enabled || user.deletedAt || !user.googleSub) return json({ error: "account_unavailable" }, 403);
 
     let agentId = device.agentId;
     let agent = await this.ctx.storage.get<AgentRecord>(key.agent(agentId));

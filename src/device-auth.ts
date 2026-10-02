@@ -1,5 +1,6 @@
 import { formatUserCode, randomCode } from "./auth-crypto";
 import { hashToken, newToken } from "./registry";
+import { clearGoogleStateCookie, startGoogleLogin, type GoogleAuthEnv } from "./google-auth";
 
 type AuthUser = { id: string; name: string; login?: string | null };
 type RegistryCall = (path: string, body?: unknown) => Promise<Response>;
@@ -49,26 +50,21 @@ async function sourceHash(request: Request): Promise<string> {
   return hashToken(source);
 }
 
-function loginPage(userCode: string, errorMessage = ""): Response {
+function loginPage(userCode: string, errorMessage = "", status = 200): Response {
   const code = htmlEscape(userCode);
   return page(
     "Chat Relay sign in",
     `<h1>Connect Chat Relay</h1>
-<p>Sign in to authorize the computer waiting with this device code.</p>
+<p>Continue with your Google account to authorize the computer waiting with this device code. Use the same account as your ChatGPT connector.</p>
 <div class="code">${code || "Enter code below"}</div>
 ${errorMessage ? `<div class="error">${htmlEscape(errorMessage)}</div>` : ""}
 <form method="post" action="/auth/device/approve">
 <label for="userCode">Device code</label>
 <input id="userCode" name="userCode" required value="${code}" autocomplete="one-time-code">
-<label for="login">Login</label>
-<input id="login" name="login" required minlength="3" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,63}" autocomplete="username">
-<label for="password">Password</label>
-<input id="password" name="password" type="password" required minlength="8" maxlength="128" autocomplete="current-password">
-<label for="name">Display name <span style="font-weight:400;color:#8b8f97">(new account only)</span></label>
-<input id="name" name="name" maxlength="120" autocomplete="name">
-<button type="submit">Sign in and connect</button>
-<p class="note">If the login does not exist yet, Chat Relay creates it with the password entered here. The device code expires after 10 minutes.</p>
+<button type="submit">Continue with Google and authorize computer</button>
+<p class="note">Only authorize a code shown by a computer you trust. The device code expires after 10 minutes.</p>
 </form>`,
+    status,
   );
 }
 
@@ -76,11 +72,15 @@ export async function handleDeviceAuth(
   request: Request,
   registryCall: RegistryCall,
   authenticateUser: AuthenticateUser,
+  googleEnv: GoogleAuthEnv,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
 
   if (path === "/device" && request.method === "GET") {
+    if (!googleEnv.GOOGLE_CLIENT_ID || !googleEnv.GOOGLE_CLIENT_SECRET) {
+      return page("Google sign-in unavailable", "<h1>Google sign-in unavailable</h1><p>Google login is not configured. Contact the relay administrator.</p>", 503);
+    }
     return loginPage(url.searchParams.get("user_code") ?? "");
   }
 
@@ -125,41 +125,25 @@ export async function handleDeviceAuth(
   }
 
   if (path === "/auth/device/approve" && request.method === "POST") {
-    const form = await request.formData();
-    const userCode = String(form.get("userCode") ?? "").trim().toUpperCase();
-    const login = String(form.get("login") ?? "");
-    const password = String(form.get("password") ?? "");
-    const name = String(form.get("name") ?? "");
-
-    const response = await registryCall("/device/approve", {
-      userCode,
-      login,
-      password,
-      name,
-      sourceHash: await sourceHash(request),
-    });
-    const data = await response.json<any>().catch(() => ({}));
-    if (!response.ok) {
-      const messageByCode: Record<string, string> = {
-        invalid_credentials: "The login or password is incorrect.",
-        invalid_login: "Use 3-64 characters: letters, numbers, dot, underscore, or hyphen.",
-        device_code_not_found: "This device code was not found.",
-        device_code_expired: "This device code expired. Run the CLI login command again.",
-        device_code_already_used: "This device code has already been used.",
-        account_unavailable: "This account cannot sign in with a password.",
-        too_many_attempts: "Too many failed attempts. Try again later.",
-        rate_limited: "Too many authorization attempts from this network. Try again later.",
-      };
-      return loginPage(userCode, messageByCode[data.error] ?? "Unable to authorize this device.");
+    const origin = request.headers.get("origin");
+    if (!origin || origin !== url.origin) {
+      return page("Authorization rejected", "<h1>Authorization rejected</h1><p>Submit this device code from the relay sign-in page.</p>", 403);
     }
-
-    return page(
-      "Chat Relay connected",
-      `<div class="success">✓</div>
-<h1>Computer authorized</h1>
-<p>Signed in as <strong>${htmlEscape(data.user?.name ?? login)}</strong>.</p>
-<p>You can close this tab. The terminal will finish connecting automatically.</p>`,
-    );
+    if (!googleEnv.GOOGLE_CLIENT_ID || !googleEnv.GOOGLE_CLIENT_SECRET) {
+      return startGoogleLogin(request, googleEnv);
+    }
+    const form = await request.formData().catch(() => null);
+    const userCode = String(form?.get("userCode") ?? "").trim().toUpperCase();
+    // Browser input can identify a pending device, never the account approving it.
+    if (!form || ["userId", "login", "password", "name"].some((field) => form.has(field))) {
+      return loginPage(userCode, "Use Continue with Google to authorize this computer.", 400);
+    }
+    const networkHash = await sourceHash(request);
+    const lookup = await registryCall("/device/lookup", { userCode, sourceHash: networkHash });
+    if (!lookup.ok) return deviceAuthorizationError(userCode, lookup);
+    return startGoogleLogin(request, googleEnv, JSON.stringify({
+      kind: "device-auth", userCode, sourceHash: networkHash,
+    }));
   }
 
   if (path === "/auth/device/token" && request.method === "POST") {
@@ -215,4 +199,47 @@ export async function handleDeviceAuth(
   }
 
   return null;
+}
+
+async function deviceAuthorizationError(userCode: string, response: Response): Promise<Response> {
+  const data = await response.json<any>().catch(() => ({}));
+  const messages: Record<string, string> = {
+    device_code_not_found: "This device code was not found.",
+    device_code_expired: "This device code expired. Run the CLI login command again.",
+    device_code_already_used: "This device code has already been used.",
+    account_unavailable: "This Google account cannot authorize this computer.",
+    rate_limited: "Too many authorization attempts from this network. Try again later.",
+  };
+  return loginPage(userCode, messages[data.error] ?? "Unable to authorize this device.", response.status);
+}
+
+export async function completeGoogleDeviceAuthorization(
+  continuation: string | undefined,
+  userId: string,
+  registryCall: RegistryCall,
+): Promise<Response | null> {
+  if (!continuation) return null;
+  let payload: any;
+  try { payload = JSON.parse(continuation); }
+  catch { return null; }
+  if (payload?.kind !== "device-auth") return null;
+  let response: Response;
+  if (typeof payload.userCode !== "string" || !/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(payload.userCode) ||
+      typeof payload.sourceHash !== "string" || !/^[a-f0-9]{64}$/.test(payload.sourceHash)) {
+    response = page("Authorization rejected", "<h1>Authorization rejected</h1><p>The Google device authorization request is invalid.</p>", 400);
+  } else {
+    const approved = await registryCall("/device/approve", {
+      userCode: payload.userCode, sourceHash: payload.sourceHash, userId,
+    });
+    if (!approved.ok) response = await deviceAuthorizationError(payload.userCode, approved);
+    else {
+      const data = await approved.json<any>();
+      response = page("Chat Relay connected",
+        '<div class="success">✓</div><h1>Computer authorized</h1><p>Signed in as <strong>' +
+        htmlEscape(String(data.user?.email ?? data.user?.name ?? "Google account")) +
+        '</strong>.</p><p>You can close this tab. The terminal will finish connecting automatically.</p>');
+    }
+  }
+  response.headers.append("set-cookie", clearGoogleStateCookie());
+  return response;
 }

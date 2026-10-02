@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { provisionOperatorFixture } from "./operator-fixture.mjs";
 
 const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8796").replace(/\/$/, "");
 const resource = `${base}/mcp`;
@@ -108,37 +109,11 @@ if (!registration.response.ok || !registration.data.client_id) {
 const clientId = registration.data.client_id;
 console.log("dynamic client registration ok");
 
-const deviceStart = await jsonFetch("/auth/device/start", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({
-    agentId: `oauth-agent-${suffix}`,
-    agentName: "OAuth Smoke Agent",
-  }),
+await provisionOperatorFixture(base, {
+  userId: login, name: "OAuth Smoke User", login, password,
+  agentId: "oauth-agent-" + suffix, agentName: "OAuth Smoke Agent",
 });
-if (!deviceStart.response.ok) {
-  throw new Error(`device start failed: ${deviceStart.text}`);
-}
-
-const approved = await fetch(`${base}/auth/device/approve`, {
-  method: "POST",
-  headers: { "content-type": "application/x-www-form-urlencoded" },
-  body: formBody({
-    userCode: deviceStart.data.userCode,
-    login,
-    password,
-    name: "OAuth Smoke User",
-  }),
-});
-if (!approved.ok) throw new Error(`device approval failed: ${approved.status}`);
-
-const deviceExchange = await jsonFetch("/auth/device/token", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ deviceCode: deviceStart.data.deviceCode }),
-});
-if (!deviceExchange.response.ok) throw new Error("device exchange failed");
-console.log("OAuth account fixture ok");
+console.log("operator-provisioned OAuth recovery fixture ok");
 
 const verifier = "v".repeat(64);
 const authorizeParams = {

@@ -1,6 +1,6 @@
 # Connector authorization resilience
 
-Chat Relay connector OAuth and dashboard Google sign-in are separate authentication paths.
+Chat Relay uses Google identity for dashboard, connector, and local computer sign-in; the connector still issues separate OAuth credentials.
 
 ## Connector OAuth lifecycle
 
@@ -16,4 +16,4 @@ The short replay window intentionally stores the already-issued token response l
 
 ## Separation from Google login
 
-Google OAuth/OIDC is only for browser/dashboard account login and lives in `src/google-auth.ts`. Connector OAuth remains the authorization-code + PKCE flow used by ChatGPT/MCP. Changes to connector refresh behavior must not modify Google login state, account linking, or Google credentials.
+Google OAuth/OIDC verifies browser identity for dashboard login, connector authorization, and local computer device approval through `src/google-auth.ts`. Connector OAuth remains the authorization-code + PKCE flow used by ChatGPT/MCP. Changes to connector refresh behavior must not modify Google login state, account linking, or Google credentials.
