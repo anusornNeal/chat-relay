@@ -166,13 +166,22 @@ if (!operationsBefore.response.ok || !operationsBefore.data.components?.registry
   throw new Error("operations health invalid: " + operationsBefore.text);
 }
 
-const cleanup = await admin("/admin/api/operations/cleanup", "POST", {
-  usageRawRetentionDays: 0,
-  auditRetentionDays: 365,
-  limit: 500,
-});
-if (!cleanup.response.ok || !cleanup.data.ok) throw new Error("cleanup failed: " + cleanup.text);
-if ((cleanup.data.usage?.data?.deleted || 0) < 1) throw new Error("raw usage cleanup removed no eligible events");
+let cleanupPasses = 0;
+let cleanupDeleted = 0;
+while (cleanupPasses < 10) {
+  const cleanup = await admin("/admin/api/operations/cleanup", "POST", {
+    usageRawRetentionDays: 0,
+    auditRetentionDays: 365,
+    limit: 500,
+  });
+  if (!cleanup.response.ok || !cleanup.data.ok) throw new Error("cleanup failed: " + cleanup.text);
+  const deleted = Number(cleanup.data.usage?.data?.deleted || 0);
+  cleanupDeleted += deleted;
+  cleanupPasses += 1;
+  if (deleted === 0) break;
+}
+if (cleanupDeleted < 1) throw new Error("raw usage cleanup removed no eligible events");
+if (cleanupPasses >= 10) throw new Error("raw usage cleanup did not converge within safety bound");
 
 const usageAfter = await admin("/admin/api/usage?day=" + day + "&recentLimit=100");
 if (!usageAfter.response.ok || usageAfter.data.metric?.calls !== aggregateCalls) {
