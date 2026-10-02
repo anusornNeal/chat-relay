@@ -187,6 +187,7 @@ function authorizePage(
   params: AuthorizeParams,
   googleEnabled: boolean,
   errorMessage = "",
+  showRecovery = false,
 ): Response {
   const hidden = [
     ["client_id", params.clientId],
@@ -217,25 +218,33 @@ function authorizePage(
     resource: params.resource,
     state: params.state,
   });
+  const showPassword = showRecovery || !googleEnabled;
   const googleEntry = googleEnabled
-    ? `<a class="google" href="/authorize/google/start?${htmlEscape(googleQuery.toString())}">Continue with Google</a><div class="divider"><span>Owner recovery</span></div>`
+    ? `<a class="google" href="/authorize/google/start?${htmlEscape(googleQuery.toString())}">Continue with Google</a>`
+    : "";
+  const recoveryDivider = googleEnabled && showPassword
+    ? `<div class="divider"><span>Owner recovery</span></div>`
+    : "";
+  const recoveryForm = showPassword
+    ? `<form method="post" action="/authorize">
+${hidden}
+<label for="login">Owner login</label>
+<input id="login" name="login" required autocomplete="username" minlength="3" maxlength="64">
+<label for="password">Password</label>
+<input id="password" name="password" type="password" required autocomplete="current-password" minlength="8" maxlength="128">
+<button type="submit">Authorize recovery account</button>
+</form>`
     : "";
 
   return htmlPage(
     "Authorize Chat Relay",
     `<h1>Authorize ${htmlEscape(client.clientName)}</h1>
-<p>Sign in with your Chat Relay account to connect ChatGPT to your permitted computers.</p>
+<p>${googleEnabled && !showPassword ? "Continue with Google to connect ChatGPT to your permitted computers." : "Use the owner recovery account to connect ChatGPT."}</p>
 <div class="scope">Access: ${htmlEscape(scopeText || "mcp")}.${htmlEscape(offline)}</div>
 ${errorMessage ? `<div class="error">${htmlEscape(errorMessage)}</div>` : ""}
 ${googleEntry}
-<form method="post" action="/authorize">
-${hidden}
-<label for="login">Login</label>
-<input id="login" name="login" required autocomplete="username" minlength="3" maxlength="64">
-<label for="password">Password</label>
-<input id="password" name="password" type="password" required autocomplete="current-password" minlength="8" maxlength="128">
-<button type="submit">Authorize</button>
-</form>`,
+${recoveryDivider}
+${recoveryForm}`,
   );
 }
 
@@ -317,6 +326,7 @@ export async function handleOAuth(
   request: Request,
   registryCall: RegistryCall,
   googleEnv?: GoogleAuthEnv,
+  sessionUser?: { id: string } | null,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -418,8 +428,20 @@ export async function handleOAuth(
       registryCall,
     );
     if (validated instanceof Response) return validated;
+    const recovery = url.searchParams.get("recovery") === "1";
+    if (!recovery && sessionUser?.id) {
+      const previous = await registryCall("/oauth/client/authorized", {
+        userId: sessionUser.id,
+        clientId: validated.params.clientId,
+        resource: validated.params.resource,
+      });
+      const previousData = await previous.json<any>().catch(() => ({}));
+      if (previous.ok && previousData.authorized === true) {
+        return issueAuthorizationCode(registryCall, validated.params, sessionUser.id);
+      }
+    }
     const googleEnabled = Boolean(googleEnv?.GOOGLE_CLIENT_ID && googleEnv?.GOOGLE_CLIENT_SECRET);
-    return authorizePage(validated.client, validated.params, googleEnabled);
+    return authorizePage(validated.client, validated.params, googleEnabled, "", recovery);
   }
 
   if (path === "/authorize/google/start" && request.method === "GET") {
@@ -456,7 +478,7 @@ export async function handleOAuth(
       const message = authData.error === "too_many_attempts"
         ? "Too many failed attempts. Try again later."
         : "Invalid login or password.";
-      return authorizePage(validated.client, validated.params, Boolean(googleEnv?.GOOGLE_CLIENT_ID && googleEnv?.GOOGLE_CLIENT_SECRET), message);
+      return authorizePage(validated.client, validated.params, Boolean(googleEnv?.GOOGLE_CLIENT_ID && googleEnv?.GOOGLE_CLIENT_SECRET), message, true);
     }
 
     return issueAuthorizationCode(registryCall, validated.params, authData.user.id);

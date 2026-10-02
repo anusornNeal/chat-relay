@@ -623,7 +623,10 @@ async function loadOverview({ patch = false } = {}) {
       ' · Reconnects ' + fmtNum(health.reconnectCount || 0) +
       (health.versions?.length ? ' · Agent ' + esc(health.versions.join(", ")) : '') +
       (health.capabilities?.length ? ' · Capabilities ' + esc(health.capabilities.slice(0, 6).join(", ")) : '') +
-      (health.lastDisconnectReason ? ' · Last disconnect ' + esc(health.lastDisconnectReason) : '') +
+      (health.lastDisconnectReason || health.lastCloseCode ? ' · Last disconnect ' + esc([health.lastCloseCode, health.lastDisconnectReason].filter(Boolean).join(' · ')) : '') +
+      (health.lastConnectionDurationMs != null ? ' · Previous connection ' + esc(fmtMs(health.lastConnectionDurationMs)) : '') +
+      (health.lastSocketError ? ' · Socket ' + esc(health.lastSocketError) : '') +
+      (health.lastDisconnectedAt ? ' · At ' + esc(String(health.lastDisconnectedAt).replace('T', ' ').replace('Z', ' UTC')) : '') +
       '</span></div>'
     : "";
   const liveMarkup =

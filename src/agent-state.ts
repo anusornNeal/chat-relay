@@ -13,7 +13,13 @@ export type AgentSocketAttachment = {
   health?: {
     reconnectCount: number;
     reconnectAttempt: number;
+    processStartedAt: string | null;
+    connectedAt: string | null;
+    lastDisconnectedAt: string | null;
+    lastCloseCode: number | null;
     lastDisconnectReason: string | null;
+    lastConnectionDurationMs: number | null;
+    lastSocketError: string | null;
     queues: Record<string, { concurrency: number; active: number; queued: number; maxQueued: number; queueTimeoutMs: number }>;
   };
 };
@@ -90,10 +96,18 @@ export function normalizeAgentHealth(value: any) {
       queueTimeoutMs: bounded(lane.queueTimeoutMs, 120_000),
     };
   }
+  const closeCode = value?.lastCloseCode === null || value?.lastCloseCode === undefined ? NaN : Number(value.lastCloseCode);
+  const duration = value?.lastConnectionDurationMs === null || value?.lastConnectionDurationMs === undefined ? NaN : Number(value.lastConnectionDurationMs);
   return {
     reconnectCount: bounded(value?.reconnectCount, 1_000_000),
     reconnectAttempt: bounded(value?.reconnectAttempt, 1_000_000),
+    processStartedAt: normalizeAgentText(value?.processStartedAt, 64),
+    connectedAt: normalizeAgentText(value?.connectedAt, 64),
+    lastDisconnectedAt: normalizeAgentText(value?.lastDisconnectedAt, 64),
+    lastCloseCode: Number.isInteger(closeCode) && closeCode >= 0 && closeCode <= 4999 ? closeCode : null,
     lastDisconnectReason: normalizeAgentText(value?.lastDisconnectReason, 160),
+    lastConnectionDurationMs: Number.isFinite(duration) && duration >= 0 ? Math.min(Math.trunc(duration), 365 * 24 * 60 * 60 * 1000) : null,
+    lastSocketError: normalizeAgentText(value?.lastSocketError, 160),
     queues,
   };
 }

@@ -3,7 +3,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { handleDeviceAuth } from "./device-auth";
 import { handleOAuth, oauthChallenge, oauthResource } from "./oauth";
-import { handleAdmin } from "./admin";
+import { browserSessionUser, handleAdmin } from "./admin";
 import { hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 import { DEFAULT_QUOTA_POLICY, normalizeQuotaPolicy, type QuotaPolicy, type UsageEvent } from "./usage";
 import { AGENT_PROTOCOL_VERSION } from "./agent-state";
@@ -1397,10 +1397,14 @@ export default {
       });
     }
 
+    const oauthSessionUser = path === "/authorize" && request.method === "GET"
+      ? await browserSessionUser(request, env)
+      : null;
     const oauthResponse = await handleOAuth(
       request,
       (registryPath, body) => registryCall(env, registryPath, body),
       env,
+      oauthSessionUser,
     );
     if (oauthResponse) return oauthResponse;
 

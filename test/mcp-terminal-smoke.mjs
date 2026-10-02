@@ -12,15 +12,18 @@ function connectionStateTests() {
   state.markConnecting(1000);
   state.markConnected(2000);
   state.markHeartbeat(2500);
+  state.markSocketError("ECONNRESET");
   state.markDisconnected(1006, "network drop", 3000);
   if (state.nextDelay(() => 0.5) !== 1000) throw new Error("state reconnect delay failed");
   state.scheduleReconnect(1000, 3000);
   const waiting = state.snapshot();
-  if (waiting.state !== "waiting" || waiting.lastCloseCode !== 1006 || !waiting.nextReconnectAt) {
+  if (waiting.state !== "waiting" || waiting.lastCloseCode !== 1006 || waiting.lastDisconnectedAt !== new Date(3000).toISOString() || waiting.lastConnectionDurationMs !== 1000 || waiting.lastSocketError !== "ECONNRESET" || !waiting.nextReconnectAt) {
     throw new Error("connection waiting state failed");
   }
   state.markConnected(4000);
-  if (state.snapshot().reconnectAttempt !== 0) throw new Error("reconnect attempt did not reset");
+  const reconnected = state.snapshot();
+  if (reconnected.reconnectAttempt !== 0) throw new Error("reconnect attempt did not reset");
+  if (reconnected.reconnectCount !== 1 || reconnected.lastCloseCode !== 1006 || reconnected.lastDisconnectedAt !== new Date(3000).toISOString()) throw new Error("reconnect diagnostics were not retained");
   state.markReauthorization("credential_revoked", 5000);
   if (state.snapshot().state !== "reauthorization-required") throw new Error("reauthorization state failed");
 

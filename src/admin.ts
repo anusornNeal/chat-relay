@@ -41,7 +41,11 @@ function readCookie(request: Request, name: string) {
 }
 
 function adminCookie(token: string, maxAgeSeconds: number) {
-  return ADMIN_COOKIE + "=" + encodeURIComponent(token) + "; Path=/admin; Max-Age=" + maxAgeSeconds + "; HttpOnly; Secure; SameSite=Strict";
+  return ADMIN_COOKIE + "=" + encodeURIComponent(token) + "; Path=/; Max-Age=" + maxAgeSeconds + "; HttpOnly; Secure; SameSite=Lax";
+}
+
+function clearLegacyAdminCookie() {
+  return ADMIN_COOKIE + "=; Path=/admin; Max-Age=0; HttpOnly; Secure; SameSite=Strict";
 }
 
 async function browserSession(request: Request, env: AdminEnv, requireCsrf: boolean) {
@@ -61,7 +65,13 @@ async function browserSession(request: Request, env: AdminEnv, requireCsrf: bool
   });
   const data = await response.json<any>();
   if (!response.ok) return { ok: false as const, response: Response.json(data, { status: response.status }) };
-  return { ok: true as const, data, tokenHash };
+  return { ok: true as const, data, tokenHash, token };
+}
+
+export async function browserSessionUser(request: Request, env: AdminEnv) {
+  const auth = await browserSession(request, env, false);
+  if (!auth.ok || !auth.data?.user?.id) return null;
+  return auth.data.user as { id: string; authProvider?: string; enabled?: boolean; admin?: boolean };
 }
 
 function registryStub(env: AdminEnv) {
@@ -335,6 +345,9 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       return error(identityResponse.status, identityData.error || "google_account_link_failed");
     }
 
+    const sessionResponse = await registryCall(env, "/admin-session/create-for-user", { userId: identityData.user.id });
+    const sessionData = await sessionResponse.json<any>().catch(() => ({}));
+
     const connectorResponse = await completeGoogleConnectorAuthorization(
       google.continuation,
       String(identityData.user.id),
@@ -351,6 +364,11 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       );
       const headers = new Headers(connectorResponse.headers);
       headers.append("set-cookie", clearGoogleStateCookie());
+      if (sessionResponse.ok && sessionData.token && sessionData.expiresAt) {
+        const maxAge = Math.max(1, Math.floor((Date.parse(sessionData.expiresAt) - Date.now()) / 1000));
+        headers.append("set-cookie", adminCookie(sessionData.token, maxAge));
+      }
+      headers.append("set-cookie", clearLegacyAdminCookie());
       return new Response(connectorResponse.body, {
         status: connectorResponse.status,
         statusText: connectorResponse.statusText,
@@ -358,8 +376,6 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       });
     }
 
-    const sessionResponse = await registryCall(env, "/admin-session/create-for-user", { userId: identityData.user.id });
-    const sessionData = await sessionResponse.json<any>().catch(() => ({}));
     await recordAudit(
       env,
       sessionResponse.ok ? { kind: "admin-user", userId: String(identityData.user.id) } : { kind: "anonymous" },
@@ -370,7 +386,10 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     );
     if (!sessionResponse.ok) return error(sessionResponse.status, sessionData.error || "google_session_failed");
     const maxAge = Math.max(1, Math.floor((Date.parse(sessionData.expiresAt) - Date.now()) / 1000));
-    return googleLoginSuccessPage(sessionData.csrfToken, adminCookie(sessionData.token, maxAge));
+    const success = googleLoginSuccessPage(sessionData.csrfToken, adminCookie(sessionData.token, maxAge));
+    const headers = new Headers(success.headers);
+    headers.append("set-cookie", clearLegacyAdminCookie());
+    return new Response(success.body, { status: success.status, statusText: success.statusText, headers });
   }
 
   if (path === "/admin/ws" && request.method === "GET") {
@@ -403,9 +422,12 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     );
     if (!response.ok) return Response.json(data, { status: response.status });
     const maxAge = Math.max(1, Math.floor((Date.parse(data.expiresAt) - Date.now()) / 1000));
+    const headers = new Headers({ "cache-control": "no-store" });
+    headers.append("set-cookie", adminCookie(data.token, maxAge));
+    headers.append("set-cookie", clearLegacyAdminCookie());
     return Response.json(
       { ok: true, user: data.user, csrfToken: data.csrfToken, expiresAt: data.expiresAt },
-      { headers: { "set-cookie": adminCookie(data.token, maxAge), "cache-control": "no-store" } },
+      { headers },
     );
   }
 
@@ -432,13 +454,25 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   if (path === "/admin/session" && request.method === "GET") {
-    return Response.json({ ok: true, user: browserAuth?.ok ? browserAuth.data.user : { operator: true }, expiresAt: browserAuth?.ok ? browserAuth.data.expiresAt : null });
+    const headers = new Headers({ "cache-control": "no-store" });
+    if (browserAuth?.ok && browserAuth.token && browserAuth.data.expiresAt) {
+      const maxAge = Math.max(1, Math.floor((Date.parse(browserAuth.data.expiresAt) - Date.now()) / 1000));
+      headers.append("set-cookie", adminCookie(browserAuth.token, maxAge));
+      headers.append("set-cookie", clearLegacyAdminCookie());
+    }
+    return Response.json(
+      { ok: true, user: browserAuth?.ok ? browserAuth.data.user : { operator: true }, expiresAt: browserAuth?.ok ? browserAuth.data.expiresAt : null },
+      { headers },
+    );
   }
 
   if (path === "/admin/session/logout" && request.method === "POST") {
     if (browserAuth?.ok) await registryCall(env, "/admin-session/revoke", { tokenHash: browserAuth.tokenHash });
     await recordAudit(env, actor, "admin.session.logout", { type: "admin_session", id: actor.userId }, "success");
-    return Response.json({ ok: true }, { headers: { "set-cookie": adminCookie("", 0), "cache-control": "no-store" } });
+    const headers = new Headers({ "cache-control": "no-store" });
+    headers.append("set-cookie", adminCookie("", 0));
+    headers.append("set-cookie", clearLegacyAdminCookie());
+    return Response.json({ ok: true }, { headers });
   }
 
   if (path === "/admin/api/audit" && request.method === "GET") {
@@ -570,11 +604,19 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       summary.active += queues.reduce((sum, lane) => sum + Number(lane?.active || 0), 0);
       summary.queued += queues.reduce((sum, lane) => sum + Number(lane?.queued || 0), 0);
       summary.reconnectCount += Number(health?.reconnectCount || 0);
-      if (health?.lastDisconnectReason) summary.lastDisconnectReason = String(health.lastDisconnectReason).slice(0, 160);
+      const disconnectedAt = health?.lastDisconnectedAt ? Date.parse(String(health.lastDisconnectedAt)) : NaN;
+      const currentLast = summary.lastDisconnectedAt ? Date.parse(String(summary.lastDisconnectedAt)) : NaN;
+      if (Number.isFinite(disconnectedAt) && (!Number.isFinite(currentLast) || disconnectedAt >= currentLast)) {
+        summary.lastDisconnectedAt = String(health.lastDisconnectedAt).slice(0, 64);
+        summary.lastCloseCode = Number.isInteger(Number(health.lastCloseCode)) ? Number(health.lastCloseCode) : null;
+        summary.lastDisconnectReason = health.lastDisconnectReason ? String(health.lastDisconnectReason).slice(0, 160) : null;
+        summary.lastConnectionDurationMs = Number.isFinite(Number(health.lastConnectionDurationMs)) ? Number(health.lastConnectionDurationMs) : null;
+        summary.lastSocketError = health.lastSocketError ? String(health.lastSocketError).slice(0, 160) : null;
+      }
       if (agent.runtime?.agentVersion) summary.versions.add(String(agent.runtime.agentVersion));
       for (const capability of agent.runtime?.capabilities || []) summary.capabilities.add(String(capability));
       return summary;
-    }, { active: 0, queued: 0, reconnectCount: 0, lastDisconnectReason: null, versions: new Set<string>(), capabilities: new Set<string>() });
+    }, { active: 0, queued: 0, reconnectCount: 0, lastDisconnectedAt: null, lastCloseCode: null, lastDisconnectReason: null, lastConnectionDurationMs: null, lastSocketError: null, versions: new Set<string>(), capabilities: new Set<string>() });
     return Response.json({
       role: "admin",
       period,
@@ -584,7 +626,11 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
         active: agentHealth.active,
         queued: agentHealth.queued,
         reconnectCount: agentHealth.reconnectCount,
+        lastDisconnectedAt: agentHealth.lastDisconnectedAt,
+        lastCloseCode: agentHealth.lastCloseCode,
         lastDisconnectReason: agentHealth.lastDisconnectReason,
+        lastConnectionDurationMs: agentHealth.lastConnectionDurationMs,
+        lastSocketError: agentHealth.lastSocketError,
         versions: [...agentHealth.versions].slice(0, 8),
         capabilities: [...agentHealth.capabilities].slice(0, 32),
       },

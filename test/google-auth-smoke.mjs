@@ -11,11 +11,13 @@ for (const required of ["code_challenge_method","S256","state","nonce","email_ve
   if (!googleSource.includes(required)) throw new Error(`google auth contract missing: ${required}`);
 }
 if (!googleSource.includes("sessionStorage.setItem('chat_relay_csrf'")) throw new Error("Google callback did not persist CSRF");
-for (const required of ['case "/google/upsert"','key.userGoogleSub(googleSub)','existing.id === "owner"','existing.admin === true','delete existing.passwordHash','case "/admin-session/create-for-user"']) {
+for (const required of ['case "/google/upsert"','key.userGoogleSub(googleSub)','existing.id === "owner"','existing.admin === true','delete existing.passwordHash','case "/admin-session/create-for-user"','REMEMBERED_ADMIN_SESSION_TTL_MS']) {
   if (!registrySource.includes(required)) throw new Error(`registry Google identity contract missing: ${required}`);
 }
 if (!adminSource.includes('path === "/admin/google/start"') || !adminSource.includes('path === "/admin/google/callback"')) throw new Error("admin Google routes are missing");
 if (!oauthSource.includes('path === "/authorize/google/start"') || !oauthSource.includes("completeGoogleConnectorAuthorization")) throw new Error("connector Google authorization flow is missing");
+if (!oauthSource.includes("sessionUser?.id") || !oauthSource.includes('"/oauth/client/authorized"') || !oauthSource.includes("showRecovery")) throw new Error("connector reconnect auto-authorization is missing");
+if (!adminSource.includes("SameSite=Lax") || !adminSource.includes("Path=/; Max-Age=")) throw new Error("persistent browser session cookie is not connector-compatible");
 if (!adminSource.includes('"oauth.google.login"')) throw new Error("connector Google callback audit is missing");
 if (!dashboard.includes('href="/admin/google/start"')) throw new Error("dashboard Google sign-in entrypoint is missing");
 if (!app.includes('sessionStorage.getItem("chat_relay_csrf")') || !app.includes('sessionStorage.removeItem("chat_relay_csrf")')) throw new Error("dashboard CSRF persistence contract is incomplete");

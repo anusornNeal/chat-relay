@@ -113,6 +113,7 @@ type OAuthRefreshReplayRecord = {
 
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const REMEMBERED_ADMIN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 5;
 const DEVICE_START_WINDOW_MS = 10 * 60 * 1000;
@@ -213,6 +214,7 @@ export class Registry extends DurableObject {
       case "/device/exchange": return this.exchangeDevice(body);
       case "/oauth/client/register": return this.registerOAuthClient(body);
       case "/oauth/client/get": return this.getOAuthClient(body);
+      case "/oauth/client/authorized": return this.oauthClientAuthorized(body);
       case "/oauth/password": return this.oauthPassword(body);
       case "/google/upsert": return this.upsertGoogleUser(body);
       case "/oauth/code/create": return this.createOAuthCode(body);
@@ -897,6 +899,23 @@ export class Registry extends DurableObject {
     return json({ ok: true, client });
   }
 
+  private async oauthClientAuthorized(body: any): Promise<Response> {
+    const userId = String(body?.userId ?? "");
+    const clientId = String(body?.clientId ?? "");
+    const resource = String(body?.resource ?? "");
+    if (!userId || !clientId || !resource) return json({ error: "invalid_request" }, 400);
+
+    for (const prefix of ["oauth-refresh:", "oauth-access:"]) {
+      const records = await this.ctx.storage.list<OAuthTokenRecord>({ prefix });
+      for (const record of records.values()) {
+        if (record.userId === userId && record.clientId === clientId && record.resource === resource && !isExpired(record.expiresAt)) {
+          return json({ ok: true, authorized: true });
+        }
+      }
+    }
+    return json({ ok: true, authorized: false });
+  }
+
   private async oauthPassword(body: any): Promise<Response> {
     let login: string;
     try { login = normalizeLogin(String(body?.login ?? "")); }
@@ -1124,7 +1143,7 @@ export class Registry extends DurableObject {
     await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
     return json(tokens.result);
   }
-  private async issueAdminSession(user: UserRecord): Promise<Response> {
+  private async issueAdminSession(user: UserRecord, ttlMs = ADMIN_SESSION_TTL_MS): Promise<Response> {
     if (!user.enabled || user.deletedAt) return json({ error: "access_denied" }, 403);
     const token = newToken("adm");
     const csrfToken = newToken("csrf");
@@ -1135,7 +1154,7 @@ export class Registry extends DurableObject {
       userId: user.id,
       csrfHash,
       createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + ADMIN_SESSION_TTL_MS).toISOString(),
+      expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
     };
     await this.ctx.storage.put(key.adminSession(tokenHash), record);
     return json({ ok: true, user: publicUser(user), token, csrfToken, expiresAt: record.expiresAt });
@@ -1154,7 +1173,7 @@ export class Registry extends DurableObject {
     const userId = String(body?.userId ?? "");
     const user = userId ? await this.ctx.storage.get<UserRecord>(key.user(userId)) : undefined;
     if (!user?.enabled || user.deletedAt || !user.googleSub) return json({ error: "access_denied" }, 403);
-    return this.issueAdminSession(user);
+    return this.issueAdminSession(user, REMEMBERED_ADMIN_SESSION_TTL_MS);
   }
 
   private async authAdminSession(body: any): Promise<Response> {

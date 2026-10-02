@@ -84,7 +84,7 @@ if (!rateLimited) throw new Error("admin login did not inherit password rate lim
 const login = await browser("/admin/session/login", { method: "POST", body: { login: ownerLogin, password: ownerPassword } });
 if (!login.response.ok || !login.data.csrfToken || !login.data.expiresAt) throw new Error(`admin login failed: ${login.text}`);
 const setCookie = login.response.headers.get("set-cookie") || "";
-for (const required of ["chat_relay_admin=", "HttpOnly", "Secure", "SameSite=Strict"]) {
+for (const required of ["chat_relay_admin=", "Path=/", "HttpOnly", "Secure", "SameSite=Lax"]) {
   if (!setCookie.includes(required)) throw new Error(`missing cookie attribute: ${required}`);
 }
 if (login.text.includes("adm_")) throw new Error("raw admin session token leaked in response body");

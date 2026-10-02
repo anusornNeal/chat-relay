@@ -388,6 +388,13 @@ if (!migrated.response.ok || migrated.data.user?.id !== "owner" || migrated.data
 }
 console.log("legacy owner login migration ok");
 
+const ownerBrowserLogin = await jsonFetch("/admin/session/login", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ login: ownerLogin, password: ownerPassword }),
+});
+if (!ownerBrowserLogin.response.ok) throw new Error(`owner browser session failed: ${ownerBrowserLogin.text}`);
+const ownerBrowserCookie = (ownerBrowserLogin.response.headers.get("set-cookie") || "").split(";")[0];
 const ownerVerifier = "o".repeat(64);
 const ownerAuthorizeParams = {
   ...authorizeParams,
@@ -457,6 +464,22 @@ const ownerToken = await jsonFetch("/token", {
 if (!ownerToken.response.ok || !ownerToken.data.access_token) {
   throw new Error(`migrated owner token exchange failed: ${ownerToken.text}`);
 }
+const reconnectVerifier = "r".repeat(64);
+const reconnectAuthorizeParams = {
+  ...authorizeParams,
+  code_challenge: challenge(reconnectVerifier),
+  state: `reconnect-state-${suffix}`,
+};
+const reconnectAuthorize = await fetch(`${base}/authorize?${new URLSearchParams(reconnectAuthorizeParams)}`, {
+  headers: { cookie: ownerBrowserCookie },
+  redirect: "manual",
+});
+if (reconnectAuthorize.status !== 302) throw new Error(`persisted browser session did not auto-authorize: ${reconnectAuthorize.status}`);
+const reconnectCallback = new URL(reconnectAuthorize.headers.get("location"));
+if (!reconnectCallback.searchParams.get("code") || reconnectCallback.searchParams.get("state") !== reconnectAuthorizeParams.state) {
+  throw new Error("persisted browser session authorization code/state missing");
+}
+console.log("persisted browser session auto-authorization ok");
 const ownerWho = await mcpRpc(ownerToken.data.access_token, 3, "tools/call", {
   name: "whoami",
   arguments: {},

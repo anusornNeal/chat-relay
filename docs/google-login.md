@@ -25,4 +25,6 @@ Do not commit the client secret.
 - Email collision never claims `owner` or an administrator.
 - Existing non-admin accounts may be linked by matching email and lose local password credentials.
 - New Google identities create non-admin users.
-- ChatGPT connector authorization offers Google sign-in first and keeps local password login as the owner recovery fallback.
+- Normal ChatGPT connector authorization reuses a valid remembered browser session automatically for a previously authorized client; otherwise it shows only `Continue with Google` and never exposes the password form.
+- Google browser sessions are remembered for 30 days to make connector reconnects one-click while server-side revocation and user disablement still invalidate them.
+- Local password authorization remains available only as the explicit owner recovery path (`/authorize?...&recovery=1`); it is not shown in the normal ChatGPT connector flow.

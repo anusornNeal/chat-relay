@@ -265,7 +265,13 @@ function sendHeartbeat(socket) {
       health: {
         reconnectCount: connectionState.reconnectCount,
         reconnectAttempt: connectionState.reconnectAttempt,
+        processStartedAt: connectionState.processStartedAt,
+        connectedAt: connectionState.connectedAt,
+        lastDisconnectedAt: connectionState.lastDisconnectedAt,
+        lastCloseCode: connectionState.lastCloseCode,
         lastDisconnectReason: connectionState.lastDisconnectReason,
+        lastConnectionDurationMs: connectionState.lastConnectionDurationMs,
+        lastSocketError: connectionState.lastSocketError,
         queues: scheduler.snapshot(),
       },
     }));
@@ -449,6 +455,7 @@ function connect() {
 
   socket.on("error", (error) => {
     if (socket === activeSocket && !stopping && !reauthorizationRequired) {
+      connectionState.markSocketError(error.message);
       console.error("WebSocket error:", error.message);
     }
   });

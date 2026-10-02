@@ -35,9 +35,12 @@ export class AgentConnectionState {
     this.state = "starting";
     this.connectedAt = null;
     this.disconnectedAt = null;
+    this.lastDisconnectedAt = null;
     this.lastHeartbeatAt = null;
     this.lastCloseCode = null;
     this.lastDisconnectReason = null;
+    this.lastConnectionDurationMs = null;
+    this.lastSocketError = null;
     this.reconnectAttempt = 0;
     this.reconnectCount = 0;
     this.nextReconnectAt = null;
@@ -56,7 +59,6 @@ export class AgentConnectionState {
     this.connectedAt = isoTime(now);
     this.disconnectedAt = null;
     this.reconnectAttempt = 0;
-    this.reconnectCount = 0;
     this.nextReconnectAt = null;
     this.nextReconnectDelayMs = null;
   }
@@ -67,11 +69,21 @@ export class AgentConnectionState {
 
   markDisconnected(code, reason, now = Date.now()) {
     this.state = "waiting";
-    this.disconnectedAt = isoTime(now);
+    const disconnectedAt = isoTime(now);
+    const connectedAtMs = this.connectedAt ? Date.parse(this.connectedAt) : NaN;
+    this.disconnectedAt = disconnectedAt;
+    this.lastDisconnectedAt = disconnectedAt;
     this.lastCloseCode = Number.isFinite(Number(code)) ? Number(code) : null;
     this.lastDisconnectReason = cleanReason(reason);
+    this.lastConnectionDurationMs = Number.isFinite(connectedAtMs)
+      ? Math.max(0, Math.trunc(Number(now) - connectedAtMs))
+      : null;
     this.reconnectAttempt += 1;
     this.reconnectCount += 1;
+  }
+
+  markSocketError(reason) {
+    this.lastSocketError = cleanReason(reason);
   }
 
   scheduleReconnect(delayMs, now = Date.now()) {
@@ -111,9 +123,12 @@ export class AgentConnectionState {
       connectingAt: this.connectingAt ?? null,
       connectedAt: this.connectedAt,
       disconnectedAt: this.disconnectedAt,
+      lastDisconnectedAt: this.lastDisconnectedAt,
       lastHeartbeatAt: this.lastHeartbeatAt,
       lastCloseCode: this.lastCloseCode,
       lastDisconnectReason: this.lastDisconnectReason,
+      lastConnectionDurationMs: this.lastConnectionDurationMs,
+      lastSocketError: this.lastSocketError,
       reconnectAttempt: this.reconnectAttempt,
       reconnectCount: this.reconnectCount,
       nextReconnectAt: this.nextReconnectAt,
