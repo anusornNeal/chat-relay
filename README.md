@@ -2,6 +2,8 @@
 
 Remote MCP relay that lets ChatGPT work with a local Windows or macOS machine through a Cloudflare-hosted relay.
 
+**Dashboard:** https://chat-relay.anusorn-hank.workers.dev/
+
 ## Quick start
 
 There are two parts:
