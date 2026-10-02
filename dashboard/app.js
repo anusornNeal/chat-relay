@@ -129,11 +129,7 @@ function registerDetail(event) {
   return id;
 }
 function activityLabel(value) {
-  const id = String(value || "");
-  if (!id) return "Single call";
-  if (id.startsWith("call_")) return "Call " + id.slice(5, 13).toUpperCase();
-  if (id.startsWith("act_")) return "Activity " + id.slice(-8).toUpperCase();
-  return id.length > 16 ? id.slice(0, 8) + "…" + id.slice(-5) : id;
+  return value ? "Related calls" : "Single call";
 }
 function showDetail(id, title = "Safe metadata") {
   const data = detailRecords.get(id);
@@ -719,7 +715,7 @@ function callFilterMarkup() {
     ? '<button id="clearActivity" class="button subtle activity-filter-chip" type="button">' + icon("activity") + esc(activityLabel(callFilters.activityId)) + ' ' + icon("x") + "</button>"
     : "";
   return '<div class="filters-panel"><div class="filters-row">' +
-    '<label class="filter-control grow"><span>Search</span><div class="input-with-icon">' + icon("search") + '<input id="toolSearch" value="' + esc(callFilters.query) + '" placeholder="Tool, agent, activity"></div></label>' +
+    '<label class="filter-control grow"><span>Search</span><div class="input-with-icon">' + icon("search") + '<input id="toolSearch" value="' + esc(callFilters.query) + '" placeholder="Tool, agent"></div></label>' +
     userSelect +
     '<label class="filter-control"><span>Status</span><select id="callStatus">' + statusOptions + "</select></label>" +
     '<div class="filter-window"><span>Window</span><div class="window-chip">' + icon("clock") + esc(windowLabel) + "</div></div>" +
@@ -762,7 +758,6 @@ function callRowMarkup(event) {
     (isAdmin() ? '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + "</span></td>" : "") +
     '<td><div class="tool-cell"><span class="tool-icon">' + icon(toolIconName(event.tool)) + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
     '<td><div class="agent-cell"><strong>' + esc(callAgentName(event)) + "</strong></div></td>" +
-    '<td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
     "<td>" + duration + "</td>" +
     "<td>" + statusBadge(event.status || (event.ok ? "success" : "error")) + "</td>" +
     '<td class="row-chevron">' + icon("chevron") + "</td></tr>";
@@ -845,7 +840,7 @@ async function loadCalls({ patch = false } = {}) {
     .sort((a, b) => Date.parse(b.timestamp || b.startedAt || "") - Date.parse(a.timestamp || a.startedAt || ""));
 
   items.forEach(rememberAgentName);
-  const tableRows = items.length ? items.map(callRowMarkup).join("") : '<tr><td colspan="' + (isAdmin() ? "8" : "7") + '"><div class="table-empty">' + icon("activity") + '<strong>No tool calls in this window</strong><span>New activity appears here in realtime.</span></div></td></tr>';
+  const tableRows = items.length ? items.map(callRowMarkup).join("") : '<tr><td colspan="' + (isAdmin() ? "7" : "6") + '"><div class="table-empty">' + icon("activity") + '<strong>No tool calls in this window</strong><span>New activity appears here in realtime.</span></div></td></tr>';
 
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) +
@@ -853,7 +848,7 @@ async function loadCalls({ patch = false } = {}) {
     (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>History reached its safe bound; results are partial.</span></div>" : "") +
     callFilterMarkup() +
     '<div class="table-wrap calls-table"><table><thead><tr><th>Time</th>' + (isAdmin() ? "<th>User</th>" : "") +
-      "<th>Tool</th><th>Agent</th><th>Activity</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody>" + tableRows + "</tbody></table></div>" +
+      "<th>Tool</th><th>Agent</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody>" + tableRows + "</tbody></table></div>" +
     paginationMarkup("calls", callPaging, Boolean(data.hasMore));
   renderContent(liveMarkup, patch);
   ensureRunningClock();
@@ -979,16 +974,16 @@ async function loadErrors({ patch = false } = {}) {
       '<td><div class="error-cell"><span class="error-icon">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(stage + " · " + retry) + "</span></div></div></td>" +
       '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + '</span></td><td>' + esc(event.tool) + "</td>" +
       '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving…") + "</strong></div></td>" +
-      "<td>" + esc(fmtMs(event.durationMs)) + '</td><td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
+      "<td>" + esc(fmtMs(event.durationMs)) + "</td>" +
       '<td><span class="diagnostic-result">' + esc(diagnosticResult(event)) + '</span></td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
-  }).join("") : '<tr><td colspan="9"><div class="table-empty">' + icon("check") + '<strong>No errors today</strong><span>Safe diagnostics will appear here if a tool invocation fails.</span></div></td></tr>';
+  }).join("") : '<tr><td colspan="8"><div class="table-empty">' + icon("check") + '<strong>No errors today</strong><span>Safe diagnostics will appear here if a tool invocation fails.</span></div></td></tr>';
 
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) + '<span class="privacy-chip">' + icon("info") + "No commands, args, payloads, or output stored</span></div>" +
     (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>Error history reached its safe bound; results are partial.</span></div>" : "") +
     '<div class="filters-panel compact"><div class="filters-row"><label class="filter-control grow"><span>Search errors</span><div class="input-with-icon">' + icon("search") +
       '<input id="errorSearch" placeholder="Code, stage, user, tool, agent"></div></label></div></div>' +
-    '<div class="table-wrap error-table"><table><thead><tr><th>Time</th><th>Diagnostic</th><th>User</th><th>Tool</th><th>Agent</th><th>Duration</th><th>Activity</th><th>Result</th><th></th></tr></thead><tbody>' +
+    '<div class="table-wrap error-table"><table><thead><tr><th>Time</th><th>Diagnostic</th><th>User</th><th>Tool</th><th>Agent</th><th>Duration</th><th>Result</th><th></th></tr></thead><tbody>' +
       rows + "</tbody></table></div>" +
     paginationMarkup("errors", errorPaging, Boolean(data.hasMore));
   renderContent(liveMarkup, patch);
