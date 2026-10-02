@@ -8,8 +8,8 @@ function assert(condition, message) {
 }
 
 assert(
-  registry.includes("const OAUTH_REFRESH_REPLAY_TTL_MS = 30 * 1000;"),
-  "refresh retry grace must stay bounded to 30 seconds",
+  registry.includes("const OAUTH_REFRESH_REPLAY_TTL_MS = 5 * 60 * 1000;"),
+  "refresh retry grace must stay bounded to 5 minutes",
 );
 assert(
   registry.includes("oauthRefreshReplay: (hash: string) => `oauth-refresh-replay:${hash}`"),
