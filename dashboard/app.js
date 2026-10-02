@@ -616,24 +616,10 @@ async function loadOverview({ patch = false } = {}) {
   const boundedNotice = data.bounded
     ? '<div class="data-warning">' + icon("alert") + '<span>This view reached its safe event bound. Counts shown are partial rather than falsely exact.</span></div>'
     : "";
-  const health = data.agentHealth || {};
-  const operationalHealth = isAdmin()
-    ? '<div class="data-warning"><span><strong>Relay health</strong> · Active ' + fmtNum(health.active || 0) +
-      ' · Queued ' + fmtNum(health.queued || 0) +
-      ' · Reconnects ' + fmtNum(health.reconnectCount || 0) +
-      (health.versions?.length ? ' · Agent ' + esc(health.versions.join(", ")) : '') +
-      (health.capabilities?.length ? ' · Capabilities ' + esc(health.capabilities.slice(0, 6).join(", ")) : '') +
-      (health.lastDisconnectReason || health.lastCloseCode ? ' · Last disconnect ' + esc([health.lastCloseCode, health.lastDisconnectReason].filter(Boolean).join(' · ')) : '') +
-      (health.lastConnectionDurationMs != null ? ' · Previous connection ' + esc(fmtMs(health.lastConnectionDurationMs)) : '') +
-      (health.lastSocketError ? ' · Socket ' + esc(health.lastSocketError) : '') +
-      (health.lastDisconnectedAt ? ' · At ' + esc(String(health.lastDisconnectedAt).replace('T', ' ').replace('Z', ' UTC')) : '') +
-      '</span></div>'
-    : "";
   const liveMarkup =
     '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +
       '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
     boundedNotice +
-    operationalHealth +
     '<div class="metric-grid">' + cards.join("") + "</div>" +
     '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by hour</h2></div><span class="panel-meta">Click a bar to inspect invocations</span></div>' +
       chartMarkup(data.buckets || []) + "</section>" +
