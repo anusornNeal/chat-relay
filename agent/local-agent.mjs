@@ -66,7 +66,14 @@ let reauthorizationRequired = false;
 let activeSocket = null;
 let reconnectTimer = null;
 let heartbeatTimer = null;
+let transportHeartbeatTimer = null;
+let transportPongDeadlineTimer = null;
 let stopping = false;
+
+const TRANSPORT_PING_MS = Math.max(5000, Math.min(Number(process.env.AGENT_TRANSPORT_PING_MS) || 20000, 60000));
+const TRANSPORT_PONG_TIMEOUT_MS = Math.max(3000, Math.min(Number(process.env.AGENT_TRANSPORT_PONG_TIMEOUT_MS) || 8000, 30000));
+const FAST_RECONNECT_MS = Math.max(100, Math.min(Number(process.env.AGENT_FAST_RECONNECT_MS) || 250, 5000));
+const FAST_RECONNECT_STABLE_MS = Math.max(5000, Math.min(Number(process.env.AGENT_FAST_RECONNECT_STABLE_MS) || 30000, 300000));
 
 function currentWorkSummary() {
   const terminal = terminals.observability();
@@ -250,9 +257,38 @@ function clearReconnectTimer() {
 }
 
 function stopHeartbeat() {
-  if (!heartbeatTimer) return;
-  clearInterval(heartbeatTimer);
-  heartbeatTimer = null;
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  if (transportHeartbeatTimer) {
+    clearInterval(transportHeartbeatTimer);
+    transportHeartbeatTimer = null;
+  }
+  if (transportPongDeadlineTimer) {
+    clearTimeout(transportPongDeadlineTimer);
+    transportPongDeadlineTimer = null;
+  }
+}
+
+function armTransportPongDeadline(socket) {
+  if (transportPongDeadlineTimer) clearTimeout(transportPongDeadlineTimer);
+  transportPongDeadlineTimer = setTimeout(() => {
+    if (socket !== activeSocket || socket.readyState !== WebSocket.OPEN) return;
+    connectionState.markSocketError("transport_pong_timeout");
+    try { socket.terminate(); } catch {}
+  }, TRANSPORT_PONG_TIMEOUT_MS);
+}
+
+function sendTransportPing(socket) {
+  if (socket !== activeSocket || socket.readyState !== WebSocket.OPEN) return;
+  try {
+    socket.ping();
+    armTransportPongDeadline(socket);
+  } catch (error) {
+    connectionState.markSocketError(error instanceof Error ? error.message : "transport_ping_failed");
+    try { socket.terminate(); } catch {}
+  }
 }
 
 function sendHeartbeat(socket) {
@@ -287,6 +323,7 @@ function startHeartbeat(socket) {
   stopHeartbeat();
   sendHeartbeat(socket);
   heartbeatTimer = setInterval(() => sendHeartbeat(socket), connectionState.heartbeatMs);
+  transportHeartbeatTimer = setInterval(() => sendTransportPing(socket), TRANSPORT_PING_MS);
 }
 
 function sendSocketResponse(socket, requestId, payload, meta) {
@@ -296,8 +333,12 @@ function sendSocketResponse(socket, requestId, payload, meta) {
 
 function scheduleReconnect(code, reason) {
   if (stopping || reauthorizationRequired) return;
+  const stableConnectionMs = connectionState.connectedAt
+    ? Math.max(0, Date.now() - Date.parse(connectionState.connectedAt))
+    : 0;
   connectionState.markDisconnected(code, reason);
-  const delay = connectionState.nextDelay();
+  const isTransientAbnormalClose = Number(code) === 1006 && stableConnectionMs >= FAST_RECONNECT_STABLE_MS;
+  const delay = isTransientAbnormalClose ? FAST_RECONNECT_MS : connectionState.nextDelay();
   connectionState.scheduleReconnect(delay);
   clearReconnectTimer();
   console.log(`Reconnect scheduled in ${delay}ms`);
@@ -361,6 +402,14 @@ function connect() {
     connectionState.markConnected();
     startHeartbeat(socket);
     console.log("Agent connected");
+  });
+
+  socket.on("pong", () => {
+    if (socket !== activeSocket) return;
+    if (transportPongDeadlineTimer) {
+      clearTimeout(transportPongDeadlineTimer);
+      transportPongDeadlineTimer = null;
+    }
   });
 
   socket.on("message", async (raw) => {
