@@ -13,6 +13,11 @@ const MAX_BATCH_CONCURRENCY = 8;
 const DEFAULT_BATCH_CONCURRENCY = 4;
 const DEFAULT_MAX_QUEUED_JOBS = 64;
 const MAX_QUEUED_JOBS = 256;
+const DEFAULT_FAST_EXEC_POOL_SIZE = 2;
+const MAX_FAST_EXEC_POOL_SIZE = 4;
+const DEFAULT_FAST_EXEC_IDLE_MS = 60 * 1000;
+const MIN_FAST_EXEC_IDLE_MS = 5 * 1000;
+const MAX_FAST_EXEC_IDLE_MS = 10 * 60 * 1000;
 const MAX_BATCH_READ_CHARS = 24 * 1024;
 const MAX_JOB_READ_CHARS = 8 * 1024;
 const MAX_RETAINED_BATCHES = 64;
@@ -59,6 +64,7 @@ export function shellForPlatform(platform, preferredShell) {
       displayName: "powershell",
       commandArgs: (command) => ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
       interactiveArgs: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", "-"],
+      persistentArgs: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"],
     };
   }
   const file = preferredShell || (platform === "darwin" ? "/bin/zsh" : "/bin/sh");
@@ -67,6 +73,7 @@ export function shellForPlatform(platform, preferredShell) {
     displayName: path.basename(file),
     commandArgs: (command) => ["-lc", command],
     interactiveArgs: ["-l"],
+    persistentArgs: platform === "darwin" && path.basename(file) === "zsh" ? ["-f"] : [],
   };
 }
 
@@ -88,6 +95,410 @@ function terminateProcessTree(platform, pid) {
     }, 150);
   });
 }
+
+function quotePowerShell(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
+function quotePosix(value) {
+  return "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+}
+
+function canUsePersistentExec(platform, command) {
+  if (typeof command !== "string" || command.includes("\0")) return false;
+  if (platform === "win32") {
+    return !/\b(exit|stop-process|taskkill(?:\.exe)?|start-process\s+-wait|set-location|push-location|pop-location|set-alias|new-alias|remove-alias|set-variable|new-variable|remove-variable|import-module|remove-module|set-psdebug|set-strictmode)\b|\$(?:env|global|script):/i.test(command);
+  }
+  return !/(^|[^&])&([^&]|$)/.test(command);
+}
+
+function persistentExecScript(platform, command, cwd, marker) {
+  const begin = marker + "_BEGIN__";
+  const endPrefix = marker + "_END_";
+  const endSuffix = "__";
+
+  if (platform === "win32") {
+    const psCommand = quotePowerShell(command);
+    const psCwd = quotePowerShell(cwd);
+    const psBegin = quotePowerShell(begin);
+    const psEndPrefix = quotePowerShell(endPrefix);
+    const psEndSuffix = quotePowerShell(endSuffix);
+    return [
+      "& {",
+      "  [Console]::Out.Write(" + psBegin + ")",
+      "  [Console]::Error.Write(" + psBegin + ")",
+      "  $__ChatRelayOldLocation = (Get-Location).Path",
+      "  $global:LASTEXITCODE = $null",
+      "  $__ChatRelayExitCode = 0",
+      "  try {",
+      "    Set-Location -LiteralPath " + psCwd,
+      "    & ([ScriptBlock]::Create(" + psCommand + "))",
+      "    $__ChatRelaySucceeded = $?",
+      "    if ($null -ne $global:LASTEXITCODE) {",
+      "      $__ChatRelayExitCode = [Math]::Max(0, [Math]::Min(2147483647, [int]$global:LASTEXITCODE))",
+      "    } elseif (-not $__ChatRelaySucceeded) {",
+      "      $__ChatRelayExitCode = 1",
+      "    }",
+      "  } catch {",
+      "    [Console]::Error.Write(($_ | Out-String))",
+      "    $__ChatRelayExitCode = 1",
+      "  } finally {",
+      "    Set-Location -LiteralPath $__ChatRelayOldLocation -ErrorAction SilentlyContinue",
+      "  }",
+      "  $__ChatRelayEnd = " + psEndPrefix + " + [string]$__ChatRelayExitCode + " + psEndSuffix,
+      "  [Console]::Out.Write($__ChatRelayEnd)",
+      "  [Console]::Error.Write($__ChatRelayEnd)",
+      "}",
+    ].join("\n");
+  }
+
+  const shCommand = quotePosix(command);
+  const shCwd = quotePosix(cwd);
+  const shBegin = quotePosix(begin);
+  const shEndPrefix = quotePosix(endPrefix);
+  const shEndSuffix = quotePosix(endSuffix);
+  return [
+    "printf %s " + shBegin,
+    "printf %s " + shBegin + " >&2",
+    "(",
+    "  cd -- " + shCwd + " || exit 200",
+    "  eval " + shCommand,
+    ")",
+    "__chat_relay_exit_code=$?",
+    "printf '%s%s%s' " + shEndPrefix + " \"$__chat_relay_exit_code\" " + shEndSuffix,
+    "printf '%s%s%s' " + shEndPrefix + " \"$__chat_relay_exit_code\" " + shEndSuffix + " >&2",
+  ].join("\n");
+}
+
+class PersistentExecWorker {
+  constructor({ platform, shell }) {
+    this.platform = platform;
+    this.shell = shell;
+    this.child = null;
+    this.startPromise = null;
+    this.current = null;
+    this.reserved = false;
+    this.idleTimer = null;
+  }
+
+  get busy() {
+    return this.reserved || this.current !== null;
+  }
+
+  async run(command, cwd, timeoutMs) {
+    if (this.reserved || this.current) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "", error: "fast_exec_busy", fastExecUnavailable: true };
+    }
+    this.reserved = true;
+    try {
+      await this.#ensureStarted();
+      if (!this.child?.stdin?.writable) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: "", error: "fast_exec_unavailable", fastExecUnavailable: true };
+      }
+
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+      const marker = "__CHAT_RELAY_" + randomUUID().replace(/-/g, "") + "__";
+      const begin = marker + "_BEGIN__";
+      const endPrefix = marker + "_END_";
+      const endSuffix = "__";
+
+      return await new Promise((resolve) => {
+        const current = {
+          resolve,
+          begin,
+          endPrefix,
+          endSuffix,
+          stdout: "",
+          stderr: "",
+          stdoutBuffer: "",
+          stderrBuffer: "",
+          stdoutStarted: false,
+          stderrStarted: false,
+          stdoutEnded: false,
+          stderrEnded: false,
+          exitCode: 0,
+          startedAt: Date.now(),
+          timer: null,
+        };
+        current.timer = setTimeout(() => {
+          if (this.current !== current) return;
+          this.current = null;
+          void this.#terminate();
+          resolve({
+            ok: false,
+            exitCode: 1,
+            stdout: current.stdout,
+            stderr: current.stderr,
+            error: "Command timed out after " + timeoutMs + "ms",
+            execMode: "persistent-shell",
+          });
+        }, timeoutMs);
+        this.current = current;
+
+        const script = persistentExecScript(this.platform, command, cwd, marker);
+        try {
+          this.child.stdin.write(script + os.EOL + os.EOL);
+        } catch (error) {
+          clearTimeout(current.timer);
+          this.current = null;
+          resolve({
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: "",
+            error: error instanceof Error ? error.message : "fast_exec_write_failed",
+            fastExecUnavailable: true,
+          });
+        }
+      });
+    } finally {
+      this.reserved = false;
+    }
+  }
+
+  scheduleIdleClose(idleMs) {
+    if (this.busy || !this.child) return;
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      if (!this.busy) void this.#terminate();
+    }, idleMs);
+    this.idleTimer.unref?.();
+  }
+
+  close() {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    void this.#terminate();
+  }
+
+  async #ensureStarted() {
+    if (this.child && !this.child.killed) return;
+    if (this.startPromise) return this.startPromise;
+
+    this.startPromise = new Promise((resolve, reject) => {
+      const child = spawn(this.shell.file, this.shell.persistentArgs || [], {
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        detached: this.platform !== "win32",
+      });
+      const onError = (error) => {
+        cleanup();
+        if (this.child === child) this.child = null;
+        reject(error);
+      };
+      const onSpawn = () => {
+        cleanup();
+        this.child = child;
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => this.#onData("stdout", chunk));
+        child.stderr.on("data", (chunk) => this.#onData("stderr", chunk));
+        child.stdin.on("error", (error) => this.#onPipeError(child, error));
+        child.on("exit", (code, signal) => this.#onExit(child, code, signal));
+        child.on("error", () => {});
+        resolve();
+      };
+      const cleanup = () => {
+        child.off("error", onError);
+        child.off("spawn", onSpawn);
+      };
+      child.once("error", onError);
+      child.once("spawn", onSpawn);
+    }).finally(() => {
+      this.startPromise = null;
+    });
+
+    return this.startPromise;
+  }
+
+  #onData(stream, chunk) {
+    const current = this.current;
+    if (!current) return;
+    const bufferKey = stream + "Buffer";
+    const startedKey = stream + "Started";
+    const endedKey = stream + "Ended";
+    const outputKey = stream;
+
+    current[bufferKey] += String(chunk);
+    if (!current[startedKey]) {
+      const beginIndex = current[bufferKey].indexOf(current.begin);
+      if (beginIndex < 0) {
+        if (current[bufferKey].length > current.begin.length) {
+          current[bufferKey] = current[bufferKey].slice(-current.begin.length);
+        }
+        return;
+      }
+      current[bufferKey] = current[bufferKey].slice(beginIndex + current.begin.length);
+      current[startedKey] = true;
+    }
+
+    const endIndex = current[bufferKey].indexOf(current.endPrefix);
+    if (endIndex < 0) {
+      if (Buffer.byteLength(current[bufferKey], "utf8") > MAX_EXEC_BUFFER + current.endPrefix.length + 32) {
+        this.#overflow(stream, current);
+      }
+      return;
+    }
+
+    const tail = current[bufferKey].slice(endIndex + current.endPrefix.length);
+    const suffixIndex = tail.indexOf(current.endSuffix);
+    if (suffixIndex < 0) return;
+
+    current[outputKey] += current[bufferKey].slice(0, endIndex);
+    const parsedCode = Number.parseInt(tail.slice(0, suffixIndex), 10);
+    if (Number.isInteger(parsedCode)) current.exitCode = parsedCode;
+    current[bufferKey] = tail.slice(suffixIndex + current.endSuffix.length);
+    current[endedKey] = true;
+
+    if (Buffer.byteLength(current[outputKey], "utf8") > MAX_EXEC_BUFFER) {
+      this.#overflow(stream, current);
+      return;
+    }
+    this.#completeIfDone(current);
+  }
+
+  #overflow(stream, current) {
+    if (this.current !== current) return;
+    clearTimeout(current.timer);
+    const clipped = clipText(current[stream] + current[stream + "Buffer"], MAX_EXEC_BUFFER);
+    current[stream] = clipped.text;
+    this.current = null;
+    void this.#terminate();
+    current.resolve({
+      ok: false,
+      exitCode: 1,
+      stdout: current.stdout,
+      stderr: current.stderr,
+      error: stream + " maxBuffer exceeded",
+      execMode: "persistent-shell",
+    });
+  }
+
+  #completeIfDone(current) {
+    if (this.current !== current || !current.stdoutEnded || !current.stderrEnded) return;
+    clearTimeout(current.timer);
+    this.current = null;
+    current.resolve({
+      ok: current.exitCode === 0,
+      exitCode: current.exitCode,
+      stdout: current.stdout,
+      stderr: current.stderr,
+      error: current.exitCode === 0 ? null : "Command failed with exit code " + current.exitCode,
+      execMode: "persistent-shell",
+      shellMs: Math.max(0, Date.now() - current.startedAt),
+    });
+  }
+
+  #onPipeError(child, error) {
+    if (this.child !== child) return;
+    const current = this.current;
+    if (!current) return;
+    clearTimeout(current.timer);
+    this.current = null;
+    void this.#terminate();
+    current.resolve({
+      ok: false,
+      exitCode: 1,
+      stdout: current.stdout,
+      stderr: current.stderr,
+      error: "Persistent shell pipe failed: " + (error instanceof Error ? error.message : String(error)),
+      execMode: "persistent-shell",
+    });
+  }
+
+  #onExit(child, code, signal) {
+    if (this.child !== child) return;
+    this.child = null;
+    const current = this.current;
+    if (!current) return;
+    clearTimeout(current.timer);
+    this.current = null;
+    current.resolve({
+      ok: false,
+      exitCode: Number.isInteger(code) ? code : 1,
+      stdout: current.stdout,
+      stderr: current.stderr,
+      error: signal ? "Persistent shell exited with signal " + signal : "Persistent shell exited unexpectedly",
+      execMode: "persistent-shell",
+    });
+  }
+
+  async #terminate() {
+    const child = this.child;
+    this.child = null;
+    if (!child) return;
+    try { child.stdin?.end(); } catch {}
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await terminateProcessTree(this.platform, child.pid);
+  }
+}
+
+class PersistentExecPool {
+  constructor({ platform, shell, size, idleMs }) {
+    this.platform = platform;
+    this.shell = shell;
+    this.size = size;
+    this.idleMs = idleMs;
+    this.workers = [];
+    this.queue = [];
+  }
+
+  exec(command, cwd, timeoutMs) {
+    return new Promise((resolve) => {
+      this.queue.push({ command, cwd, timeoutMs, resolve });
+      this.#pump();
+    });
+  }
+
+  snapshot() {
+    return {
+      enabled: true,
+      size: this.size,
+      workers: this.workers.length,
+      busy: this.workers.filter((worker) => worker.busy).length,
+      queued: this.queue.length,
+      idleMs: this.idleMs,
+    };
+  }
+
+  close() {
+    for (const worker of this.workers) worker.close();
+    this.workers.length = 0;
+    while (this.queue.length > 0) {
+      const job = this.queue.shift();
+      job.resolve({ ok: false, exitCode: 1, stdout: "", stderr: "", error: "terminal_closed" });
+    }
+  }
+
+  #pump() {
+    while (this.queue.length > 0) {
+      let worker = this.workers.find((item) => !item.busy);
+      if (!worker && this.workers.length < this.size) {
+        worker = new PersistentExecWorker({ platform: this.platform, shell: this.shell });
+        this.workers.push(worker);
+      }
+      if (!worker) return;
+
+      const job = this.queue.shift();
+      worker.run(job.command, job.cwd, job.timeoutMs)
+        .then(job.resolve)
+        .catch((error) => job.resolve({
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: "",
+          error: error instanceof Error ? error.message : "fast_exec_unavailable",
+          fastExecUnavailable: true,
+        }))
+        .finally(() => {
+          worker.scheduleIdleClose(this.idleMs);
+          this.#pump();
+        });
+    }
+  }
+}
+
 function clipText(value, limit) {
   const text = typeof value === "string" ? value : "";
   if (text.length <= limit) return { text, truncated: false };
@@ -128,6 +539,28 @@ export class TerminalManager {
       1,
       MAX_QUEUED_JOBS,
     );
+    this.fastExecEnabled = options.fastExec !== false;
+    this.fastExecPoolSize = normalizeInteger(
+      options.fastExecPoolSize,
+      DEFAULT_FAST_EXEC_POOL_SIZE,
+      1,
+      MAX_FAST_EXEC_POOL_SIZE,
+    );
+    this.fastExecIdleMs = normalizeInteger(
+      options.fastExecIdleMs,
+      DEFAULT_FAST_EXEC_IDLE_MS,
+      MIN_FAST_EXEC_IDLE_MS,
+      MAX_FAST_EXEC_IDLE_MS,
+    );
+    this.fastExecPool = this.fastExecEnabled
+      ? new PersistentExecPool({
+          platform: this.platform,
+          shell: this.shell,
+          size: this.fastExecPoolSize,
+          idleMs: this.fastExecIdleMs,
+        })
+      : null;
+    this.fastExecStats = { persistent: 0, isolated: 0, unavailable: 0 };
   }
 
   async exec(command, cwd, timeoutMs) {
@@ -135,6 +568,20 @@ export class TerminalManager {
     const resolvedCwd = safeCwd(cwd);
     const timeout = normalizeTimeout(timeoutMs);
 
+    if (this.fastExecPool && canUsePersistentExec(this.platform, command)) {
+      const result = await this.fastExecPool.exec(command, resolvedCwd, timeout);
+      if (!result?.fastExecUnavailable) {
+        this.fastExecStats.persistent += 1;
+        return result;
+      }
+      this.fastExecStats.unavailable += 1;
+    }
+
+    this.fastExecStats.isolated += 1;
+    return this.#execIsolated(command, resolvedCwd, timeout);
+  }
+
+  #execIsolated(command, resolvedCwd, timeout) {
     return new Promise((resolve) => {
       execFile(
         this.shell.file,
@@ -152,10 +599,25 @@ export class TerminalManager {
             stdout: stdout ?? "",
             stderr: stderr ?? "",
             error: error ? error.message : null,
+            execMode: "isolated",
           });
         },
       );
     });
+  }
+
+  getExecConfig() {
+    return {
+      enabled: this.fastExecEnabled,
+      poolSize: this.fastExecPoolSize,
+      idleMs: this.fastExecIdleMs,
+      stats: { ...this.fastExecStats },
+      pool: this.fastExecPool?.snapshot() || null,
+    };
+  }
+
+  close() {
+    this.fastExecPool?.close();
   }
 
   start(command, cwd, observability) {

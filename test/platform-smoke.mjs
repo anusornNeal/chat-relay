@@ -43,10 +43,47 @@ async function waitForBatch(manager, batchId, timeoutMs = 5000) {
 }
 
 async function terminalTests() {
-  const manager = new TerminalManager({ platform });
+  const manager = new TerminalManager({ platform, fastExecPoolSize: 2, fastExecIdleMs: 5000 });
 
   const execResult = await manager.exec(command("platform-exec-ok"));
   assert(execResult.ok && execResult.stdout.includes("platform-exec-ok"), "platform terminal exec failed");
+  assert(execResult.execMode === "persistent-shell", "terminal exec did not use persistent fast path");
+
+  const secondExec = await manager.exec(command("platform-exec-reuse"));
+  assert(secondExec.ok && secondExec.stdout.includes("platform-exec-reuse"), "persistent shell reuse failed");
+
+  const stateSet = isWindows
+    ? '$chatRelayFastLocal = "secret"; Write-Output "state-set"'
+    : "CHAT_RELAY_FAST_LOCAL=secret; printf 'state-set\\n'";
+  const stateCheck = isWindows
+    ? 'if (Get-Variable chatRelayFastLocal -ErrorAction SilentlyContinue) { Write-Output "leaked" } else { Write-Output "clean" }'
+    : "printf '%s\\n' \"${CHAT_RELAY_FAST_LOCAL-unset}\"";
+  const stateSetResult = await manager.exec(stateSet);
+  const stateCheckResult = await manager.exec(stateCheck);
+  assert(stateSetResult.ok && stateSetResult.execMode === "persistent-shell", "fast exec state setup failed");
+  assert(stateCheckResult.ok && (isWindows ? stateCheckResult.stdout.includes("clean") : stateCheckResult.stdout.includes("unset")), "persistent shell leaked command state");
+
+  const failedExec = await manager.exec(isWindows ? "Get-Item 'Z:\\__chat_relay_missing__' -ErrorAction Stop" : "false");
+  assert(!failedExec.ok && failedExec.exitCode !== 0 && failedExec.execMode === "persistent-shell", "fast exec failure semantics changed");
+
+  const parallel = await Promise.all([
+    manager.exec(command("platform-parallel-a")),
+    manager.exec(command("platform-parallel-b")),
+  ]);
+  assert(parallel.every((item) => item.ok && item.execMode === "persistent-shell"), "parallel persistent exec failed");
+
+  const isolated = new TerminalManager({ platform, fastExec: false });
+  const isolatedExec = await isolated.exec(command("platform-isolated-ok"));
+  assert(isolatedExec.ok && isolatedExec.execMode === "isolated", "isolated terminal fallback failed");
+  isolated.close();
+
+  if (isWindows) {
+    const statefulFallback = await manager.exec('$env:CHAT_RELAY_FAST_TEST = "x"; Write-Output $env:CHAT_RELAY_FAST_TEST');
+    assert(statefulFallback.ok && statefulFallback.execMode === "isolated", "stateful PowerShell command did not use isolated fallback");
+  }
+
+  const execConfig = manager.getExecConfig();
+  assert(execConfig.enabled && execConfig.stats.persistent >= 5 && execConfig.pool?.workers >= 1, "fast exec observability missing");
 
   const session = manager.start(command("platform-session-ok"));
   await waitForSession(manager, session.sessionId, "platform-session-ok");
@@ -65,6 +102,7 @@ async function terminalTests() {
   manager.write(shell.sessionId, command("platform-shell-ok"));
   await waitForSession(manager, shell.sessionId, "platform-shell-ok");
   await manager.kill(shell.sessionId);
+  manager.close();
 }
 
 async function processTests() {

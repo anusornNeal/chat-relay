@@ -19,6 +19,8 @@ https://chat-relay.anusorn-hank.workers.dev/mcp
 
 Complete the OAuth sign-in when ChatGPT opens the authorization flow.
 
+ChatGPT MCP should connect to the plain `/mcp` endpoint. The legacy `/mcp?key=<USER_TOKEN>` flow remains available only during migration and should not be used for new connections.
+
 ChatGPT connects to the cloud relay. To actually access files, terminal, processes, or desktop controls on a computer, that computer must also be running the local agent below.
 
 ### 2. Run the local agent with `npx`
@@ -84,7 +86,7 @@ Useful options:
 Depending on the device grants and local configuration, Chat Relay can expose:
 
 - Filesystem operations inside configured allowed roots.
-- Terminal commands and persistent terminal sessions.
+- Terminal commands and persistent terminal sessions. Short stateless commands automatically reuse a cross-platform shell pool; stateful commands fall back to isolated execution.
 - Process inspection and termination.
 - Windows/macOS screenshots, mouse input, and keyboard input when desktop access is explicitly enabled.
 - Multiple computers under one account, with per-device routing and permissions.

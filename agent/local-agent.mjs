@@ -25,6 +25,9 @@ const MAX_RESPONSE_BYTES = 60 * 1024;
 const terminals = new TerminalManager({
   batchConcurrency: process.env.TERMINAL_BATCH_CONCURRENCY,
   maxQueuedJobs: process.env.TERMINAL_BATCH_MAX_QUEUED,
+  fastExec: process.env.TERMINAL_FAST_EXEC !== "0",
+  fastExecPoolSize: process.env.TERMINAL_FAST_EXEC_POOL_SIZE,
+  fastExecIdleMs: process.env.TERMINAL_FAST_EXEC_IDLE_MS,
 });
 const scheduler = new CapabilityScheduler({
   maxQueued: process.env.AGENT_MAX_QUEUED,
@@ -116,6 +119,7 @@ async function handlePayload(payload) {
         agentName,
         terminalEnabled,
         terminalBatch: terminals.getBatchConfig(),
+        terminalExec: terminals.getExecConfig(),
         concurrency: scheduler.snapshot(),
         desktop: desktop.getConfig(),
         allowedRoots: files.getRoots(),
@@ -313,6 +317,7 @@ function requireProtocolUpdate(details = {}) {
   const socket = activeSocket;
   activeSocket = null;
   try { socket?.terminate(); } catch {}
+  terminals.close();
   desktop.close();
   const expected = details.expectedProtocolVersion ?? "current";
   const received = details.receivedProtocolVersion ?? agentHello.protocolVersion;
@@ -329,6 +334,7 @@ function requireReauthorization(reason = "credential_revoked") {
   const socket = activeSocket;
   activeSocket = null;
   try { socket?.terminate(); } catch {}
+  terminals.close();
   desktop.close();
   console.error("Agent credential was revoked or rejected.");
   console.error('Recovery: run "chat-relay login --force", then "chat-relay remote".');
@@ -402,6 +408,7 @@ function connect() {
         handlerDurationMs,
         lane: scheduleMeta.lane,
         ...(timing ? { timing } : {}),
+        ...(typeof result?.execMode === "string" ? { execMode: result.execMode } : {}),
         ok: !(result && typeof result === "object" && result.ok === false),
       });
       if (recentCalls.length > 100) recentCalls.shift();
@@ -470,6 +477,7 @@ function restartAgentProcess() {
   const socket = activeSocket;
   activeSocket = null;
   try { socket?.close(1012, "restart_requested"); } catch {}
+  terminals.close();
   desktop.close();
   setTimeout(() => process.exit(AGENT_RESTART_EXIT_CODE), 50);
 }
@@ -483,12 +491,13 @@ function shutdown(reason) {
   const socket = activeSocket;
   activeSocket = null;
   try { socket?.close(1000, "client_shutdown"); } catch {}
+  terminals.close();
   desktop.close();
   setTimeout(() => process.exit(0), 50);
 }
 
 process.once("SIGINT", () => shutdown("SIGINT"));
 process.once("SIGTERM", () => shutdown("SIGTERM"));
-process.once("exit", () => desktop.close());
+process.once("exit", () => { terminals.close(); desktop.close(); });
 
 connect();

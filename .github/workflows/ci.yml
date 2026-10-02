@@ -20,6 +20,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci --omit=dev
+      - run: npm run test:platform
       - run: node scripts/verify-publish.mjs
       - run: npm audit --omit=dev
 
