@@ -182,8 +182,12 @@ tr:last-child td{border-bottom:0}
 .detail-actions{display:flex;justify-content:flex-end;padding:12px 11px;border-top:1px solid #edf0f2;background:#fafbfc}
 .avatar{display:grid;place-items:center;width:30px;height:30px;border-radius:9px;background:#edf1f4;color:#45505a;font-weight:750}
 .role-tag{display:inline-block;background:#f7f9fa}
-.agent-count strong{display:block;font-size:12px}
-.agent-count span{display:block;color:#8d969f;font-size:9px;margin-top:2px}
+.agent-count{display:grid;gap:5px;min-width:190px}
+.agent-assignment-list{display:flex;gap:5px;flex-wrap:wrap}
+.agent-assignment{display:inline-flex!important;align-items:center;gap:5px;padding:4px 7px;border:1px solid var(--line);border-radius:999px;background:#f8fafb;color:#505a64!important;font-size:10px!important;margin:0!important}
+.agent-dot{width:6px;height:6px;border-radius:50%;background:#aeb5bc;flex:0 0 auto}
+.agent-dot.online{background:#2f8a5b;box-shadow:0 0 0 2px rgba(47,138,91,.12)}
+.agent-summary{display:block;color:#8d969f;font-size:9px;margin-top:0}
 .current-user-label{font-size:10px;color:#858e97}
 
 .privacy-note{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#f8f9fa;color:#69727c;font-size:12px}

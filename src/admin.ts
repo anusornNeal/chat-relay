@@ -626,10 +626,20 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
           const agent = agentById.get(id);
           return agent && agent.enabled && !agent.retiredAt;
         });
+        const assignedAgents = activeIds
+          .map((id) => agentById.get(id))
+          .filter(Boolean)
+          .map((agent: any) => ({
+            id: agent.id,
+            name: agent.name || agent.id,
+            online: agent.online === true,
+          }))
+          .sort((a: any, b: any) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
         return {
           ...user,
-          agentCount: activeIds.length,
-          onlineAgentCount: activeIds.filter((id) => agentById.get(id)?.online === true).length,
+          agentCount: assignedAgents.length,
+          onlineAgentCount: assignedAgents.filter((agent: any) => agent.online).length,
+          assignedAgents,
         };
       });
     return Response.json(page(items, url));

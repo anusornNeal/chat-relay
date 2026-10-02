@@ -734,6 +734,12 @@ function rememberAgentName(event) {
 function callAgentName(event) {
   return event?.agentName || (event?.agentId ? agentNameCache.get(String(event.agentId)) : "") || "Resolving…";
 }
+function userDisplayName(userId) {
+  const id = String(userId || "");
+  if (!id) return "-";
+  const user = adminUsersCache.find((item) => item.id === id);
+  return user?.name || user?.login || id;
+}
 function callEventMatchesFilters(event) {
   const when = Date.parse(event.startedAt || event.timestamp || "");
   if (callFilters.from && Number.isFinite(when) && when < Date.parse(callFilters.from)) return false;
@@ -753,7 +759,7 @@ function callRowMarkup(event) {
     : esc(fmtMs(event.durationMs));
   return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Tool call detail">' +
     '<td class="time-cell"><strong>' + esc(when ? bkkTime(when) : "-") + "</strong></td>" +
-    (isAdmin() ? '<td><span class="user-cell">' + esc(event.userId || "-") + "</span></td>" : "") +
+    (isAdmin() ? '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + "</span></td>" : "") +
     '<td><div class="tool-cell"><span class="tool-icon">' + icon(toolIconName(event.tool)) + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
     '<td><div class="agent-cell"><strong>' + esc(callAgentName(event)) + "</strong></div></td>" +
     '<td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
@@ -893,10 +899,16 @@ async function loadUsers({ patch = false } = {}) {
   adminUsersCache = Array.isArray(data.items) ? data.items : adminUsersCache;
   const rows = (data.items || []).map((user) => {
     const agentMeta = fmtNum(user.agentCount) + " assigned · " + fmtNum(user.onlineAgentCount) + " online";
+    const assignedAgents = Array.isArray(user.assignedAgents) ? user.assignedAgents : [];
+    const agentMarkup = assignedAgents.length
+      ? '<div class="agent-assignment-list">' + assignedAgents.map((agent) =>
+          '<span class="agent-assignment" title="' + esc(agent.id) + '"><i class="agent-dot ' + (agent.online ? 'online' : '') + '"></i>' + esc(agent.name || agent.id) + '</span>'
+        ).join('') + '</div><span class="agent-summary">' + esc(agentMeta) + '</span>'
+      : '<span class="agent-summary">No assigned agents</span>';
     return '<tr data-filter-row data-live-key="' + esc(user.id) + '"><td><div class="identity-stack"><span class="avatar">' + esc((user.name || user.login || "?").slice(0, 1).toUpperCase()) + '</span><div><div class="primary-text">' + esc(user.name) + '</div><div class="secondary-text">' + esc(user.login || user.id) + "</div></div></div></td>" +
       '<td><span class="role-tag">' + esc(user.admin ? "Admin" : "User") + "</span></td>" +
       '<td>' + statusBadge(user.deletedAt ? "error" : user.enabled ? "success" : "disabled").replace("Success", "Enabled").replace("Error", "Deleted") + "</td>" +
-      '<td><div class="agent-count"><strong>' + fmtNum(user.agentCount) + '</strong><span>' + esc(agentMeta) + "</span></div></td>" +
+      '<td><div class="agent-count">' + agentMarkup + "</div></td>" +
       '<td>' + esc(user.createdAt ? new Intl.DateTimeFormat("en-GB", { timeZone: BKK_TZ, day: "2-digit", month: "short", year: "numeric" }).format(new Date(user.createdAt)) : "-") + "</td>" +
       '<td>' + (user.id === currentUser.id
         ? '<span class="current-user-label">Current user</span>'
@@ -908,14 +920,12 @@ async function loadUsers({ patch = false } = {}) {
 
   const liveMarkup =
     '<div class="filters-panel compact"><div class="filters-row"><label class="filter-control grow"><span>Search users</span><div class="input-with-icon">' +
-      icon("search") + '<input id="userSearch" placeholder="Name, login, role, agent"></div></label>' +
-      '<button id="addUser" class="button primary" type="button">' + icon("plus") + "Add user</button></div></div>" +
+      icon("search") + '<input id="userSearch" placeholder="Name, login, role, agent"></div></label></div></div>' +
     '<div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Agents</th><th>Created</th><th>Action</th></tr></thead><tbody>' +
       (rows || '<tr><td colspan="6"><div class="table-empty">No users.</div></td></tr>') + "</tbody></table></div>";
   renderContent(liveMarkup, patch);
 
   bindTableFilter("userSearch");
-  $("addUser").onclick = () => { $("userForm").reset(); $("userFormError").textContent = ""; $("userDialog").showModal(); };
   document.querySelectorAll("[data-delete]").forEach((button) => button.onclick = () => {
     pendingDeleteUser = button.dataset.delete;
     $("confirmCopy").textContent = "Disable dashboard and relay access for " + button.dataset.name + "?";
@@ -931,7 +941,7 @@ function diagnosticStageLabel(stage) {
   return ({
     validation: "Validation",
     policy: "Policy",
-    process: "Process",
+    process: "Command execution",
     worker: "Worker",
     relay: "Relay",
     agent: "Agent",
@@ -950,6 +960,7 @@ async function loadErrors({ patch = false } = {}) {
   if (!isAdmin()) return switchView("overview");
   setHeader("Errors", "Safe diagnostics for failed tool invocations");
   await ensureCallPeriod();
+  await loadAdminUsersForFilter();
   const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
   if (dashboardPeriod?.from) params.set("from", dashboardPeriod.from);
   params.set("to", new Date().toISOString());
@@ -966,7 +977,7 @@ async function loadErrors({ patch = false } = {}) {
     return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Error diagnostic">' +
       '<td class="time-cell"><strong>' + esc(bkkTime(event.timestamp)) + "</strong></td>" +
       '<td><div class="error-cell"><span class="error-icon">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(stage + " · " + retry) + "</span></div></div></td>" +
-      "<td>" + esc(event.userId) + "</td><td>" + esc(event.tool) + "</td>" +
+      '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + '</span></td><td>' + esc(event.tool) + "</td>" +
       '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving…") + "</strong></div></td>" +
       "<td>" + esc(fmtMs(event.durationMs)) + '</td><td class="activity-cell" title="' + esc(event.activityId || "") + '">' + esc(activityLabel(event.activityId)) + "</td>" +
       '<td><span class="diagnostic-result">' + esc(diagnosticResult(event)) + '</span></td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
@@ -986,27 +997,6 @@ async function loadErrors({ patch = false } = {}) {
   bindPaging("errors", errorPaging, loadErrors);
 }
 
-$("loginForm").onsubmit = async (event) => {
-  event.preventDefault();
-  $("loginError").textContent = "";
-  try {
-    const data = await api("/admin/session/login", { method: "POST", body: JSON.stringify({ login: $("loginName").value, password: $("password").value }) });
-    csrf = data.csrfToken;
-    sessionStorage.setItem("chat_relay_csrf", csrf);
-    currentUser = data.user;
-    $("password").value = "";
-    $("loginView").hidden = true;
-    $("appView").hidden = false;
-    $("who").textContent = (currentUser.name || currentUser.login) + " · " + (isAdmin() ? "Admin" : "User");
-    $("roleBadge").innerHTML = icon(isAdmin() ? "server" : "users") + (isAdmin() ? "Admin workspace" : "User workspace");
-    activeView = "overview";
-    renderNav();
-    await loadActive({ patch: false });
-    startLiveChannel();
-  } catch (error) {
-    $("loginError").textContent = error.message;
-  }
-};
 $("logout").onclick = async () => {
   try { await api("/admin/session/logout", { method: "POST", body: "{}" }); } catch {}
   signOutUi();
@@ -1015,25 +1005,6 @@ $("refresh").innerHTML = icon("refresh");
 $("refresh").setAttribute("aria-label", "Refresh dashboard");
 $("refresh").onclick = () => void refreshActiveIncrementally();
 $("logout").insertAdjacentHTML("afterbegin", icon("logout"));
-$("userForm").onsubmit = async (event) => {
-  event.preventDefault();
-  try {
-    await api("/admin/api/users", {
-      method: "POST",
-      body: JSON.stringify({
-        name: $("newName").value,
-        login: $("newLogin").value,
-        password: $("newPassword").value,
-        admin: $("newAdmin").value === "true",
-      }),
-    });
-    $("userDialog").close();
-    adminUsersCache = [];
-    await loadUsers({ patch: true });
-  } catch (error) {
-    $("userFormError").textContent = error.message;
-  }
-};
 document.querySelectorAll("[data-close-dialog]").forEach((button) => button.onclick = () => button.closest("dialog").close());
 $("cancelDelete").onclick = () => { $("confirmDialog").close(); pendingDeleteUser = null; };
 $("confirmDelete").onclick = async () => {

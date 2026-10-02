@@ -9,22 +9,17 @@
 </head>
 <body>
   <section id="loginView" class="auth-shell">
-    <form id="loginForm" class="auth-card">
+    <div class="auth-card">
       <div class="brand-row">
         <span class="brand-mark">CR</span>
         <div><strong>Chat Relay</strong><small>Operations dashboard</small></div>
       </div>
       <div class="auth-copy">
         <h1>Sign in</h1>
-        <p>Use your Google account. The owner password remains available for recovery.</p>
+        <p>Use your Google account to access Chat Relay.</p>
       </div>
       <a class="button google" href="/admin/google/start">Continue with Google</a>
-      <div class="auth-divider"><span>Owner recovery</span></div>
-      <label>Owner login<input id="loginName" autocomplete="username" required></label>
-      <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
-      <button class="button" type="submit">Sign in with password</button>
-      <p id="loginError" class="form-error" role="alert"></p>
-    </form>
+    </div>
   </section>
 
   <div id="appView" class="app-shell" hidden>
@@ -59,25 +54,6 @@
       <section id="content" aria-live="polite"></section>
     </main>
   </div>
-
-  <dialog id="userDialog" class="dialog">
-    <form id="userForm" method="dialog">
-      <div class="dialog-head">
-        <div><h2>Add user</h2><p>Create Admin or User dashboard access.</p></div>
-        <button type="button" class="button small" data-close-dialog>Close</button>
-      </div>
-      <label>Name<input id="newName" required maxlength="120"></label>
-      <label>Login<input id="newLogin" required minlength="3" maxlength="64"></label>
-      <label>Temporary password<input id="newPassword" type="password" required minlength="8" maxlength="128"></label>
-      <label>Role<select id="newAdmin"><option value="false">User</option><option value="true">Admin</option></select></label>
-      <p class="privacy-note">Quota configuration is intentionally excluded from this release.</p>
-      <div class="dialog-actions">
-        <button type="button" class="button" data-close-dialog>Cancel</button>
-        <button class="button primary" type="submit">Create user</button>
-      </div>
-      <p id="userFormError" class="form-error"></p>
-    </form>
-  </dialog>
 
   <dialog id="confirmDialog" class="dialog">
     <div class="dialog-head">
