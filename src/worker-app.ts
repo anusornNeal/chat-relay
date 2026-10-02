@@ -638,6 +638,14 @@ function annotationsForTool(name: string, override: Record<string, boolean> = {}
   };
 }
 
+function oauthToolSecurity() {
+  const securitySchemes = [{ type: "oauth2", scopes: ["mcp", "offline_access"] }];
+  return {
+    securitySchemes,
+    _meta: { securitySchemes },
+  };
+}
+
 const SCREENSHOT_UI_URI = "ui://chat-relay/screenshot-v3.html";
 
 function createMcpServer(env: Env, user: AuthUser) {
@@ -645,7 +653,7 @@ function createMcpServer(env: Env, user: AuthUser) {
 
   server.registerTool(
     "whoami",
-    { description: "Show the authenticated relay user.", inputSchema: {}, annotations: annotationsForTool("whoami") } as any,
+    { description: "Show the authenticated relay user.", inputSchema: {}, annotations: annotationsForTool("whoami"), ...oauthToolSecurity() } as any,
     async () => instrumentTool(env, user, "whoami", {}, async () => {
       const value = toolResult({ ok: true, body: JSON.stringify({ user }) });
       return { value, ok: true };
@@ -654,7 +662,7 @@ function createMcpServer(env: Env, user: AuthUser) {
 
   server.registerTool(
     "list_agents",
-    { description: "List agents this user can access, including scopes and online status.", inputSchema: {}, annotations: annotationsForTool("list_agents") } as any,
+    { description: "List agents this user can access, including scopes and online status.", inputSchema: {}, annotations: annotationsForTool("list_agents"), ...oauthToolSecurity() } as any,
     async () => instrumentTool(env, user, "list_agents", {}, async () => {
       const call = await listUserAgents(env, user);
       return { value: toolResult(call), ok: call.ok };
@@ -667,6 +675,7 @@ function createMcpServer(env: Env, user: AuthUser) {
       description: "Check whether a permitted local agent is reachable.",
       inputSchema: { agentId: agentIdSchema },
       annotations: annotationsForTool("ping_agent"),
+      ...oauthToolSecurity(),
     } as any,
     async ({ agentId }) => instrumentTool(env, user, "ping_agent", { agentId }, async () => {
       const call = await callAgent(env, user, "read", agentId, { action: "ping" });
@@ -688,6 +697,7 @@ function createMcpServer(env: Env, user: AuthUser) {
         description,
         inputSchema: { agentId: agentIdSchema, ...inputSchema },
         annotations: annotationsForTool(name, annotations),
+      ...oauthToolSecurity(),
       } as any,
       async (args: any) => instrumentTool(env, user, name, args, async () => {
         const agentPayload = payload(args) as any;
@@ -921,6 +931,7 @@ function createMcpServer(env: Env, user: AuthUser) {
         ttlSeconds: z.number().int().min(1).max(900).optional(),
       },
       annotations: annotationsForTool("create_temp_artifact"),
+      ...oauthToolSecurity(),
     } as any,
     async ({ agentId, path, maxBytes, ttlSeconds }: any) =>
       instrumentTool(env, user, "create_temp_artifact", { agentId, path, maxBytes, ttlSeconds }, async () => {
@@ -949,6 +960,7 @@ function createMcpServer(env: Env, user: AuthUser) {
         quality: z.number().int().min(20).max(85).optional(),
       },
       annotations: annotationsForTool("screenshot"),
+      ...oauthToolSecurity(),
     } as any,
     async ({ agentId, monitor, maxWidth, quality }: any) => instrumentTool(env, user, "screenshot", { agentId, monitor, maxWidth, quality }, async () => {
       const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot", monitor, maxWidth, quality });
@@ -1080,6 +1092,7 @@ function createMcpServer(env: Env, user: AuthUser) {
         quality: z.number().int().min(20).max(85).optional(),
       },
       annotations: annotationsForTool("desktop_step", { destructiveHint: true }),
+      ...oauthToolSecurity(),
     } as any,
     async ({ agentId, actions, captureAfter, settleMs, monitor, maxWidth, quality }: any) => instrumentTool(
       env,
