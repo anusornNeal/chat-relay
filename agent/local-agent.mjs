@@ -137,7 +137,7 @@ async function handlePayload(payload) {
         lifecycle: lifecycle.snapshot(),
         terminalContinuity: {
           processId: process.pid,
-          activeSessions: terminals.list().filter((session) => session.status === "running").length,
+          ...terminals.getContinuityConfig(),
         },
         protocol: {
           protocolVersion: agentHello.protocolVersion,

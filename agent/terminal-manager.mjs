@@ -2,6 +2,11 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import {
+  createTerminalSessionId,
+  terminalContinuityConfig,
+  terminalSessionMiss,
+} from "./terminal-continuity.mjs";
 
 const MAX_EXEC_BUFFER = 48 * 1024;
 const MAX_SESSION_BUFFER = 256 * 1024;
@@ -524,6 +529,7 @@ export class TerminalManager {
     this.platform = options.platform ?? process.platform;
     this.shell = shellForPlatform(this.platform, options.shell);
     this.sessions = new Map();
+    this.processEpoch = options.processEpoch ?? randomUUID();
     this.batches = new Map();
     this.batchQueue = [];
     this.activeBatchJobs = 0;
@@ -646,12 +652,19 @@ export class TerminalManager {
     return [...this.sessions.values()].map((session) => this.#summary(session));
   }
 
+  getContinuityConfig() {
+    const activeSessions = [...this.sessions.values()]
+      .filter((session) => session.status === "running").length;
+    return terminalContinuityConfig(this.processEpoch, activeSessions);
+  }
+
   observability() {
     this.#cleanup();
     return {
       ok: true,
       sessions: [...this.sessions.values()].map((session) => ({
         sessionId: session.id,
+        processEpoch: session.processEpoch,
         type: session.type,
         status: session.status,
         exitCode: session.exitCode,
@@ -688,6 +701,7 @@ export class TerminalManager {
   read(sessionId, afterSeq = 0, maxChars = MAX_READ_CHARS) {
     this.#cleanup();
     const session = this.#get(sessionId);
+    if (!session) return terminalSessionMiss(sessionId, this.processEpoch);
     const limit = Math.min(Math.max(Number(maxChars) || MAX_READ_CHARS, 1024), MAX_READ_CHARS);
     const oldestSeq = session.chunks[0]?.seq ?? session.nextSeq;
     const chunks = [];
@@ -711,6 +725,7 @@ export class TerminalManager {
 
   write(sessionId, input, appendNewline = true) {
     const session = this.#get(sessionId);
+    if (!session) return terminalSessionMiss(sessionId, this.processEpoch);
     if (session.status !== "running") throw new Error("session_not_running");
     if (typeof input !== "string" || input.length === 0 || input.length > MAX_INPUT_CHARS) {
       throw new Error("invalid_input");
@@ -721,6 +736,7 @@ export class TerminalManager {
 
   async kill(sessionId) {
     const session = this.#get(sessionId);
+    if (!session) return terminalSessionMiss(sessionId, this.processEpoch);
     if (session.status !== "running") return this.#summary(session);
 
     await terminateProcessTree(this.platform, session.pid);
@@ -863,7 +879,8 @@ export class TerminalManager {
     });
 
     const session = {
-      id: randomUUID(),
+      id: createTerminalSessionId(this.processEpoch, randomUUID()),
+      processEpoch: this.processEpoch,
       type,
       command,
       cwd,
@@ -1001,6 +1018,7 @@ export class TerminalManager {
   #summary(session) {
     return {
       sessionId: session.id,
+      processEpoch: session.processEpoch,
       type: session.type,
       command: session.command,
       cwd: session.cwd,
@@ -1016,9 +1034,7 @@ export class TerminalManager {
 
   #get(sessionId) {
     if (typeof sessionId !== "string") throw new Error("invalid_session_id");
-    const session = this.sessions.get(sessionId);
-    if (!session) throw new Error("session_not_found");
-    return session;
+    return this.sessions.get(sessionId) ?? null;
   }
 
   #getBatch(batchId) {
