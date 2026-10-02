@@ -1387,6 +1387,7 @@ export default {
     const oauthResponse = await handleOAuth(
       request,
       (registryPath, body) => registryCall(env, registryPath, body),
+      env,
     );
     if (oauthResponse) return oauthResponse;
 

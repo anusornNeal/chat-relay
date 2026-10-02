@@ -3,10 +3,11 @@ import fs from "node:fs";
 const googleSource = fs.readFileSync(new URL("../src/google-auth.ts", import.meta.url), "utf8");
 const registrySource = fs.readFileSync(new URL("../src/registry.ts", import.meta.url), "utf8");
 const adminSource = fs.readFileSync(new URL("../src/admin.ts", import.meta.url), "utf8");
+const oauthSource = fs.readFileSync(new URL("../src/oauth.ts", import.meta.url), "utf8");
 const dashboard = fs.readFileSync(new URL("../dashboard/index.html", import.meta.url), "utf8");
 const app = fs.readFileSync(new URL("../dashboard/app.js", import.meta.url), "utf8");
 
-for (const required of ["code_challenge_method","S256","state","nonce","email_verified","accounts.google.com","GOOGLE_CLIENT_ID","GOOGLE_CLIENT_SECRET"]) {
+for (const required of ["code_challenge_method","S256","state","nonce","email_verified","accounts.google.com","GOOGLE_CLIENT_ID","GOOGLE_CLIENT_SECRET","HMAC"]) {
   if (!googleSource.includes(required)) throw new Error(`google auth contract missing: ${required}`);
 }
 if (!googleSource.includes("sessionStorage.setItem('chat_relay_csrf'")) throw new Error("Google callback did not persist CSRF");
@@ -14,6 +15,8 @@ for (const required of ['case "/google/upsert"','key.userGoogleSub(googleSub)','
   if (!registrySource.includes(required)) throw new Error(`registry Google identity contract missing: ${required}`);
 }
 if (!adminSource.includes('path === "/admin/google/start"') || !adminSource.includes('path === "/admin/google/callback"')) throw new Error("admin Google routes are missing");
+if (!oauthSource.includes('path === "/authorize/google/start"') || !oauthSource.includes("completeGoogleConnectorAuthorization")) throw new Error("connector Google authorization flow is missing");
+if (!adminSource.includes('"oauth.google.login"')) throw new Error("connector Google callback audit is missing");
 if (!dashboard.includes('href="/admin/google/start"')) throw new Error("dashboard Google sign-in entrypoint is missing");
 if (!app.includes('sessionStorage.getItem("chat_relay_csrf")') || !app.includes('sessionStorage.removeItem("chat_relay_csrf")')) throw new Error("dashboard CSRF persistence contract is incomplete");
 

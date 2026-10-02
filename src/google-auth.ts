@@ -1,4 +1,4 @@
-type GoogleAuthEnv = {
+export type GoogleAuthEnv = {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   GOOGLE_REDIRECT_URI?: string;
@@ -45,6 +45,55 @@ function randomToken(bytes = 32) {
   return base64Url(values);
 }
 
+function base64UrlDecode(value: string) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function googleStateKey(secret: string) {
+  return crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  );
+}
+
+async function signedGoogleState(
+  secret: string,
+  payload: { state: string; nonce: string; verifier: string; continuation?: string },
+) {
+  const encoded = base64Url(new TextEncoder().encode(JSON.stringify(payload)));
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await googleStateKey(secret),
+    new TextEncoder().encode(encoded),
+  );
+  return encoded + "." + base64Url(new Uint8Array(signature));
+}
+
+async function readSignedGoogleState(secret: string, value: string) {
+  const [encoded, signature, ...rest] = value.split(".");
+  if (!encoded || !signature || rest.length) return null;
+  try {
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      await googleStateKey(secret),
+      base64UrlDecode(signature),
+      new TextEncoder().encode(encoded),
+    );
+    if (!valid) return null;
+    const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(encoded)));
+    if (!payload || typeof payload !== "object") return null;
+    return payload as { state?: unknown; nonce?: unknown; verifier?: unknown; continuation?: unknown };
+  } catch {
+    return null;
+  }
+}
+
 async function sha256Base64Url(value: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return base64Url(new Uint8Array(digest));
@@ -84,7 +133,7 @@ function googleError(message: string, status = 400) {
   );
 }
 
-export async function startGoogleLogin(request: Request, env: GoogleAuthEnv): Promise<Response> {
+export async function startGoogleLogin(request: Request, env: GoogleAuthEnv, continuation = ""): Promise<Response> {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
     return googleError("Google login is not configured.", 503);
   }
@@ -104,12 +153,19 @@ export async function startGoogleLogin(request: Request, env: GoogleAuthEnv): Pr
   target.searchParams.set("code_challenge_method", "S256");
   target.searchParams.set("prompt", "select_account");
 
+  const cookieState = await signedGoogleState(env.GOOGLE_CLIENT_SECRET, {
+    state,
+    nonce,
+    verifier,
+    ...(continuation ? { continuation } : {}),
+  });
+
   return new Response(null, {
     status: 302,
     headers: {
       location: target.toString(),
       "cache-control": "no-store",
-      "set-cookie": stateCookie([state, nonce, verifier].join(".")),
+      "set-cookie": stateCookie(cookieState),
     },
   });
 }
@@ -117,7 +173,7 @@ export async function startGoogleLogin(request: Request, env: GoogleAuthEnv): Pr
 export async function finishGoogleLogin(
   request: Request,
   env: GoogleAuthEnv,
-): Promise<{ ok: true; identity: GoogleIdentity } | { ok: false; response: Response }> {
+): Promise<{ ok: true; identity: GoogleIdentity; continuation?: string } | { ok: false; response: Response }> {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
     return { ok: false, response: googleError("Google login is not configured.", 503) };
   }
@@ -126,7 +182,14 @@ export async function finishGoogleLogin(
   const returnedState = url.searchParams.get("state") || "";
   const code = url.searchParams.get("code") || "";
   const providerError = url.searchParams.get("error") || "";
-  const [state, nonce, verifier] = cookieValue(request, GOOGLE_STATE_COOKIE).split(".");
+  const statePayload = await readSignedGoogleState(
+    env.GOOGLE_CLIENT_SECRET,
+    cookieValue(request, GOOGLE_STATE_COOKIE),
+  );
+  const state = typeof statePayload?.state === "string" ? statePayload.state : "";
+  const nonce = typeof statePayload?.nonce === "string" ? statePayload.nonce : "";
+  const verifier = typeof statePayload?.verifier === "string" ? statePayload.verifier : "";
+  const continuation = typeof statePayload?.continuation === "string" ? statePayload.continuation : "";
 
   if (providerError) {
     return { ok: false, response: googleError("Google denied the authorization request.") };
@@ -182,7 +245,11 @@ export async function finishGoogleLogin(
   }
 
   const name = String(tokenInfo.name || payload?.name || email.split("@")[0] || email).slice(0, 120);
-  return { ok: true, identity: { sub: subject.slice(0, 255), email, name } };
+  return {
+    ok: true,
+    identity: { sub: subject.slice(0, 255), email, name },
+    ...(continuation ? { continuation } : {}),
+  };
 }
 
 export function googleLoginSuccessPage(csrfToken: string, sessionCookie: string): Response {

@@ -1,6 +1,7 @@
 import { hashToken, newToken, normalizeAgentId } from "./registry";
 import { DEFAULT_QUOTA_POLICY, normalizeQuotaPolicy, type QuotaPolicy } from "./usage";
-import { finishGoogleLogin, googleLoginSuccessPage, startGoogleLogin } from "./google-auth";
+import { clearGoogleStateCookie, finishGoogleLogin, googleLoginSuccessPage, startGoogleLogin } from "./google-auth";
+import { completeGoogleConnectorAuthorization } from "./oauth";
 
 type AdminEnv = {
   REGISTRY: DurableObjectNamespace;
@@ -98,7 +99,7 @@ async function publishDashboard(env: AdminEnv, topics: string[], userId?: string
 }
 
 type SafeAuditActor = {
-  kind: "operator" | "admin-user" | "anonymous" | "system";
+  kind: "operator" | "admin-user" | "user" | "anonymous" | "system";
   userId?: string;
 };
 
@@ -332,6 +333,29 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     if (!identityResponse.ok || !identityData.user?.id) {
       await recordAudit(env, { kind: "anonymous" }, "admin.google.login", { type: "google_identity" }, "failure", { status: identityResponse.status });
       return error(identityResponse.status, identityData.error || "google_account_link_failed");
+    }
+
+    const connectorResponse = await completeGoogleConnectorAuthorization(
+      google.continuation,
+      String(identityData.user.id),
+      (registryPath, registryBody) => registryCall(env, registryPath, registryBody),
+    );
+    if (connectorResponse) {
+      await recordAudit(
+        env,
+        { kind: "user", userId: String(identityData.user.id) },
+        "oauth.google.login",
+        { type: "user", id: String(identityData.user.id) },
+        connectorResponse.status === 302 ? "success" : "failure",
+        { status: connectorResponse.status },
+      );
+      const headers = new Headers(connectorResponse.headers);
+      headers.append("set-cookie", clearGoogleStateCookie());
+      return new Response(connectorResponse.body, {
+        status: connectorResponse.status,
+        statusText: connectorResponse.statusText,
+        headers,
+      });
     }
 
     const sessionResponse = await registryCall(env, "/admin-session/create-for-user", { userId: identityData.user.id });

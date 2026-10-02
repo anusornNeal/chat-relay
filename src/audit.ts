@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 export type AuditActor = {
-  kind: "operator" | "admin-user" | "anonymous" | "system";
+  kind: "operator" | "admin-user" | "user" | "anonymous" | "system";
   userId?: string;
 };
 
@@ -75,7 +75,7 @@ export class Audit extends DurableObject {
         id,
         timestamp,
         actor: {
-          kind: ["operator", "admin-user", "anonymous", "system"].includes(body.actor.kind)
+          kind: ["operator", "admin-user", "user", "anonymous", "system"].includes(body.actor.kind)
             ? body.actor.kind
             : "system",
           ...(body.actor.userId ? { userId: cleanText(body.actor.userId, 128) } : {}),

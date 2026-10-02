@@ -1,4 +1,5 @@
 import { hashToken, newToken } from "./registry";
+import { startGoogleLogin, type GoogleAuthEnv } from "./google-auth";
 
 type RegistryCall = (path: string, body?: unknown) => Promise<Response>;
 
@@ -171,7 +172,7 @@ function htmlPage(title: string, body: string, status = 200): Response {
 .card{width:min(460px,100%);background:#fff;border:1px solid #e5e7eb;border-radius:18px;padding:28px;box-shadow:0 18px 50px rgba(0,0,0,.08)}
 h1{font-size:24px;margin:0 0 8px}p{color:#5f6368;line-height:1.5;margin:0 0 18px}
 label{display:block;font-size:13px;font-weight:600;margin:14px 0 6px}input{width:100%;border:1px solid #d1d5db;border-radius:10px;padding:11px 12px;font:inherit}
-button{width:100%;margin-top:18px;border:0;border-radius:10px;padding:12px 14px;font:600 15px inherit;background:#111827;color:#fff;cursor:pointer}
+button,.google{width:100%;margin-top:18px;border:0;border-radius:10px;padding:12px 14px;font:600 15px inherit;background:#111827;color:#fff;cursor:pointer}.google{display:block;text-align:center;text-decoration:none;background:#fff;color:#111827;border:1px solid #d1d5db}.divider{display:flex;align-items:center;gap:10px;margin:18px 0 0;color:#71717a;font-size:12px}.divider:before,.divider:after{content:"";height:1px;background:#e4e4e7;flex:1}
 .scope{font-size:13px;background:#f4f4f5;border-radius:10px;padding:10px 12px}.error{background:#fef2f2;color:#991b1b;border-radius:10px;padding:10px 12px;margin:12px 0}
 </style>
 </head>
@@ -184,6 +185,7 @@ button{width:100%;margin-top:18px;border:0;border-radius:10px;padding:12px 14px;
 function authorizePage(
   client: OAuthClient,
   params: AuthorizeParams,
+  googleEnabled: boolean,
   errorMessage = "",
 ): Response {
   const hidden = [
@@ -205,6 +207,19 @@ function authorizePage(
   const offline = params.scope.includes("offline_access")
     ? " Persistent access is requested."
     : "";
+  const googleQuery = new URLSearchParams({
+    client_id: params.clientId,
+    redirect_uri: params.redirectUri,
+    response_type: params.responseType,
+    code_challenge: params.codeChallenge,
+    code_challenge_method: params.codeChallengeMethod,
+    scope: params.scopeRaw,
+    resource: params.resource,
+    state: params.state,
+  });
+  const googleEntry = googleEnabled
+    ? `<a class="google" href="/authorize/google/start?${htmlEscape(googleQuery.toString())}">Continue with Google</a><div class="divider"><span>Owner recovery</span></div>`
+    : "";
 
   return htmlPage(
     "Authorize Chat Relay",
@@ -212,6 +227,7 @@ function authorizePage(
 <p>Sign in with your Chat Relay account to connect ChatGPT to your permitted computers.</p>
 <div class="scope">Access: ${htmlEscape(scopeText || "mcp")}.${htmlEscape(offline)}</div>
 ${errorMessage ? `<div class="error">${htmlEscape(errorMessage)}</div>` : ""}
+${googleEntry}
 <form method="post" action="/authorize">
 ${hidden}
 <label for="login">Login</label>
@@ -233,9 +249,74 @@ function redirectWithCode(params: AuthorizeParams, code: string): Response {
   });
 }
 
+async function issueAuthorizationCode(
+  registryCall: RegistryCall,
+  params: AuthorizeParams,
+  userId: string,
+): Promise<Response> {
+  const code = newToken("code");
+  const stored = await registryCall("/oauth/code/create", {
+    codeHash: await hashToken(code),
+    clientId: params.clientId,
+    userId,
+    redirectUri: params.redirectUri,
+    codeChallenge: params.codeChallenge,
+    scope: params.scope,
+    resource: params.resource,
+    expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS).toISOString(),
+  });
+  if (!stored.ok) {
+    return oauthError("server_error", "Unable to create authorization code.", 500);
+  }
+  return redirectWithCode(params, code);
+}
+
+function validContinuationParams(value: any): value is AuthorizeParams {
+  return Boolean(value &&
+    typeof value.clientId === "string" &&
+    typeof value.redirectUri === "string" &&
+    value.responseType === "code" &&
+    typeof value.codeChallenge === "string" && /^[A-Za-z0-9_-]{43,128}$/.test(value.codeChallenge) &&
+    value.codeChallengeMethod === "S256" &&
+    Array.isArray(value.scope) && value.scope.every((scope: unknown) => typeof scope === "string" && SUPPORTED_SCOPES.has(scope)) &&
+    typeof value.scopeRaw === "string" &&
+    typeof value.resource === "string" &&
+    typeof value.state === "string");
+}
+
+export async function completeGoogleConnectorAuthorization(
+  continuation: string | undefined,
+  userId: string,
+  registryCall: RegistryCall,
+): Promise<Response | null> {
+  if (!continuation) return null;
+  let payload: any;
+  try { payload = JSON.parse(continuation); }
+  catch { return null; }
+  if (payload?.kind !== "connector-oauth") return null;
+  const params = payload.params;
+  if (!validContinuationParams(params)) {
+    return oauthError("invalid_request", "Google authorization continuation is invalid.");
+  }
+  const client = await getClient(registryCall, params.clientId);
+  if (!client || !client.redirectUris.includes(params.redirectUri)) {
+    return oauthError("invalid_client", "OAuth client is no longer valid.", 401);
+  }
+  try {
+    const resource = new URL(params.resource);
+    if (resource.pathname !== "/mcp" || resource.search || resource.hash) {
+      return oauthError("invalid_target", "resource must match the MCP endpoint.");
+    }
+  } catch {
+    return oauthError("invalid_target", "resource must match the MCP endpoint.");
+  }
+  return issueAuthorizationCode(registryCall, params, userId);
+}
+
 export async function handleOAuth(
   request: Request,
   registryCall: RegistryCall,
+  googleEnv?: GoogleAuthEnv,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -337,7 +418,25 @@ export async function handleOAuth(
       registryCall,
     );
     if (validated instanceof Response) return validated;
-    return authorizePage(validated.client, validated.params);
+    const googleEnabled = Boolean(googleEnv?.GOOGLE_CLIENT_ID && googleEnv?.GOOGLE_CLIENT_SECRET);
+    return authorizePage(validated.client, validated.params, googleEnabled);
+  }
+
+  if (path === "/authorize/google/start" && request.method === "GET") {
+    const validated = await validateAuthorize(
+      url.searchParams,
+      url,
+      registryCall,
+    );
+    if (validated instanceof Response) return validated;
+    if (!googleEnv) {
+      return oauthError("server_error", "Google login is not configured.", 503);
+    }
+    return startGoogleLogin(
+      request,
+      googleEnv,
+      JSON.stringify({ kind: "connector-oauth", params: validated.params }),
+    );
   }
 
   if (path === "/authorize" && request.method === "POST") {
@@ -357,24 +456,10 @@ export async function handleOAuth(
       const message = authData.error === "too_many_attempts"
         ? "Too many failed attempts. Try again later."
         : "Invalid login or password.";
-      return authorizePage(validated.client, validated.params, message);
+      return authorizePage(validated.client, validated.params, Boolean(googleEnv?.GOOGLE_CLIENT_ID && googleEnv?.GOOGLE_CLIENT_SECRET), message);
     }
 
-    const code = newToken("code");
-    const stored = await registryCall("/oauth/code/create", {
-      codeHash: await hashToken(code),
-      clientId: validated.params.clientId,
-      userId: authData.user.id,
-      redirectUri: validated.params.redirectUri,
-      codeChallenge: validated.params.codeChallenge,
-      scope: validated.params.scope,
-      resource: validated.params.resource,
-      expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS).toISOString(),
-    });
-    if (!stored.ok) {
-      return oauthError("server_error", "Unable to create authorization code.", 500);
-    }
-    return redirectWithCode(validated.params, code);
+    return issueAuthorizationCode(registryCall, validated.params, authData.user.id);
   }
 
   if (path === "/token" && request.method === "POST") {

@@ -1,6 +1,6 @@
 # Google login
 
-Chat Relay keeps the existing `owner` account as the legacy administrator/recovery account. Ordinary dashboard accounts are provisioned from a verified Google identity.
+Chat Relay keeps the existing `owner` account as the legacy administrator/recovery account. Dashboard and ChatGPT connector sign-in can use the same verified Google identity.
 
 ## Required Google OAuth client
 
@@ -25,4 +25,4 @@ Do not commit the client secret.
 - Email collision never claims `owner` or an administrator.
 - Existing non-admin accounts may be linked by matching email and lose local password credentials.
 - New Google identities create non-admin users.
-- Password login remains only as a legacy/recovery path during connector-auth migration.
+- ChatGPT connector authorization offers Google sign-in first and keeps local password login as the owner recovery fallback.
