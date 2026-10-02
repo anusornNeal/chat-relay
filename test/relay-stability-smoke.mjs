@@ -121,10 +121,26 @@ async function testHeartbeatAckLossForcesDeterministicRecovery() {
   state.markDisconnected(1006, HEARTBEAT_ACK_TIMEOUT_REASON, 2_000);
   assert.equal(state.snapshot().lastSocketError, HEARTBEAT_ACK_TIMEOUT_REASON);
   assert.equal(state.snapshot().state, "waiting");
+  const noCloseCode = new AgentConnectionState({ baseReconnectMs: 100, maxReconnectMs: 400 });
+  noCloseCode.markConnected(1_000);
+  noCloseCode.markDisconnected(null, "unexpected_response_409", 1_500);
+  assert.equal(noCloseCode.snapshot().lastCloseCode, null);
+  assert.equal(noCloseCode.snapshot().lastDisconnectReason, "unexpected_response_409");
   assert.equal(
     computeReconnectDelay(3, { baseMs: 100, maxMs: 400, jitterRatio: 0, random: () => 0.5 }),
     400,
   );
+}
+
+async function testUnexpectedHandshakeResponseRecovers() {
+  const localSource = await readProjectSource(root, "agent/local-agent.mjs");
+  const handlerAt = localSource.indexOf('socket.on("unexpected-response"');
+  assert.ok(handlerAt >= 0, "missing unexpected-response handler");
+  const closeAt = localSource.indexOf('socket.on("close"', handlerAt);
+  const handler = localSource.slice(handlerAt, closeAt);
+  assert.match(handler, /response\.resume\(\)/, "unexpected HTTP response body is not drained");
+  assert.match(handler, /activeSocket = null/, "unexpected handshake response does not release the failed socket");
+  assert.match(handler, /scheduleReconnect\(null, reason\)/, "unexpected handshake response does not schedule recovery");
 }
 
 async function testTerminalRestartIsExplicitAndSocketReconnectSafe() {
@@ -184,6 +200,7 @@ const tests = [
   ["duplicate runners are rejected before opening a competing connection", testDuplicateRunnerOwnershipIsRejected],
   ["socket recovery and late-close authority are generation-safe", testGenerationSafeSocketRecoveryAndLateClose],
   ["heartbeat ACK loss forces deterministic recovery", testHeartbeatAckLossForcesDeterministicRecovery],
+  ["unexpected handshake responses drain and reconnect", testUnexpectedHandshakeResponseRecovers],
   ["terminal process restart is explicit while same-process identity remains distinct", testTerminalRestartIsExplicitAndSocketReconnectSafe],
   ["terminal MCP schemas accept restart-aware session IDs", testTerminalToolSchemaAcceptsRestartAwareIds],
   ["recovery stays inside the existing remote supervisor", testRecoveryStaysInsideRemoteSupervisor],

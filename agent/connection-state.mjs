@@ -73,7 +73,8 @@ export class AgentConnectionState {
     const connectedAtMs = this.connectedAt ? Date.parse(this.connectedAt) : NaN;
     this.disconnectedAt = disconnectedAt;
     this.lastDisconnectedAt = disconnectedAt;
-    this.lastCloseCode = Number.isFinite(Number(code)) ? Number(code) : null;
+    const closeCode = code === null || code === undefined ? NaN : Number(code);
+    this.lastCloseCode = Number.isFinite(closeCode) ? closeCode : null;
     this.lastDisconnectReason = cleanReason(reason);
     this.lastConnectionDurationMs = Number.isFinite(connectedAtMs)
       ? Math.max(0, Math.trunc(Number(now) - connectedAtMs))

@@ -80,6 +80,7 @@ export function normalizeAgentDiagnosticReason(value: unknown): string | null {
   const reason = value.trim();
   if (!reason) return null;
   if (SAFE_AGENT_DIAGNOSTIC_REASONS.has(reason)) return reason;
+  if (/^unexpected_response_[1-5][0-9]{2}$/.test(reason)) return reason;
   for (const code of SAFE_NETWORK_ERROR_CODES) {
     if (reason.includes(code)) return code;
   }

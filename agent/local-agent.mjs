@@ -508,10 +508,18 @@ function connect() {
   });
 
   socket.on("unexpected-response", (_request, response) => {
-    if (response.statusCode === 401 || response.statusCode === 403) {
-      response.resume();
+    response.resume();
+    if (socket !== activeSocket || stopping || reauthorizationRequired) return;
+    const statusCode = Number(response.statusCode) || 0;
+    if (statusCode === 401 || statusCode === 403) {
       requireReauthorization("credential_rejected");
+      return;
     }
+    activeSocket = null;
+    stopHeartbeat();
+    const reason = statusCode > 0 ? `unexpected_response_${statusCode}` : "unexpected_response";
+    connectionState.markSocketError(reason);
+    scheduleReconnect(null, reason);
   });
 
   socket.on("close", (code, reason) => {
