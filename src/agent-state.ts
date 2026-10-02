@@ -1,4 +1,5 @@
 export type AgentSocketAttachment = {
+  connectionGeneration?: number;
   connectedAt?: number;
   lastSeenAt?: number;
   heartbeatEnabled?: boolean;
@@ -234,6 +235,52 @@ export function writeAgentAttachment(socket: WebSocket, patch: AgentSocketAttach
   } catch {}
 }
 
+export function validAgentConnectionGeneration(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+export function nextAgentConnectionGeneration(stored: unknown): number {
+  if (stored === undefined || stored === null) return 1;
+  if (typeof stored !== "number" || !Number.isSafeInteger(stored) || stored < 0) {
+    throw new Error("invalid_agent_connection_generation");
+  }
+  if (stored === Number.MAX_SAFE_INTEGER) throw new Error("agent_connection_generation_exhausted");
+  return stored + 1;
+}
+
+export function agentConnectionGeneration(socket: WebSocket | null): number | null {
+  return validAgentConnectionGeneration(readAgentAttachment(socket).connectionGeneration);
+}
+
+function legacyAgentSocketTimestamp(socket: WebSocket): number {
+  const attachment = readAgentAttachment(socket);
+  const timestamp = attachment.lastSeenAt ?? attachment.connectedAt;
+  return typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : 0;
+}
+
+export function selectLatestAgentSocket(sockets: WebSocket[]): WebSocket | null {
+  const generated = sockets.filter((socket) => agentConnectionGeneration(socket) !== null);
+  if (generated.length > 0) {
+    return generated.reduce((latest, socket) =>
+      agentConnectionGeneration(socket)! > agentConnectionGeneration(latest)! ? socket : latest);
+  }
+
+  // Compatibility for sockets accepted before connection generations existed.
+  const legacy = sockets.filter((socket) => readAgentAttachment(socket).connectionGeneration === undefined);
+  if (legacy.length === 0) return null;
+  return legacy.reduce((latest, socket) =>
+    legacyAgentSocketTimestamp(socket) > legacyAgentSocketTimestamp(latest) ? socket : latest);
+}
+
+export function isAuthoritativeAgentSocket(socket: WebSocket, authoritative: WebSocket | null): boolean {
+  if (!authoritative) return false;
+  const socketGeneration = agentConnectionGeneration(socket);
+  const authoritativeGeneration = agentConnectionGeneration(authoritative);
+  return socketGeneration !== null && authoritativeGeneration !== null
+    ? socketGeneration === authoritativeGeneration
+    : socket === authoritative;
+}
+
 export function agentLiveness(socket: WebSocket | null) {
   if (!socket) {
     return {
@@ -252,6 +299,7 @@ export function agentLiveness(socket: WebSocket | null) {
       capabilities: [],
       lifecycle: null,
       health: null,
+      connectionGeneration: null,
     };
   }
   const attachment = readAgentAttachment(socket);
@@ -280,5 +328,6 @@ export function agentLiveness(socket: WebSocket | null) {
     capabilities: Array.isArray(attachment.capabilities) ? attachment.capabilities : [],
     lifecycle: attachment.lifecycle ?? null,
     health: attachment.health ?? null,
+    connectionGeneration: agentConnectionGeneration(socket),
   };
 }

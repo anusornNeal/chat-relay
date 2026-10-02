@@ -3,7 +3,7 @@ import { DashboardHub } from "./dashboard-hub";
 import { Audit } from "./audit";
 import { Registry } from "./registry";
 import { Usage } from "./usage";
-import { AGENT_PROTOCOL_VERSION, agentLiveness, appendAgentConnectionEvent, emptyAgentDiagnostics, normalizeAgentHealth, normalizeAgentHello, normalizeAgentLifecycle, normalizeAgentText, readAgentAttachment, recordAgentProcessEpoch, writeAgentAttachment, type AgentConnectionEventType, type AgentDiagnostics, type AgentSocketAttachment } from "./agent-state";
+import { AGENT_PROTOCOL_VERSION, agentConnectionGeneration, agentLiveness, appendAgentConnectionEvent, emptyAgentDiagnostics, isAuthoritativeAgentSocket, nextAgentConnectionGeneration, normalizeAgentHealth, normalizeAgentHello, normalizeAgentLifecycle, normalizeAgentText, readAgentAttachment, recordAgentProcessEpoch, selectLatestAgentSocket, writeAgentAttachment, type AgentConnectionEventType, type AgentDiagnostics, type AgentSocketAttachment } from "./agent-state";
 import workerApp, { publishDashboard } from "./worker-app";
 import { MAX_BYTES, error, hasPayload } from "./http-utils";
 import type { Env } from "./env";
@@ -19,6 +19,7 @@ type Pending = {
 
 const TIMEOUT_MS = 30_000;
 const AGENT_DIAGNOSTICS_KEY = "agent:diagnostics";
+const AGENT_CONNECTION_GENERATION_KEY = "agent:connection-generation";
 const TEMP_ARTIFACT_DEFAULT_TTL_SECONDS = 300;
 const TEMP_ARTIFACT_MAX_TTL_SECONDS = 900;
 const TEMP_ARTIFACT_EXPIRED_TOMBSTONE_MS = 60_000;
@@ -50,20 +51,14 @@ export class Relay extends DurableObject {
   }
 
   private recoverAgentSocket(): WebSocket | null {
-    const sockets = this.ctx.getWebSockets();
-    if (sockets.length === 0) return null;
-    return sockets.reduce((latest, socket) => {
-      const latestAttachment = readAgentAttachment(latest);
-      const socketAttachment = readAgentAttachment(socket);
-      const latestAt = Number(latestAttachment.lastSeenAt ?? latestAttachment.connectedAt ?? 0);
-      const socketAt = Number(socketAttachment.lastSeenAt ?? socketAttachment.connectedAt ?? 0);
-      return socketAt >= latestAt ? socket : latest;
-    });
+    return selectLatestAgentSocket(this.ctx.getWebSockets());
   }
 
   private resolveAgent(): WebSocket | null {
-    if (this.agent) return this.agent;
-    this.agent = this.recoverAgentSocket();
+    this.agent = selectLatestAgentSocket([
+      ...(this.agent ? [this.agent] : []),
+      ...this.ctx.getWebSockets(),
+    ]);
     return this.agent;
   }
 
@@ -108,6 +103,15 @@ export class Relay extends DurableObject {
   private async agentStatus(): Promise<Response> {
     const [diagnostics] = await Promise.all([this.readDiagnostics()]);
     return Response.json({ ...agentLiveness(this.resolveAgent()), diagnostics });
+  }
+
+  private async nextConnectionGeneration(): Promise<number> {
+    return this.ctx.storage.transaction(async (transaction) => {
+      const stored = await transaction.get<unknown>(AGENT_CONNECTION_GENERATION_KEY);
+      const next = nextAgentConnectionGeneration(stored);
+      await transaction.put(AGENT_CONNECTION_GENERATION_KEY, next);
+      return next;
+    });
   }
 
   async alarm(): Promise<void> {
@@ -252,18 +256,24 @@ export class Relay extends DurableObject {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
+    const connectionGeneration = await this.nextConnectionGeneration();
 
     const existingAgent = this.resolveAgent();
-    if (existingAgent) {
-      existingAgent.close(1000, "replaced");
-      this.failPending(503, "agent_disconnected");
-      await this.recordConnectionEvent("replaced", 1000);
+    const existingGeneration = agentConnectionGeneration(existingAgent);
+    if (existingGeneration !== null && existingGeneration >= connectionGeneration) {
+      try { server.close(1000, "superseded"); } catch {}
+      return error(409, "connection_superseded");
     }
 
     this.ctx.acceptWebSocket(server);
     const connectedAt = Date.now();
-    writeAgentAttachment(server, { connectedAt, lastSeenAt: connectedAt, heartbeatEnabled: false });
+    writeAgentAttachment(server, { connectionGeneration, connectedAt, lastSeenAt: connectedAt, heartbeatEnabled: false });
     this.agent = server;
+    if (existingAgent) {
+      try { existingAgent.close(1000, "replaced"); } catch {}
+      this.failPending(503, "agent_disconnected");
+      await this.recordConnectionEvent("replaced", 1000);
+    }
     await this.recordConnectionEvent("accepted");
     this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents"]));
     return new Response(null, { status: 101, webSocket: client });
@@ -305,7 +315,7 @@ export class Relay extends DurableObject {
   }
 
   private handleMessage(socket: WebSocket, data: string | ArrayBuffer): void {
-    if (socket !== this.agent || typeof data !== "string") return;
+    if (!isAuthoritativeAgentSocket(socket, this.resolveAgent()) || typeof data !== "string") return;
 
     if (new TextEncoder().encode(data).byteLength > MAX_BYTES) {
       const requestId = data.slice(0, 256).match(/"requestId"\s*:\s*"([^"]+)"/)?.[1];
@@ -398,7 +408,7 @@ export class Relay extends DurableObject {
   }
 
   private disconnect(socket: WebSocket, type: "closed" | "error" = "closed", closeCode?: number): void {
-    if (socket !== this.agent) return;
+    if (!isAuthoritativeAgentSocket(socket, this.resolveAgent())) return;
     this.agent = null;
     this.failPending(503, "agent_disconnected");
     this.recordConnectionEvent(type, closeCode);

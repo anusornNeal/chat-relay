@@ -273,6 +273,7 @@ async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], gra
       lifecycle: agent.retiredAt ? "retired" : agent.enabled ? "active" : "disabled",
       runtime: {
         protocolVersion: status.protocolVersion ?? null,
+        connectionGeneration: status.connectionGeneration ?? null,
         agentVersion: status.agentVersion ?? null,
         platform: status.platform ?? null,
         arch: status.arch ?? null,
