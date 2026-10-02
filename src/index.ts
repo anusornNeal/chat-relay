@@ -3,7 +3,7 @@ import { DashboardHub } from "./dashboard-hub";
 import { Audit } from "./audit";
 import { Registry } from "./registry";
 import { Usage } from "./usage";
-import { AGENT_PROTOCOL_VERSION, agentLiveness, normalizeAgentHealth, normalizeAgentHello, normalizeAgentLifecycle, normalizeAgentText, readAgentAttachment, writeAgentAttachment, type AgentSocketAttachment } from "./agent-state";
+import { AGENT_PROTOCOL_VERSION, agentLiveness, appendAgentConnectionEvent, emptyAgentDiagnostics, normalizeAgentHealth, normalizeAgentHello, normalizeAgentLifecycle, normalizeAgentText, readAgentAttachment, recordAgentProcessEpoch, writeAgentAttachment, type AgentConnectionEventType, type AgentDiagnostics, type AgentSocketAttachment } from "./agent-state";
 import workerApp, { publishDashboard } from "./worker-app";
 import { MAX_BYTES, error, hasPayload } from "./http-utils";
 import type { Env } from "./env";
@@ -18,6 +18,7 @@ type Pending = {
 };
 
 const TIMEOUT_MS = 30_000;
+const AGENT_DIAGNOSTICS_KEY = "agent:diagnostics";
 const TEMP_ARTIFACT_DEFAULT_TTL_SECONDS = 300;
 const TEMP_ARTIFACT_MAX_TTL_SECONDS = 900;
 const TEMP_ARTIFACT_EXPIRED_TOMBSTONE_MS = 60_000;
@@ -40,6 +41,7 @@ export class Relay extends DurableObject {
   private agent: WebSocket | null = null;
   private readonly pending = new Map<string, Pending>();
   private readonly relayEnv: Env;
+  private diagnosticsWrites: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -75,13 +77,37 @@ export class Relay extends DurableObject {
     }
     switch (path) {
       case "/agent": return this.connectAgent(request);
-      case "/status": return Response.json(agentLiveness(this.resolveAgent()));
+      case "/status": return this.agentStatus();
       case "/disconnect": return this.disconnectAgent();
       case "/relay": return this.relay(request);
       case "/temp-shot": return this.storeTempShot(request);
       case "/temp-artifact": return this.storeTempArtifact(request);
       default: return error(404, "not_found");
     }
+  }
+
+  private async readDiagnostics(): Promise<AgentDiagnostics> {
+    await this.diagnosticsWrites;
+    return await this.ctx.storage.get<AgentDiagnostics>(AGENT_DIAGNOSTICS_KEY) ?? emptyAgentDiagnostics();
+  }
+
+  private queueDiagnosticsUpdate(update: (current: AgentDiagnostics) => AgentDiagnostics): Promise<void> {
+    const write = this.diagnosticsWrites.then(async () => {
+      const current = await this.ctx.storage.get<AgentDiagnostics>(AGENT_DIAGNOSTICS_KEY) ?? emptyAgentDiagnostics();
+      await this.ctx.storage.put(AGENT_DIAGNOSTICS_KEY, update(current));
+    });
+    this.diagnosticsWrites = write.catch(() => {});
+    this.ctx.waitUntil(write);
+    return write;
+  }
+
+  private recordConnectionEvent(type: AgentConnectionEventType, closeCode?: number): Promise<void> {
+    return this.queueDiagnosticsUpdate((current) => appendAgentConnectionEvent(current, { type, closeCode }));
+  }
+
+  private async agentStatus(): Promise<Response> {
+    const [diagnostics] = await Promise.all([this.readDiagnostics()]);
+    return Response.json({ ...agentLiveness(this.resolveAgent()), diagnostics });
   }
 
   async alarm(): Promise<void> {
@@ -219,7 +245,7 @@ export class Relay extends DurableObject {
     else await this.ctx.storage.setAlarm(nextExpiry);
   }
 
-  private connectAgent(request: Request): Response {
+  private async connectAgent(request: Request): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return error(426, "websocket_required");
     }
@@ -231,17 +257,19 @@ export class Relay extends DurableObject {
     if (existingAgent) {
       existingAgent.close(1000, "replaced");
       this.failPending(503, "agent_disconnected");
+      await this.recordConnectionEvent("replaced", 1000);
     }
 
     this.ctx.acceptWebSocket(server);
     const connectedAt = Date.now();
     writeAgentAttachment(server, { connectedAt, lastSeenAt: connectedAt, heartbeatEnabled: false });
     this.agent = server;
+    await this.recordConnectionEvent("accepted");
     this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents"]));
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private disconnectAgent(): Response {
+  private async disconnectAgent(): Promise<Response> {
     const resolvedAgent = this.resolveAgent();
     const sockets = [...new Set([
       ...(resolvedAgent ? [resolvedAgent] : []),
@@ -259,6 +287,7 @@ export class Relay extends DurableObject {
       }
     }
     this.failPending(503, "agent_disconnected");
+    if (sockets.length > 0) await this.recordConnectionEvent("revoked", 4001);
     this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents", "calls"]));
     return Response.json({ ok: true, disconnected: sockets.length });
   }
@@ -267,12 +296,12 @@ export class Relay extends DurableObject {
     this.handleMessage(socket, message);
   }
 
-  webSocketClose(socket: WebSocket): void {
-    this.disconnect(socket);
+  webSocketClose(socket: WebSocket, code: number): void {
+    this.disconnect(socket, "closed", code);
   }
 
   webSocketError(socket: WebSocket): void {
-    this.disconnect(socket);
+    this.disconnect(socket, "error");
   }
 
   private handleMessage(socket: WebSocket, data: string | ArrayBuffer): void {
@@ -321,14 +350,19 @@ export class Relay extends DurableObject {
       return;
     }
     if (control === "agent_heartbeat") {
+      const health = normalizeAgentHealth((message as any).health);
       writeAgentAttachment(socket, {
         lastSeenAt: Date.now(),
         heartbeatEnabled: true,
         heartbeatMs: Number((message as any).heartbeatMs),
         processId: Number((message as any).processId),
         lifecycle: normalizeAgentLifecycle((message as any).lifecycle),
-        health: normalizeAgentHealth((message as any).health),
+        health,
       });
+      this.queueDiagnosticsUpdate((current) => recordAgentProcessEpoch(current, {
+        processId: (message as any).processId,
+        health,
+      }));
       try {
         socket.send(JSON.stringify({ control: "agent_heartbeat_ack", at: Date.now() }));
       } catch {}
@@ -363,10 +397,11 @@ export class Relay extends DurableObject {
     }));
   }
 
-  private disconnect(socket: WebSocket): void {
+  private disconnect(socket: WebSocket, type: "closed" | "error" = "closed", closeCode?: number): void {
     if (socket !== this.agent) return;
     this.agent = null;
     this.failPending(503, "agent_disconnected");
+    this.recordConnectionEvent(type, closeCode);
     this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents", "calls"]));
   }
 
@@ -389,6 +424,7 @@ export class Relay extends DurableObject {
       this.agent = null;
       try { staleAgent.close(4000, "heartbeat_timeout"); } catch {}
       this.failPending(503, "agent_stale");
+      this.recordConnectionEvent("stale", 4000);
       this.ctx.waitUntil(publishDashboard(this.relayEnv, ["overview", "users", "agents", "calls"]));
       return error(503, "agent_stale", { lastSeenAt: liveness.lastSeenAt, heartbeatTtlMs: liveness.heartbeatTtlMs });
     }

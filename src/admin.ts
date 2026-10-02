@@ -278,6 +278,7 @@ async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], gra
         arch: status.arch ?? null,
         capabilities: Array.isArray(status.capabilities) ? status.capabilities : [],
         health: status.health ?? null,
+        diagnostics: status.diagnostics ?? null,
         lifecycle: status.lifecycle ?? null,
       },
       reauthorizationRequired: Boolean(agent.retiredAt),
@@ -624,14 +625,12 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       if (Number.isFinite(disconnectedAt) && (!Number.isFinite(currentLast) || disconnectedAt >= currentLast)) {
         summary.lastDisconnectedAt = String(health.lastDisconnectedAt).slice(0, 64);
         summary.lastCloseCode = Number.isInteger(Number(health.lastCloseCode)) ? Number(health.lastCloseCode) : null;
-        summary.lastDisconnectReason = health.lastDisconnectReason ? String(health.lastDisconnectReason).slice(0, 160) : null;
         summary.lastConnectionDurationMs = Number.isFinite(Number(health.lastConnectionDurationMs)) ? Number(health.lastConnectionDurationMs) : null;
-        summary.lastSocketError = health.lastSocketError ? String(health.lastSocketError).slice(0, 160) : null;
       }
       if (agent.runtime?.agentVersion) summary.versions.add(String(agent.runtime.agentVersion));
       for (const capability of agent.runtime?.capabilities || []) summary.capabilities.add(String(capability));
       return summary;
-    }, { active: 0, queued: 0, reconnectCount: 0, lastDisconnectedAt: null, lastCloseCode: null, lastDisconnectReason: null, lastConnectionDurationMs: null, lastSocketError: null, versions: new Set<string>(), capabilities: new Set<string>() });
+    }, { active: 0, queued: 0, reconnectCount: 0, lastDisconnectedAt: null, lastCloseCode: null, lastConnectionDurationMs: null, versions: new Set<string>(), capabilities: new Set<string>() });
     return Response.json({
       role: "admin",
       period,
@@ -643,9 +642,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
         reconnectCount: agentHealth.reconnectCount,
         lastDisconnectedAt: agentHealth.lastDisconnectedAt,
         lastCloseCode: agentHealth.lastCloseCode,
-        lastDisconnectReason: agentHealth.lastDisconnectReason,
         lastConnectionDurationMs: agentHealth.lastConnectionDurationMs,
-        lastSocketError: agentHealth.lastSocketError,
         versions: [...agentHealth.versions].slice(0, 8),
         capabilities: [...agentHealth.capabilities].slice(0, 32),
       },

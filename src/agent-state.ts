@@ -17,12 +17,119 @@ export type AgentSocketAttachment = {
     connectedAt: string | null;
     lastDisconnectedAt: string | null;
     lastCloseCode: number | null;
-    lastDisconnectReason: string | null;
     lastConnectionDurationMs: number | null;
-    lastSocketError: string | null;
     queues: Record<string, { concurrency: number; active: number; queued: number; maxQueued: number; queueTimeoutMs: number }>;
   };
 };
+
+export const AGENT_CONNECTION_EVENT_LIMIT = 32;
+export const AGENT_PROCESS_EPOCH_LIMIT = 8;
+
+export type AgentConnectionEventType = "accepted" | "replaced" | "closed" | "error" | "stale" | "revoked";
+
+export type AgentDiagnostics = {
+  version: 1;
+  totalAccepted: number;
+  totalDisconnected: number;
+  events: Array<{
+    type: AgentConnectionEventType;
+    at: string;
+    closeCode?: number;
+  }>;
+  processEpochs: Array<{
+    processStartedAt: string | null;
+    processId: number | null;
+    firstSeenAt: string;
+    lastSeenAt: string;
+    maxReconnectCount: number;
+    lastCloseCode: number | null;
+    lastConnectionDurationMs: number | null;
+  }>;
+};
+
+export function emptyAgentDiagnostics(): AgentDiagnostics {
+  return { version: 1, totalAccepted: 0, totalDisconnected: 0, events: [], processEpochs: [] };
+}
+
+function safeIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 64) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function boundedInteger(value: unknown, max: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(Math.max(0, Math.trunc(number)), max) : 0;
+}
+
+export function appendAgentConnectionEvent(
+  diagnostics: AgentDiagnostics | null | undefined,
+  event: { type: AgentConnectionEventType; at?: number; closeCode?: unknown },
+): AgentDiagnostics {
+  const current = diagnostics?.version === 1 ? diagnostics : emptyAgentDiagnostics();
+  const closeCode = Number(event.closeCode);
+  const entry = {
+    type: event.type,
+    at: new Date(Number.isFinite(event.at) ? event.at : Date.now()).toISOString(),
+    ...(Number.isInteger(closeCode) && closeCode >= 0 && closeCode <= 4999 ? { closeCode } : {}),
+  };
+  const disconnected = event.type !== "accepted";
+  return {
+    version: 1,
+    totalAccepted: boundedInteger(
+      boundedInteger(current.totalAccepted, Number.MAX_SAFE_INTEGER) + (event.type === "accepted" ? 1 : 0),
+      Number.MAX_SAFE_INTEGER,
+    ),
+    totalDisconnected: boundedInteger(
+      boundedInteger(current.totalDisconnected, Number.MAX_SAFE_INTEGER) + (disconnected ? 1 : 0),
+      Number.MAX_SAFE_INTEGER,
+    ),
+    events: [...(Array.isArray(current.events) ? current.events : []), entry].slice(-AGENT_CONNECTION_EVENT_LIMIT),
+    processEpochs: (Array.isArray(current.processEpochs) ? current.processEpochs : []).slice(-AGENT_PROCESS_EPOCH_LIMIT),
+  };
+}
+
+export function recordAgentProcessEpoch(
+  diagnostics: AgentDiagnostics | null | undefined,
+  input: { processId?: unknown; health?: unknown; seenAt?: number },
+): AgentDiagnostics {
+  const current = diagnostics?.version === 1 ? diagnostics : emptyAgentDiagnostics();
+  const health = input.health && typeof input.health === "object" ? input.health as Record<string, unknown> : {};
+  const processStartedAt = safeIsoTimestamp(health.processStartedAt);
+  const rawProcessId = Number(input.processId);
+  const processId = Number.isInteger(rawProcessId) && rawProcessId >= 0 && rawProcessId <= 0x7fffffff ? rawProcessId : null;
+  if (processStartedAt === null && processId === null) return current;
+
+  const seenAt = new Date(Number.isFinite(input.seenAt) ? input.seenAt : Date.now()).toISOString();
+  const reconnectCount = boundedInteger(health.reconnectCount, 1_000_000);
+  const rawCloseCode = Number(health.lastCloseCode);
+  const lastCloseCode = Number.isInteger(rawCloseCode) && rawCloseCode >= 0 && rawCloseCode <= 4999 ? rawCloseCode : null;
+  const rawDuration = Number(health.lastConnectionDurationMs);
+  const lastConnectionDurationMs = Number.isFinite(rawDuration) && rawDuration >= 0
+    ? Math.min(Math.trunc(rawDuration), 365 * 24 * 60 * 60 * 1000)
+    : null;
+  const epochs = Array.isArray(current.processEpochs) ? [...current.processEpochs] : [];
+  const existingIndex = epochs.findIndex((epoch) => processStartedAt !== null
+    ? epoch.processStartedAt === processStartedAt
+    : epoch.processStartedAt === null && epoch.processId === processId);
+  const previous = existingIndex >= 0 ? epochs.splice(existingIndex, 1)[0] : null;
+  epochs.push({
+    processStartedAt,
+    processId,
+    firstSeenAt: previous?.firstSeenAt ?? seenAt,
+    lastSeenAt: seenAt,
+    maxReconnectCount: Math.max(previous?.maxReconnectCount ?? 0, reconnectCount),
+    lastCloseCode,
+    lastConnectionDurationMs,
+  });
+  return {
+    version: 1,
+    totalAccepted: boundedInteger(current.totalAccepted, Number.MAX_SAFE_INTEGER),
+    totalDisconnected: boundedInteger(current.totalDisconnected, Number.MAX_SAFE_INTEGER),
+    events: (Array.isArray(current.events) ? current.events : []).slice(-AGENT_CONNECTION_EVENT_LIMIT),
+    processEpochs: epochs.slice(-AGENT_PROCESS_EPOCH_LIMIT),
+  };
+}
 
 export const AGENT_PROTOCOL_VERSION = 1;
 
@@ -105,9 +212,7 @@ export function normalizeAgentHealth(value: any) {
     connectedAt: normalizeAgentText(value?.connectedAt, 64),
     lastDisconnectedAt: normalizeAgentText(value?.lastDisconnectedAt, 64),
     lastCloseCode: Number.isInteger(closeCode) && closeCode >= 0 && closeCode <= 4999 ? closeCode : null,
-    lastDisconnectReason: normalizeAgentText(value?.lastDisconnectReason, 160),
     lastConnectionDurationMs: Number.isFinite(duration) && duration >= 0 ? Math.min(Math.trunc(duration), 365 * 24 * 60 * 60 * 1000) : null,
-    lastSocketError: normalizeAgentText(value?.lastSocketError, 160),
     queues,
   };
 }

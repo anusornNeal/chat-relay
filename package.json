@@ -46,6 +46,7 @@
         "test:desktop": "node test/mcp-desktop-smoke.mjs",
         "test:device-management": "node test/device-management-smoke.mjs",
         "test:submission": "node test/submission-smoke.mjs",
+        "test:agent-state": "node --experimental-strip-types --test test/agent-state.test.mjs",
         "verify:review": "node scripts/verify-review-artifacts.mjs"
     },
     "dependencies": {
