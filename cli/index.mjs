@@ -231,8 +231,7 @@ export async function runCli(argv = process.argv.slice(2)) {
   if (command === "resume") return lifecycleAction("resume");
   if (command === "restart") return lifecycleAction("restart");
   if (command === "remote") {
-    await remote(options);
-    return 0;
+    return (await remote(options)) || 0;
   }
 
   console.error(`Unknown command: ${command}`);

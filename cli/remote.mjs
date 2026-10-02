@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { loadConfig, saveConfig } from "./config.mjs";
 import { login, requestJson } from "./device-login.mjs";
+import { acquireRunnerOwnership, RunnerAlreadyActiveError } from "./runner-ownership.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let stopping = false;
@@ -82,57 +83,69 @@ export async function remote(options = {}) {
     config = await login(options);
   }
 
-  if (options.allowedRoot && options.allowedRoot !== config.allowedRoots) {
-    config = { ...config, allowedRoots: options.allowedRoot };
-    saveConfig(config);
+  let ownership;
+  try {
+    ownership = await acquireRunnerOwnership({ relayUrl: config.relayUrl, agentId: config.agentId });
+  } catch (error) {
+    if (!(error instanceof RunnerAlreadyActiveError)) throw error;
+    console.error(error.message);
+    return 1;
   }
-  if (options.desktopEnabled !== undefined && Boolean(options.desktopEnabled) !== Boolean(config.desktopEnabled)) {
-    config = { ...config, desktopEnabled: Boolean(options.desktopEnabled) };
-    saveConfig(config);
-  }
-
-  printSummary(config);
-
-  while (!stopping) {
-    const child = spawnAgent(config);
-
-    const stop = () => {
-      stopping = true;
-      terminateChildTree(child);
-    };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-
-    const result = await new Promise((resolve) => {
-      child.once("exit", (code, signal) => resolve({ code, signal }));
-    });
-
-    process.removeListener("SIGINT", stop);
-    process.removeListener("SIGTERM", stop);
-    if (stopping) break;
-
-    if (result.code === 2) {
-      stopping = true;
-      console.error("Agent authorization is no longer valid. Run chat-relay login --force, then chat-relay remote.");
-      break;
+  try {
+    if (options.allowedRoot && options.allowedRoot !== config.allowedRoots) {
+      config = { ...config, allowedRoots: options.allowedRoot };
+      saveConfig(config);
     }
-    if (result.code === 3) {
-      stopping = true;
-      console.error("Agent protocol is incompatible with the relay. Update Chat Relay, then run chat-relay remote again.");
-      break;
+    if (options.desktopEnabled !== undefined && Boolean(options.desktopEnabled) !== Boolean(config.desktopEnabled)) {
+      config = { ...config, desktopEnabled: Boolean(options.desktopEnabled) };
+      saveConfig(config);
     }
 
-    if (result.code === 4) {
-      console.log("Agent restart requested. Restarting local agent...");
-      continue;
-    }
+    printSummary(config);
 
-    if (shouldRestartAgent(result, stopping)) {
-      console.error(
-        `Agent stopped (code=${result.code ?? "null"}, signal=${result.signal ?? "none"}). Restarting in 2s...`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+    while (!stopping) {
+      const child = spawnAgent(config);
+
+      const stop = () => {
+        stopping = true;
+        terminateChildTree(child);
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+
+      const result = await new Promise((resolve) => {
+        child.once("exit", (code, signal) => resolve({ code, signal }));
+      });
+
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+      if (stopping) break;
+
+      if (result.code === 2) {
+        stopping = true;
+        console.error("Agent authorization is no longer valid. Run chat-relay login --force, then chat-relay remote.");
+        break;
+      }
+      if (result.code === 3) {
+        stopping = true;
+        console.error("Agent protocol is incompatible with the relay. Update Chat Relay, then run chat-relay remote again.");
+        break;
+      }
+
+      if (result.code === 4) {
+        console.log("Agent restart requested. Restarting local agent...");
+        continue;
+      }
+
+      if (shouldRestartAgent(result, stopping)) {
+        console.error(
+          `Agent stopped (code=${result.code ?? "null"}, signal=${result.signal ?? "none"}). Restarting in 2s...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
     }
+  } finally {
+    await ownership.release();
   }
 }
 
