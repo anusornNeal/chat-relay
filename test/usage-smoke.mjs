@@ -3,7 +3,7 @@ import WebSocket from "ws";
 const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8799").replace(/\/$/, "");
 const adminToken = process.env.TEST_ADMIN_TOKEN || "test-admin";
 const ownerToken = process.env.TEST_CALLER_TOKEN || "test-caller";
-const agentToken = process.env.TEST_AGENT_TOKEN || "test-agent";
+const usageAgentId = "usage-smoke-" + Date.now().toString(36);
 const day = new Date().toISOString().slice(0, 10);
 
 async function jsonFetch(path, options = {}) {
@@ -97,12 +97,28 @@ async function tool(token, id, name, args = {}, expectError = false, sessionId =
 await admin("/admin/bootstrap", "POST", {
   userName: "Owner",
   agentId: "default",
-  agentName: "Usage Test Agent",
+  agentName: "Bootstrap Agent",
 }).then(({ response, text }) => {
   if (!response.ok) throw new Error(`bootstrap failed: ${text}`);
 });
 
-const wsUrl = base.replace(/^http/, "ws") + "/agent?agentId=default";
+const createdUsageAgent = await admin("/admin/agents", "POST", {
+  name: "Usage Test Agent",
+  id: usageAgentId,
+  ownerUserId: "owner",
+});
+if (!createdUsageAgent.response.ok || !createdUsageAgent.data.token) {
+  throw new Error(`usage agent create failed: ${createdUsageAgent.text}`);
+}
+const agentToken = createdUsageAgent.data.token;
+const ownerUsageGrant = await admin("/admin/grants", "POST", {
+  userId: "owner",
+  agentId: usageAgentId,
+  scopes: ["*"],
+});
+if (!ownerUsageGrant.response.ok) throw new Error(`owner usage grant failed: ${ownerUsageGrant.text}`);
+
+const wsUrl = base.replace(/^http/, "ws") + "/agent?agentId=" + encodeURIComponent(usageAgentId);
 const socket = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${agentToken}` } });
 await new Promise((resolve, reject) => {
   socket.once("open", resolve);
@@ -129,7 +145,7 @@ const lifecycleUser = await admin("/admin/users", "POST", { name: "Lifecycle Rea
 if (!lifecycleUser.response.ok || !lifecycleUser.data.token) throw new Error(`lifecycle user create failed: ${lifecycleUser.text}`);
 const lifecycleGrant = await admin("/admin/grants", "POST", {
   userId: lifecycleUser.data.user.id,
-  agentId: "default",
+  agentId: usageAgentId,
   scopes: ["*"],
 });
 if (!lifecycleGrant.response.ok) throw new Error(`lifecycle grant failed: ${lifecycleGrant.text}`);
@@ -165,13 +181,13 @@ for (const forbidden of [lifecycleSensitivePath, "PRIVATE_FILE_OUTPUT", "command
 dashboardSocket.off("message", collectLifecycle);
 
 await tool(ownerToken, 1, "whoami");
-await tool(ownerToken, 2, "ping_agent", { agentId: "default" });
-await tool(ownerToken, 3, "read_file", { path: "SENSITIVE_PATH_SECRET.txt" });
-await tool(ownerToken, 4, "read_file", { path: "fail-SENSITIVE_FAILURE_PATH.txt" }, true);
+await tool(ownerToken, 2, "ping_agent", { agentId: usageAgentId });
+await tool(ownerToken, 3, "read_file", { agentId: usageAgentId, path: "SENSITIVE_PATH_SECRET.txt" });
+await tool(ownerToken, 4, "read_file", { agentId: usageAgentId, path: "fail-SENSITIVE_FAILURE_PATH.txt" }, true);
 await tool(ownerToken, 41, "ping_agent", { agentId: "missing-agent" }, true);
 await tool(ownerToken, 42, "whoami", {}, false, null);
 
-const runningPromise = tool(ownerToken, 43, "terminal_exec", { command: "echo realtime-running" }, false, "usage-running-session");
+const runningPromise = tool(ownerToken, 43, "terminal_exec", { agentId: usageAgentId, command: "echo realtime-running" }, false, "usage-running-session");
 await new Promise((resolve) => setTimeout(resolve, 180));
 const running = await admin("/admin/api/tool-calls?state=all&status=running&limit=50");
 const runningTerminal = (running.data.items || []).find((event) => event.tool === "terminal_exec" && event.status === "running");
@@ -185,7 +201,7 @@ const created = await admin("/admin/users", "POST", { name: "Usage Reader", id: 
 if (!created.response.ok || !created.data.token) throw new Error(`create user failed: ${created.text}`);
 const grant = await admin("/admin/grants", "POST", {
   userId: created.data.user.id,
-  agentId: "default",
+  agentId: usageAgentId,
   scopes: ["read"],
 });
 if (!grant.response.ok) throw new Error(`grant failed: ${grant.text}`);
@@ -211,7 +227,7 @@ if ((missingAgent.data.metric?.calls || 0) < 1 || (missingAgent.data.metric?.err
   throw new Error(`missing-agent attribution failed: ${missingAgent.text}`);
 }
 
-const agent = await admin(`/admin/usage?day=${day}&agentId=default`);
+const agent = await admin(`/admin/usage?day=${day}&agentId=${encodeURIComponent(usageAgentId)}`);
 if ((agent.data.metric?.calls || 0) < 3 || (agent.data.metric?.errors || 0) < 1) {
   throw new Error(`agent attribution failed: ${agent.text}`);
 }
@@ -246,11 +262,11 @@ if (!handledErrors.response.ok || !(handledErrors.data.items || []).some((event)
   throw new Error(`handled error filtering failed: ${handledErrors.text}`);
 }
 
-const firstPage = await admin("/admin/api/tool-calls?state=history&agentId=default&limit=2");
+const firstPage = await admin("/admin/api/tool-calls?state=history&agentId=" + encodeURIComponent(usageAgentId) + "&limit=2");
 if (!firstPage.response.ok || firstPage.data.items?.length !== 2 || !firstPage.data.nextCursor || firstPage.data.items.some((event) => !event.agentName || event.agentName === event.agentId)) {
   throw new Error(`cursor page 1 failed: ${firstPage.text}`);
 }
-const secondPage = await admin("/admin/api/tool-calls?state=history&agentId=default&limit=2&cursor=" + encodeURIComponent(firstPage.data.nextCursor));
+const secondPage = await admin("/admin/api/tool-calls?state=history&agentId=" + encodeURIComponent(usageAgentId) + "&limit=2&cursor=" + encodeURIComponent(firstPage.data.nextCursor));
 if (!secondPage.response.ok || !secondPage.data.items?.length) throw new Error(`cursor page 2 failed: ${secondPage.text}`);
 const firstIds = new Set(firstPage.data.items.map((event) => event.toolCallId));
 if (secondPage.data.items.some((event) => firstIds.has(event.toolCallId))) throw new Error("cursor pages overlap");
@@ -297,5 +313,10 @@ if (!Array.isArray(todayOverview.data.buckets) || !Array.isArray(todayOverview.d
 }
 
 dashboardSocket.terminate();
-socket.close();
+const retiredUsageAgent = await admin("/admin/api/agents/retire", "POST", {
+  agentId: usageAgentId,
+  expectedOwnerUserId: "owner",
+});
+if (!retiredUsageAgent.response.ok) throw new Error(`usage agent cleanup failed: ${retiredUsageAgent.text}`);
+socket.terminate();
 console.log("usage telemetry smoke test passed");
