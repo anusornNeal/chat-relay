@@ -607,6 +607,10 @@ async function listUserAgents(env: Env, user: AuthUser) {
 }
 
 const agentIdSchema = z.string().regex(/^[a-z0-9_-]{1,64}$/).optional();
+const terminalSessionIdSchema = z.union([
+  z.string().uuid(),
+  z.string().regex(/^terminal:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+]);
 
 const READ_ONLY_TOOLS = new Set([
   "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls",
@@ -1200,7 +1204,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     "Read buffered stdout/stderr from a terminal session. Use afterSeq for incremental reads.",
     "terminal",
     {
-      sessionId: z.string().uuid(),
+      sessionId: terminalSessionIdSchema,
       afterSeq: z.number().int().min(0).optional(),
       maxChars: z.number().int().min(1024).max(24576).optional(),
     },
@@ -1214,7 +1218,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     "Send input to a running command or interactive shell.",
     "terminal",
     {
-      sessionId: z.string().uuid(),
+      sessionId: terminalSessionIdSchema,
       input: z.string().min(1).max(8192),
       appendNewline: z.boolean().optional(),
     },
@@ -1236,7 +1240,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     "terminal_kill",
     "Terminate a terminal session and its child process tree.",
     "terminal",
-    { sessionId: z.string().uuid() },
+    { sessionId: terminalSessionIdSchema },
     ({ sessionId }) => ({ action: "terminal.kill", sessionId }),
     { destructiveHint: true },
   );
@@ -1258,7 +1262,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     "Desktop-Commander-compatible alias for reading session output.",
     "terminal",
     {
-      sessionId: z.string().uuid(),
+      sessionId: terminalSessionIdSchema,
       afterSeq: z.number().int().min(0).optional(),
       maxChars: z.number().int().min(1024).max(24576).optional(),
     },
@@ -1272,7 +1276,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     "Desktop-Commander-compatible alias for sending input to a terminal session.",
     "terminal",
     {
-      sessionId: z.string().uuid(),
+      sessionId: terminalSessionIdSchema,
       input: z.string().min(1).max(8192),
       appendNewline: z.boolean().optional(),
     },
@@ -1294,7 +1298,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     "force_terminate",
     "Desktop-Commander-compatible alias for terminating a terminal session.",
     "terminal",
-    { sessionId: z.string().uuid() },
+    { sessionId: terminalSessionIdSchema },
     ({ sessionId }) => ({ action: "terminal.kill", sessionId }),
     { destructiveHint: true },
   );

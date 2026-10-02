@@ -142,6 +142,27 @@ async function testTerminalRestartIsExplicitAndSocketReconnectSafe() {
   assert.equal(unknownSameEpoch.error, "session_not_found");
 }
 
+async function testTerminalToolSchemaAcceptsRestartAwareIds() {
+  const workerSource = await readProjectSource(root, "src/worker-app.ts");
+  assert.match(workerSource, /const terminalSessionIdSchema = z\.union\(/);
+  const mcpServerAt = workerSource.indexOf("function createMcpServer");
+  assert.ok(mcpServerAt >= 0, "missing MCP server implementation");
+  for (const toolName of [
+    "terminal_read",
+    "terminal_write",
+    "terminal_kill",
+    "read_process_output",
+    "interact_with_process",
+    "force_terminate",
+  ]) {
+    const toolAt = workerSource.indexOf(`"${toolName}"`, mcpServerAt);
+    assert.ok(toolAt >= 0, `missing tool schema for ${toolName}`);
+    const nextToolAt = workerSource.indexOf("register(", toolAt + toolName.length + 2);
+    const toolBlock = workerSource.slice(toolAt, nextToolAt >= 0 ? nextToolAt : toolAt + 1600);
+    assert.match(toolBlock, /sessionId:\s*terminalSessionIdSchema/, `${toolName} rejects restart-aware terminal IDs`);
+  }
+}
+
 async function testRecoveryStaysInsideRemoteSupervisor() {
   const remoteSource = await readProjectSource(root, "cli/remote.mjs");
   const acquireAt = remoteSource.indexOf("acquireRunnerOwnership");
@@ -164,6 +185,7 @@ const tests = [
   ["socket recovery and late-close authority are generation-safe", testGenerationSafeSocketRecoveryAndLateClose],
   ["heartbeat ACK loss forces deterministic recovery", testHeartbeatAckLossForcesDeterministicRecovery],
   ["terminal process restart is explicit while same-process identity remains distinct", testTerminalRestartIsExplicitAndSocketReconnectSafe],
+  ["terminal MCP schemas accept restart-aware session IDs", testTerminalToolSchemaAcceptsRestartAwareIds],
   ["recovery stays inside the existing remote supervisor", testRecoveryStaysInsideRemoteSupervisor],
 ];
 
