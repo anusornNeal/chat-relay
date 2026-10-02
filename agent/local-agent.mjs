@@ -7,6 +7,10 @@ import { CapabilityScheduler } from "./capability-scheduler.mjs";
 import { AgentConnectionState } from "./connection-state.mjs";
 import { buildAgentHello } from "./protocol.mjs";
 import { AgentLifecycle, AGENT_RESTART_EXIT_CODE } from "./lifecycle.mjs";
+import {
+  HeartbeatAckWatchdog,
+  HEARTBEAT_ACK_TIMEOUT_REASON,
+} from "./heartbeat-ack-watchdog.mjs";
 
 const relayUrl = process.env.RELAY_URL;
 const agentToken = process.env.AGENT_TOKEN;
@@ -68,7 +72,6 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let transportHeartbeatTimer = null;
 let transportPongDeadlineTimer = null;
-let lastHeartbeatAckAt = 0;
 let stopping = false;
 
 const TRANSPORT_PING_MS = Math.max(5000, Math.min(Number(process.env.AGENT_TRANSPORT_PING_MS) || 20000, 60000));
@@ -76,6 +79,15 @@ const TRANSPORT_PONG_TIMEOUT_MS = Math.max(3000, Math.min(Number(process.env.AGE
 const FAST_RECONNECT_MS = Math.max(100, Math.min(Number(process.env.AGENT_FAST_RECONNECT_MS) || 250, 5000));
 const FAST_RECONNECT_STABLE_MS = Math.max(5000, Math.min(Number(process.env.AGENT_FAST_RECONNECT_STABLE_MS) || 30000, 300000));
 const HEARTBEAT_ACK_TIMEOUT_MS = Math.max(15000, Math.min(Number(process.env.AGENT_HEARTBEAT_ACK_TIMEOUT_MS) || 45000, 180000));
+const heartbeatAckWatchdog = new HeartbeatAckWatchdog({
+  timeoutMs: HEARTBEAT_ACK_TIMEOUT_MS,
+  onTimeout: () => {
+    const socket = activeSocket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    connectionState.markSocketError(HEARTBEAT_ACK_TIMEOUT_REASON);
+    try { socket.terminate(); } catch {}
+  },
+});
 
 function currentWorkSummary() {
   const terminal = terminals.observability();
@@ -134,6 +146,7 @@ async function handlePayload(payload) {
         allowedRoots: files.getRoots(),
         reconnectMs: connectionState.baseReconnectMs,
         connection: { ...connectionState.snapshot(), processId: process.pid },
+        heartbeatAckWatchdog: heartbeatAckWatchdog.snapshot(),
         lifecycle: lifecycle.snapshot(),
         terminalContinuity: {
           processId: process.pid,
@@ -259,6 +272,7 @@ function clearReconnectTimer() {
 }
 
 function stopHeartbeat() {
+  heartbeatAckWatchdog.stop();
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
@@ -296,11 +310,6 @@ function sendTransportPing(socket) {
 function sendHeartbeat(socket) {
   if (socket !== activeSocket || socket.readyState !== WebSocket.OPEN) return;
   const now = Date.now();
-  if (lastHeartbeatAckAt > 0 && now - lastHeartbeatAckAt > HEARTBEAT_ACK_TIMEOUT_MS) {
-    connectionState.markSocketError("heartbeat_ack_timeout");
-    try { socket.terminate(); } catch {}
-    return;
-  }
   try {
     socket.send(JSON.stringify({
       control: "agent_heartbeat",
@@ -319,6 +328,7 @@ function sendHeartbeat(socket) {
         lastDisconnectReason: connectionState.lastDisconnectReason,
         lastConnectionDurationMs: connectionState.lastConnectionDurationMs,
         lastSocketError: connectionState.lastSocketError,
+        heartbeatAckWatchdog: heartbeatAckWatchdog.snapshot(now),
         queues: scheduler.snapshot(),
       },
     }));
@@ -328,6 +338,7 @@ function sendHeartbeat(socket) {
 
 function startHeartbeat(socket) {
   stopHeartbeat();
+  heartbeatAckWatchdog.start();
   sendHeartbeat(socket);
   heartbeatTimer = setInterval(() => sendHeartbeat(socket), connectionState.heartbeatMs);
   transportHeartbeatTimer = setInterval(() => sendTransportPing(socket), TRANSPORT_PING_MS);
@@ -407,7 +418,6 @@ function connect() {
     if (socket !== activeSocket) return;
     socket.send(JSON.stringify(agentHello));
     connectionState.markConnected();
-    lastHeartbeatAckAt = Date.now();
     startHeartbeat(socket);
     console.log("Agent connected");
   });
@@ -430,7 +440,7 @@ function connect() {
     }
 
     if (message?.control === "agent_heartbeat_ack") {
-      lastHeartbeatAckAt = Date.now();
+      heartbeatAckWatchdog.acknowledge();
       return;
     }
     if (message?.control === "credential_revoked") {
