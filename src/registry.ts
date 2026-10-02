@@ -121,7 +121,7 @@ const DEVICE_APPROVE_WINDOW_MS = 15 * 60 * 1000;
 const DEVICE_APPROVE_MAX = 60;
 const OAUTH_ACCESS_TTL_MS = 60 * 60 * 1000;
 const OAUTH_REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000;
-const OAUTH_REFRESH_REPLAY_TTL_MS = 30 * 1000;
+const OAUTH_REFRESH_REPLAY_TTL_MS = 5 * 60 * 1000;
 const OAUTH_REGISTER_WINDOW_MS = 15 * 60 * 1000;
 const OAUTH_REGISTER_MAX = 60;
 const json = (value: unknown, status = 200) => Response.json(value, { status });
