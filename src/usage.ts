@@ -187,6 +187,40 @@ function normalizeFailureDiagnostics(event: UsageEvent): Pick<UsageEvent, "error
   return { errorCode, failureStage, retryable };
 }
 
+function humanizeErrorCode(value: string) {
+  return value
+    .replace(/:.*/, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function classifyFailure(event: UsageEvent) {
+  const normalized = normalizeFailureDiagnostics(event);
+  const errorCode = String(normalized.errorCode || event.errorCode || event.errorClass || "tool_error").toLowerCase();
+  const failureStage = String(normalized.failureStage || "tool");
+
+  if (errorCode === "command_blocked") {
+    return { ...normalized, failureCategory: "handled", severity: "info", operational: false, diagnosticLabel: "Blocked by policy" };
+  }
+  if (errorCode.startsWith("replacement_count_mismatch")) {
+    return { ...normalized, failureCategory: "handled", severity: "info", operational: false, diagnosticLabel: "Edit target changed" };
+  }
+  if (failureStage === "validation" || failureStage === "policy") {
+    return { ...normalized, failureCategory: "handled", severity: "info", operational: false, diagnosticLabel: humanizeErrorCode(errorCode) };
+  }
+  if (failureStage === "process" || errorCode === "process_exit_nonzero") {
+    return { ...normalized, failureCategory: "tool", severity: "warning", operational: false, diagnosticLabel: "Command failed" };
+  }
+  if (failureStage === "timeout" || failureStage === "relay" || failureStage === "worker") {
+    const diagnosticLabel =
+      /agent_.*timeout|agent_timeout/.test(errorCode) ? "Agent timed out" :
+      /agent_(offline|stale|unavailable)/.test(errorCode) ? "Agent offline" :
+      humanizeErrorCode(errorCode);
+    return { ...normalized, failureCategory: "infrastructure", severity: "error", operational: true, diagnosticLabel };
+  }
+  return { ...normalized, failureCategory: "tool", severity: "warning", operational: false, diagnosticLabel: humanizeErrorCode(errorCode) };
+}
+
 type ActivityCursor = { timestamp: string; id: string };
 
 function activityTimestamp(event: any) {
@@ -542,6 +576,7 @@ export class Usage extends DurableObject {
       );
 
       let metric: Metric | undefined;
+      let operationalErrors = 0;
       const topTools = new Map<string, number>();
       const hourMs = 60 * 60 * 1000;
       const bucketCount = Math.max(1, Math.min(48, Math.ceil((toMs - fromMs + 1) / hourMs)));
@@ -550,6 +585,7 @@ export class Usage extends DurableObject {
         to: new Date(Math.min(toMs, fromMs + (index + 1) * hourMs - 1)).toISOString(),
         calls: 0,
         errors: 0,
+        operationalErrors: 0,
       }));
 
       for (const event of events) {
@@ -560,12 +596,21 @@ export class Usage extends DurableObject {
         const bucket = buckets[bucketIndex];
         bucket.calls += 1;
         bucket.errors += event.ok ? 0 : 1;
+        if (!event.ok && classifyFailure(event).operational) {
+          operationalErrors += 1;
+          bucket.operationalErrors += 1;
+        }
       }
 
       return Response.json({
         from: new Date(fromMs).toISOString(),
         to: new Date(toMs).toISOString(),
-        metric: metric ? { ...publicMetric(metric), p95DurationMs: percentile95(events.map((event) => Math.max(0, event.durationMs))) } : null,
+        metric: metric ? {
+          ...publicMetric(metric),
+          operationalErrors,
+          operationalErrorRate: metric.calls ? operationalErrors / metric.calls : 0,
+          p95DurationMs: percentile95(events.map((event) => Math.max(0, event.durationMs))),
+        } : null,
         buckets,
         topTools: [...topTools.entries()]
           .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -700,6 +745,7 @@ export class Usage extends DurableObject {
       const tool = url.searchParams.get("tool");
       const agentId = url.searchParams.get("agentId");
       const errorClass = url.searchParams.get("errorClass");
+      const operational = url.searchParams.get("operational");
       const fromMs = Date.parse(url.searchParams.get("from") || "");
       const toMs = Date.parse(url.searchParams.get("to") || "");
 
@@ -715,13 +761,18 @@ export class Usage extends DurableObject {
         bounded = records.size >= 1000;
       }
 
-      const matched = events.filter((event) => {
-        const when = Date.parse(event.timestamp);
-        return !event.ok && (!userId || event.userId === userId) &&
-          (!tool || event.tool === tool) && (!agentId || event.agentId === agentId) &&
-          (!errorClass || event.errorClass === errorClass) &&
-          (!Number.isFinite(fromMs) || when >= fromMs) && (!Number.isFinite(toMs) || when <= toMs);
-      }).sort(sortActivityDesc);
+      const matched = events
+        .filter((event) => !event.ok)
+        .map((event) => ({ ...event, ...classifyFailure(event) }))
+        .filter((event) => {
+          const when = Date.parse(event.timestamp);
+          return (!userId || event.userId === userId) &&
+            (!tool || event.tool === tool) && (!agentId || event.agentId === agentId) &&
+            (!errorClass || event.errorClass === errorClass) &&
+            (operational === null || String(event.operational) === operational) &&
+            (!Number.isFinite(fromMs) || when >= fromMs) && (!Number.isFinite(toMs) || when <= toMs);
+        })
+        .sort(sortActivityDesc);
       const cursorFiltered = cursor ? matched.filter((event) => olderThanCursor(event, cursor)) : matched;
       const items = cursorFiltered.slice(0, limit);
       const hasMore = cursorFiltered.length > limit;

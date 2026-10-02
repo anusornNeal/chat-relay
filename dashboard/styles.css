@@ -165,6 +165,10 @@ tr:last-child td{border-bottom:0}
 .tool-cell span:not(.tool-icon),.error-cell span:not(.error-icon){display:block;color:#8a939c;font-size:9px;margin-top:2px}
 .tool-icon,.error-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:#f1f4f6;color:#606b75;flex:0 0 auto}
 .error-icon{background:#fff1f1;color:#9b3b3b}
+.error-icon.info{background:#f1f4f6;color:#68727c}
+.error-icon.warning{background:#fff8e8;color:#8a6418}
+.error-icon.error{background:#fff1f1;color:#9b3b3b}
+.error-mode-toggle{display:flex;gap:6px;align-items:end}
 .tool-icon .icon,.error-icon .icon{width:14px;height:14px}
 .user-cell{font-size:11px}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#7e8791}

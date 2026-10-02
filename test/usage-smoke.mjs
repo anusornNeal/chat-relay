@@ -234,8 +234,16 @@ if (!fallbackActivity) throw new Error("missing safe per-call activity fallback 
 
 const errors = await admin("/admin/api/errors?limit=100");
 const syntheticError = (errors.data.items || []).find((event) => event.tool === "read_file" && event.errorCode === "synthetic_failure");
-if (!syntheticError || syntheticError.errorSource !== "agent" || syntheticError.failureStage !== "agent" || syntheticError.retryable !== false || !syntheticError.agentName || syntheticError.agentName === syntheticError.agentId) {
+if (!syntheticError || syntheticError.errorSource !== "agent" || syntheticError.failureStage !== "agent" || syntheticError.retryable !== false || syntheticError.failureCategory !== "tool" || syntheticError.operational !== false || !syntheticError.diagnosticLabel || !syntheticError.agentName || syntheticError.agentName === syntheticError.agentId) {
   throw new Error(`safe structured error metadata missing: ${errors.text}`);
+}
+const operationalErrors = await admin("/admin/api/errors?operational=true&limit=100");
+if (!operationalErrors.response.ok || (operationalErrors.data.items || []).some((event) => event.operational !== true || event.failureCategory !== "infrastructure")) {
+  throw new Error(`operational error filtering failed: ${operationalErrors.text}`);
+}
+const handledErrors = await admin("/admin/api/errors?operational=false&limit=100");
+if (!handledErrors.response.ok || !(handledErrors.data.items || []).some((event) => event.errorCode === "synthetic_failure" && event.operational === false)) {
+  throw new Error(`handled error filtering failed: ${handledErrors.text}`);
 }
 
 const firstPage = await admin("/admin/api/tool-calls?state=history&agentId=default&limit=2");

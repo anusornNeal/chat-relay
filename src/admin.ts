@@ -721,7 +721,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
   if (path === "/admin/api/errors" && request.method === "GET") {
     const query = new URLSearchParams();
-    for (const key of ["limit", "cursor", "tool", "agentId", "userId", "errorClass", "from", "to"]) {
+    for (const key of ["limit", "cursor", "tool", "agentId", "userId", "errorClass", "operational", "from", "to"]) {
       const value = url.searchParams.get(key);
       if (value) query.set(key, value);
     }

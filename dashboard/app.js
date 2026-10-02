@@ -21,6 +21,7 @@ const PAGE_SIZE = 50;
 let callFilters = { userId: "", status: "", query: "", activityId: "", from: "", to: "", drilldown: false };
 const callPaging = { cursor: "", stack: [], nextCursor: null };
 const errorPaging = { cursor: "", stack: [], nextCursor: null };
+let errorMode = "attention";
 let runningClockTimer = null;
 
 const BKK_TZ = "Asia/Bangkok";
@@ -569,15 +570,15 @@ function chartMarkup(buckets = []) {
     "</div>";
   const bars = buckets.map((bucket, index) => {
     const calls = Number(bucket.calls || 0);
-    const errors = Number(bucket.errors || 0);
+    const errors = Number(bucket.operationalErrors ?? bucket.errors ?? 0);
     const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
     const start = bkkHourMinute(bucket.from);
     const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
     const label = start + "–" + end;
     const current = index === buckets.length - 1 ? " current" : "";
     return '<button class="chart-bar' + current + '" style="--bar-height:' + height + '%" data-chart-from="' + esc(bucket.from) + '" data-chart-to="' + esc(bucket.to) + '"' +
-      ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " errors") + '">' +
-      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations · ' + fmtNum(errors) + ' errors</span><small>Open filtered tool calls</small></span>' +
+      ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
+      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations · ' + fmtNum(errors) + ' operational errors</span><small>Open filtered tool calls</small></span>' +
       '<span class="bar-fill"></span>' +
       "</button>";
   }).join("");
@@ -600,7 +601,12 @@ async function loadOverview({ patch = false } = {}) {
     metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only · excludes Worker HTTP requests"),
     metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
     metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), exactMeta),
-    metricCard(isAdmin() ? "Error rate" : "My error rate", fmtPct(m.errorRate), fmtNum(m.errors) + " failed calls", Number(m.errors || 0) ? "metric-alert" : ""),
+    metricCard(
+      isAdmin() ? "Operational error rate" : "My operational error rate",
+      fmtPct(m.operationalErrorRate ?? m.errorRate),
+      fmtNum(m.operationalErrors ?? m.errors) + " infrastructure failures",
+      Number(m.operationalErrors ?? m.errors ?? 0) ? "metric-alert" : "",
+    ),
   ];
   if (isAdmin()) {
     cards.push(metricCard("Online agents", (data.agents?.online || 0) + " / " + (data.agents?.total || 0), "connected agents"));
@@ -960,35 +966,51 @@ async function loadErrors({ patch = false } = {}) {
   if (dashboardPeriod?.from) params.set("from", dashboardPeriod.from);
   params.set("to", new Date().toISOString());
   if (errorPaging.cursor) params.set("cursor", errorPaging.cursor);
+  if (errorMode === "attention") params.set("operational", "true");
   const data = await api("/admin/api/errors?" + params);
   errorPaging.nextCursor = data.nextCursor || null;
   const items = data.items || [];
   const rows = items.length ? items.map((event) => {
     const detailId = registerDetail(event);
-    const code = event.errorCode || event.errorClass || "tool_error";
-    const stage = diagnosticStageLabel(event.failureStage);
-    const retry = event.retryable ? "Retryable" : "Not retryable";
+    const code = event.diagnosticLabel || event.errorCode || event.errorClass || "Tool failure";
+    const category = event.failureCategory === "infrastructure"
+      ? "Infrastructure"
+      : event.failureCategory === "handled"
+        ? "Expected"
+        : "Tool failure";
+    const retry = event.retryable ? "Retryable" : event.operational ? "Needs attention" : "Handled";
     const rowKey = event.toolCallId || [event.timestamp, event.userId, event.tool, event.agentId].join(":");
     return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Error diagnostic">' +
       '<td class="time-cell"><strong>' + esc(bkkTime(event.timestamp)) + "</strong></td>" +
-      '<td><div class="error-cell"><span class="error-icon">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(stage + " · " + retry) + "</span></div></div></td>" +
+      '<td><div class="error-cell"><span class="error-icon ' + esc(event.severity || "warning") + '">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(category + " · " + retry) + "</span></div></div></td>" +
       '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + '</span></td><td>' + esc(event.tool) + "</td>" +
       '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving…") + "</strong></div></td>" +
       "<td>" + esc(fmtMs(event.durationMs)) + "</td>" +
       '<td><span class="diagnostic-result">' + esc(diagnosticResult(event)) + '</span></td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
-  }).join("") : '<tr><td colspan="8"><div class="table-empty">' + icon("check") + '<strong>No errors today</strong><span>Safe diagnostics will appear here if a tool invocation fails.</span></div></td></tr>';
+  }).join("") : '<tr><td colspan="8"><div class="table-empty">' + icon("check") + '<strong>' + (errorMode === "attention" ? "No operational errors today" : "No failures today") + '</strong><span>' + (errorMode === "attention" ? "Handled tool failures are hidden from this view." : "Safe diagnostics will appear here if a tool invocation fails.") + '</span></div></td></tr>';
 
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) + '<span class="privacy-chip">' + icon("info") + "No commands, args, payloads, or output stored</span></div>" +
     (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>Error history reached its safe bound; results are partial.</span></div>" : "") +
-    '<div class="filters-panel compact"><div class="filters-row"><label class="filter-control grow"><span>Search errors</span><div class="input-with-icon">' + icon("search") +
-      '<input id="errorSearch" placeholder="Code, stage, user, tool, agent"></div></label></div></div>' +
+    '<div class="filters-panel compact"><div class="filters-row"><div class="error-mode-toggle"><button type="button" class="button small ' + (errorMode === "attention" ? "primary" : "") + '" data-error-mode="attention">Needs attention</button><button type="button" class="button small ' + (errorMode === "all" ? "primary" : "") + '" data-error-mode="all">All failures</button></div><label class="filter-control grow"><span>Search errors</span><div class="input-with-icon">' + icon("search") +
+      '<input id="errorSearch" placeholder="Code, category, user, tool, agent"></div></label></div></div>' +
     '<div class="table-wrap error-table"><table><thead><tr><th>Time</th><th>Diagnostic</th><th>User</th><th>Tool</th><th>Agent</th><th>Duration</th><th>Result</th><th></th></tr></thead><tbody>' +
       rows + "</tbody></table></div>" +
     paginationMarkup("errors", errorPaging, Boolean(data.hasMore));
   renderContent(liveMarkup, patch);
   bindDetailRows();
   bindTableFilter("errorSearch");
+  document.querySelectorAll("[data-error-mode]").forEach((button) => {
+    button.onclick = async () => {
+      const nextMode = button.dataset.errorMode === "all" ? "all" : "attention";
+      if (nextMode === errorMode) return;
+      errorMode = nextMode;
+      errorPaging.cursor = "";
+      errorPaging.stack.length = 0;
+      errorPaging.nextCursor = null;
+      await loadErrors({ patch: true });
+    };
+  });
   bindPaging("errors", errorPaging, loadErrors);
 }
 
