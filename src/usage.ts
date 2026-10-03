@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DashboardTopic } from "./dashboard-hub";
+import { UsageAggregates } from "./usage-aggregates";
 
 type UsageEnv = { DASHBOARD: DurableObjectNamespace };
 
@@ -269,10 +270,43 @@ function nextUtcDay(nowMs: number) {
 
 export class Usage extends DurableObject {
   private readonly usageEnv: UsageEnv;
+  private readonly aggregates: UsageAggregates;
+  private activeHydration?: Promise<Map<string, ActiveUsageEvent>>;
+  private async activeEvents() {
+    const result = await (this.activeHydration ||= (async () => {
+      const result = new Map<string, ActiveUsageEvent>();
+      let startAfter: string | undefined;
+      for (;;) {
+        const page = await this.ctx.storage.list<ActiveUsageEvent>({ prefix: "active:", limit: 1000, ...(startAfter ? { startAfter } : {}) });
+        for (const [key, event] of page) result.set(key,event);
+        if (page.size < 1000) break;
+        startAfter = [...page.keys()].at(-1)!;
+      }
+      return result;
+    })().catch(error => { this.activeHydration = undefined; throw error; }));
+    const cutoff = Date.now()-3600000;
+    const stale = [...result].filter(([,event]) => Date.parse(event.startedAt) < cutoff);
+    if (stale.length) {
+      const removed = await this.ctx.storage.transaction(async txn => {
+        const keys: string[] = [];
+        for (const [key,event] of stale) {
+          const current = await txn.get<ActiveUsageEvent>(key);
+          if (current?.startedAt === event.startedAt) keys.push(key);
+        }
+        for (let offset = 0; offset < keys.length; offset += 128) await txn.delete(keys.slice(offset,offset+128));
+        return keys;
+      });
+      for (const key of removed) {
+        if (Date.parse(result.get(key)?.startedAt || "") < cutoff) result.delete(key);
+      }
+    }
+    return result;
+  }
 
   constructor(ctx: DurableObjectState, env: UsageEnv) {
     super(ctx, env);
     this.usageEnv = env;
+    this.aggregates = new UsageAggregates(ctx.storage, event => !event.ok && classifyFailure(event).operational);
   }
   private async readWindowEvents(fromMs: number, toMs: number, maxEvents = 20000) {
     const events: UsageEvent[] = [];
@@ -423,7 +457,9 @@ export class Usage extends DurableObject {
         ...(body?.agentId ? { agentId: String(body.agentId).slice(0, 128) } : {}),
         activityId: body?.activityId ? String(body.activityId).slice(0, 96) : fallbackActivityId(toolCallId),
       };
+      const active = await this.activeEvents();
       await this.ctx.storage.put("active:" + safePart(toolCallId), event);
+      active.set("active:" + safePart(toolCallId), event);
       await publishDashboard(this.usageEnv, [], event.userId, {
         type: "tool_started",
         userId: event.userId,
@@ -441,6 +477,8 @@ export class Usage extends DurableObject {
       if (!body || !body.userId || !body.tool || !body.timestamp) {
         return Response.json({ error: "invalid_usage_event" }, { status: 400 });
       }
+      const timestampMs = Date.parse(String(body.timestamp));
+      if (!Number.isFinite(timestampMs)) return Response.json({ error: "invalid_usage_timestamp" }, { status: 400 });
       const event: UsageEvent = {
         userId: String(body.userId).slice(0, 128),
         tool: String(body.tool).slice(0, 160),
@@ -452,8 +490,8 @@ export class Usage extends DurableObject {
             ? { activityId: fallbackActivityId(String(body.toolCallId).slice(0, 96)) }
             : {}),
         ...(body.startedAt ? { startedAt: String(body.startedAt) } : {}),
-        timestamp: String(body.timestamp),
-        durationMs: Number(body.durationMs) || 0,
+        timestamp: new Date(timestampMs).toISOString(),
+        durationMs: Number.isFinite(Number(body.durationMs)) ? Number(body.durationMs) : 0,
         ok: body.ok === true,
         ...(body.errorClass ? { errorClass: String(body.errorClass).slice(0, 80) } : {}),
         ...(body.errorSource ? { errorSource: String(body.errorSource).slice(0, 40) } : {}),
@@ -465,8 +503,8 @@ export class Usage extends DurableObject {
         ...(Number.isFinite(Number(body.transportMs)) ? { transportMs: Math.max(0, Math.min(120000, Math.round(Number(body.transportMs)))) } : {}),
         ...(Number.isFinite(Number(body.agentQueueWaitMs)) ? { agentQueueWaitMs: Math.max(0, Math.min(120000, Math.round(Number(body.agentQueueWaitMs)))) } : {}),
         ...(Number.isFinite(Number(body.agentHandlerMs)) ? { agentHandlerMs: Math.max(0, Math.min(120000, Math.round(Number(body.agentHandlerMs)))) } : {}),
-        requestBytes: Number(body.requestBytes) || 0,
-        responseBytes: Number(body.responseBytes) || 0,
+        requestBytes: Number.isFinite(Number(body.requestBytes)) ? Number(body.requestBytes) : 0,
+        responseBytes: Number.isFinite(Number(body.responseBytes)) ? Number(body.responseBytes) : 0,
       };
       if (!event.ok) Object.assign(event, normalizeFailureDiagnostics(event));
       const day = event.timestamp.slice(0, 10);
@@ -480,18 +518,17 @@ export class Usage extends DurableObject {
         `day:${day}:tool:${safePart(event.tool)}`,
         ...(event.agentId ? [`day:${day}:agent:${safePart(event.agentId)}`] : []),
       ];
-      const existing = await Promise.all(metricKeys.map((key) => this.ctx.storage.get<Metric>(key)));
-      const writes: Record<string, Metric> = {};
-      metricKeys.forEach((key, index) => {
-        writes[key] = addMetric(existing[index], event);
+      const active = event.toolCallId ? await this.activeEvents() : undefined;
+      await this.ctx.storage.transaction(async txn => {
+        // Bootstrap from retained raw before adding the new event, then commit all representations atomically.
+        await this.aggregates.record(txn, event);
+        const writes: Record<string, Metric> = {};
+        for (const key of metricKeys) writes[key] = addMetric(await txn.get<Metric>(key), event);
+        if (event.toolCallId) await txn.delete("active:" + safePart(event.toolCallId));
+        await txn.put({ ...writes, [`event:${event.timestamp}:${crypto.randomUUID()}`]: event });
       });
-
-      if (event.toolCallId) await this.ctx.storage.delete("active:" + safePart(event.toolCallId));
-      const eventKey = `event:${event.timestamp}:${crypto.randomUUID()}`;
-      await this.ctx.storage.put({
-        ...writes,
-        [eventKey]: event,
-      });
+      if (event.toolCallId) active!.delete("active:" + safePart(event.toolCallId));
+      this.aggregates.invalidate(event);
       await publishDashboard(
         this.usageEnv,
         event.ok ? ["overview"] : ["overview", "errors"],
@@ -540,12 +577,18 @@ export class Usage extends DurableObject {
         if (Date.parse(event.timestamp) < cutoffMs) keys.push(key);
         if (keys.length >= limit) break;
       }
-      if (keys.length) await this.ctx.storage.delete(keys);
+      const preserved: string[] = [];
+      await this.ctx.storage.transaction(async txn => {
+        for (const key of keys) if (await this.aggregates.preserve(txn, records.get(key)!)) preserved.push(key);
+        for (let offset = 0; offset < preserved.length; offset += 128) await txn.delete(preserved.slice(offset,offset+128));
+      });
+      this.aggregates.invalidate();
       const status = {
         ranAt: new Date().toISOString(),
         retentionDays,
         scanned,
-        deleted: keys.length,
+        deleted: preserved.length,
+        skipped: keys.length - preserved.length,
         aggregatesPreserved: true,
         bounded: true,
       };
@@ -568,87 +611,18 @@ export class Usage extends DurableObject {
       const userId = url.searchParams.get("userId");
       const tool = url.searchParams.get("tool");
       const agentId = url.searchParams.get("agentId");
-      const { events: rawEvents, bounded } = await this.readWindowEvents(fromMs, toMs);
-      const events = rawEvents.filter((event) =>
-        (!userId || event.userId === userId) &&
-        (!tool || event.tool === tool) &&
-        (!agentId || event.agentId === agentId)
-      );
-
-      let metric: Metric | undefined;
-      let operationalErrors = 0;
-      const topTools = new Map<string, number>();
-      const windowMs = toMs - fromMs + 1;
-      const bucketMs = windowMs > 48 * 60 * 60 * 1000 ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
-      const bucketCount = Math.max(1, Math.min(48, Math.ceil(windowMs / bucketMs)));
-      const buckets = Array.from({ length: bucketCount }, (_, index) => ({
-        from: new Date(fromMs + index * bucketMs).toISOString(),
-        to: new Date(Math.min(toMs, fromMs + (index + 1) * bucketMs - 1)).toISOString(),
-        calls: 0,
-        errors: 0,
-        operationalErrors: 0,
-      }));
-
-      for (const event of events) {
-        metric = addMetric(metric, event);
-        topTools.set(event.tool, (topTools.get(event.tool) || 0) + 1);
-        const when = Date.parse(event.timestamp);
-        const bucketIndex = Math.min(bucketCount - 1, Math.max(0, Math.floor((when - fromMs) / bucketMs)));
-        const bucket = buckets[bucketIndex];
-        bucket.calls += 1;
-        bucket.errors += event.ok ? 0 : 1;
-        if (!event.ok && classifyFailure(event).operational) {
-          operationalErrors += 1;
-          bucket.operationalErrors += 1;
-        }
-      }
-
-      return Response.json({
-        from: new Date(fromMs).toISOString(),
-        to: new Date(toMs).toISOString(),
-        metric: metric ? {
-          ...publicMetric(metric),
-          operationalErrors,
-          operationalErrorRate: metric.calls ? operationalErrors / metric.calls : 0,
-          p95DurationMs: percentile95(events.map((event) => Math.max(0, event.durationMs))),
-        } : null,
-        buckets,
-        topTools: [...topTools.entries()]
-          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-          .slice(0, 8)
-          .map(([name, calls]) => ({ tool: name, calls })),
-        sampleSize: events.length,
-        bounded,
-      });
+      return Response.json(await this.aggregates.window(fromMs,toMs,{userId,tool,agentId}));
     }
 
     if (url.pathname === "/summary" && request.method === "GET") {
       const hours = boundedInt(url.searchParams.get("hours"), 24, 1, 720);
-      const userId = url.searchParams.get("userId");
-      const tool = url.searchParams.get("tool");
-      const agentId = url.searchParams.get("agentId");
-      const cutoffMs = Date.now() - hours * 60 * 60 * 1000;
-      const records = await this.ctx.storage.list<UsageEvent>({ prefix: "event:", reverse: true, limit: 1000 });
-      const events = [...records.values()].filter((event) => {
-        const when = Date.parse(event.timestamp);
-        return when >= cutoffMs && (!userId || event.userId === userId) &&
-          (!tool || event.tool === tool) && (!agentId || event.agentId === agentId);
-      });
-      let metric: Metric | undefined;
-      for (const event of events) metric = addMetric(metric, event);
-      const activeRecords = await this.ctx.storage.list<ActiveUsageEvent>({ prefix: "active:", limit: 1000 });
-      const activeCutoffMs = Date.now() - 5 * 60 * 1000;
-      const active = [...activeRecords.values()].filter((event) =>
-        Date.parse(event.startedAt) >= activeCutoffMs &&
-        (!userId || event.userId === userId) && (!tool || event.tool === tool) && (!agentId || event.agentId === agentId)
-      );
-      return Response.json({
-        hours,
-        metric: metric ? { ...publicMetric(metric), p95DurationMs: percentile95(events.map((event) => Math.max(0, event.durationMs))) } : null,
-        activeCalls: active.length,
-        sampleSize: events.length,
-        bounded: records.size >= 1000,
-      });
+      const userId = url.searchParams.get("userId"), tool = url.searchParams.get("tool"), agentId = url.searchParams.get("agentId");
+      const now = Date.now();
+      const summary = await this.aggregates.window(now-hours*3600000,now,{userId,tool,agentId},false);
+      const active = [...(await this.activeEvents()).values()].filter(event => Date.parse(event.startedAt) >= now-300000 &&
+        (!userId || event.userId === userId) && (!tool || event.tool === tool) && (!agentId || event.agentId === agentId));
+      return Response.json({ hours, metric: summary.metric, activeCalls: active.length, sampleSize: summary.sampleSize,
+        bounded: summary.bounded, coverage: summary.coverage, p95Approximate: true });
     }
 
     if (url.pathname === "/activity/query" && request.method === "GET") {
@@ -677,7 +651,7 @@ export class Usage extends DurableObject {
 
       const activeRecords = state === "history"
         ? new Map<string, ActiveUsageEvent>()
-        : await this.ctx.storage.list<ActiveUsageEvent>({ prefix: "active:", limit: 1000 });
+        : await this.activeEvents();
       const activeCutoffMs = Date.now() - 60 * 60 * 1000;
       const staleKeys: string[] = [];
       const activeItems = [...activeRecords.entries()]
@@ -692,7 +666,10 @@ export class Usage extends DurableObject {
           timestamp: event.startedAt,
           status: "running" as const,
         }));
-      if (staleKeys.length) await this.ctx.storage.delete(staleKeys);
+      if (staleKeys.length) {
+        for (let offset = 0; offset < staleKeys.length; offset += 128) await this.ctx.storage.delete(staleKeys.slice(offset,offset+128));
+        for (const key of staleKeys) activeRecords.delete(key);
+      }
 
       let historyEvents: UsageEvent[] = [];
       let bounded = false;

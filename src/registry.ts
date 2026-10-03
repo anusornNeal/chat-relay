@@ -900,15 +900,61 @@ export class Registry extends DurableObject {
     }
     if (consent && isExpired(consent.expiresAt)) await this.ctx.storage.delete(consentKey);
 
-    for (const prefix of ["oauth-refresh:", "oauth-access:"]) {
-      const records = await this.ctx.storage.list<OAuthTokenRecord>({ prefix });
-      for (const record of records.values()) {
-        if (record.userId === userId && record.clientId === clientId && record.resource === resource && !isExpired(record.expiresAt)) {
-          return json({ ok: true, authorized: true });
-        }
+    await this.migrateOAuthAuthorizationIndex();
+    const index = await this.ctx.storage.get<Record<string, string>>(this.oauthAuthorizationKey(userId, clientId, resource));
+    for (const tokenKey of Object.values(index || {})) {
+      const record = await this.ctx.storage.get<OAuthTokenRecord>(tokenKey);
+      if (record && record.userId === userId && record.clientId === clientId && record.resource === resource &&
+          !isExpired(record.expiresAt) && requestedScope.every((scope: string) => record.scope.includes(scope))) {
+        return json({ ok: true, authorized: true });
       }
     }
     return json({ ok: true, authorized: false });
+  }
+
+  private oauthAuthorizationKey(userId: string, clientId: string, resource: string) {
+    return "oauth-authorized:" + JSON.stringify([userId, clientId, resource]);
+  }
+
+  private async indexOAuthToken(tokenKey: string, record: OAuthTokenRecord) {
+    const indexKey = this.oauthAuthorizationKey(record.userId, record.clientId, record.resource);
+    await this.ctx.storage.transaction(async txn => {
+      const index = await txn.get<Record<string, string>>(indexKey) || {};
+      const scopeKey = JSON.stringify([
+        tokenKey.startsWith("oauth-refresh:") ? "refresh" : "access",
+        [...record.scope].sort(),
+      ]);
+      const previous = index[scopeKey] ? await txn.get<OAuthTokenRecord>(index[scopeKey]) : undefined;
+      if (!previous || Date.parse(record.expiresAt) >= Date.parse(previous.expiresAt)) {
+        index[scopeKey] = tokenKey;
+      }
+      await txn.put(indexKey, index);
+    });
+  }
+
+  private oauthIndexMigration?: Promise<void>;
+  private async migrateOAuthAuthorizationIndex() {
+    if (!this.oauthIndexMigration) this.oauthIndexMigration = (async () => {
+      if (await this.ctx.storage.get<boolean>("oauth-authorized:migrated:v1")) return;
+      for (const prefix of ["oauth-refresh:", "oauth-access:"]) {
+        let startAfter: string | undefined;
+        for (;;) {
+          const records = await this.ctx.storage.list<OAuthTokenRecord>({
+            prefix, limit: 500, ...(startAfter ? { startAfter } : {}),
+          });
+          for (const [tokenKey, record] of records) {
+            if (!isExpired(record.expiresAt)) await this.indexOAuthToken(tokenKey, record);
+          }
+          if (records.size < 500) break;
+          startAfter = [...records.keys()].at(-1)!;
+        }
+      }
+      await this.ctx.storage.put("oauth-authorized:migrated:v1", true);
+    })().catch(error => {
+      this.oauthIndexMigration = undefined;
+      throw error;
+    });
+    await this.oauthIndexMigration;
   }
 
   private async oauthPassword(body: any): Promise<Response> {
@@ -1122,6 +1168,7 @@ export class Registry extends DurableObject {
       record.userId, record.clientId, record.scope, record.resource,
     );
     await this.ctx.storage.put(tokens.records);
+    for (const [tokenKey, record] of Object.entries(tokens.records)) await this.indexOAuthToken(tokenKey, record);
     return json(tokens.result);
   }
 
@@ -1167,6 +1214,8 @@ export class Registry extends DurableObject {
       [key.oauthAccess(access.tokenHash)]: access,
       [key.oauthRefresh(refreshTokenHash)]: refreshedRecord,
     });
+    await this.indexOAuthToken(key.oauthAccess(access.tokenHash), access);
+    await this.indexOAuthToken(key.oauthRefresh(refreshTokenHash), refreshedRecord);
     return json({
       access_token: accessToken,
       token_type: "Bearer",
@@ -1367,8 +1416,10 @@ export class Registry extends DurableObject {
     if (!agentId || agentId !== requestedId) return json({ error: "unauthorized" }, 401);
     const agent = await this.ctx.storage.get<AgentRecord>(key.agent(agentId));
     if (!agent?.enabled) return json({ error: "unauthorized" }, 401);
-    agent.lastSeenAt = new Date().toISOString();
-    await this.ctx.storage.put(key.agent(agent.id), agent);
+    if (!Number.isFinite(Date.parse(agent.lastSeenAt || "")) || Date.now() - Date.parse(agent.lastSeenAt!) >= 60000) {
+      agent.lastSeenAt = new Date().toISOString();
+      await this.ctx.storage.put(key.agent(agent.id), agent);
+    }
     return json({ ok: true, agent: { id: agent.id, name: agent.name } });
   }
 

@@ -18,6 +18,7 @@ const { Registry, hashToken, handleDeviceAuth, handleAdmin, handleOAuth } = awai
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const records = new Map();
 const storage = {
+  async transaction(callback) { return callback(storage); },
   async get(key) { return structuredClone(records.get(key)); },
   async put(key, value) {
     if (typeof key === "object") for (const [k, v] of Object.entries(key)) records.set(k, structuredClone(v));

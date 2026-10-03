@@ -663,7 +663,7 @@ async function loadOverview({ patch = false } = {}) {
   const cards = [
     metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only Â· excludes Worker HTTP requests"),
     metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
-    metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), exactMeta),
+    metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), m.p95Approximate ? "p95 is approximate" : exactMeta),
     metricCard(
       isAdmin() ? "Operational error rate" : "My operational error rate",
       fmtPct(m.operationalErrorRate ?? m.errorRate),
@@ -677,7 +677,7 @@ async function loadOverview({ patch = false } = {}) {
   }
   const top = Array.isArray(data.topTools) ? data.topTools : [];
   const boundedNotice = data.bounded
-    ? '<div class="data-warning">' + icon("alert") + '<span>This view reached its safe event bound. Counts shown are partial rather than falsely exact.</span></div>'
+    ? '<div class="data-warning">' + icon("alert") + '<span>Some detailed history is unavailable. Counts cover retained history.</span></div>'
     : "";
   const liveMarkup =
     '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +

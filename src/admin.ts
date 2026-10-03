@@ -606,6 +606,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
         buckets: usage.buckets ?? [],
         topTools: usage.topTools ?? [],
         bounded: usage.bounded === true,
+        coverage: usage.coverage,
         sampleSize: Number(usage.sampleSize || 0),
         activeTerminals,
       });
@@ -658,6 +659,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       buckets: usage.buckets ?? [],
       topTools: usage.topTools ?? [],
       bounded: usage.bounded === true,
+        coverage: usage.coverage,
       sampleSize: Number(usage.sampleSize || 0),
       activeTerminals,
       activeUsers: activeUsers.size,
