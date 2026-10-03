@@ -229,20 +229,24 @@ async function usageSummary(env: AdminEnv, hours: number, userId?: string) {
 }
 
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
-function bangkokToday(nowMs = Date.now()) {
+type DashboardRange = "today" | "7d" | "30d";
+function dashboardPeriod(range: DashboardRange = "today", nowMs = Date.now()) {
   const local = new Date(nowMs + BANGKOK_OFFSET_MS);
-  const startMs = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - BANGKOK_OFFSET_MS;
+  const todayStartMs = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - BANGKOK_OFFSET_MS;
+  const days = range === "30d" ? 30 : range === "7d" ? 7 : 1;
+  const startMs = todayStartMs - (days - 1) * 24 * 60 * 60 * 1000;
   return {
-    label: "Today",
+    range,
+    label: range === "30d" ? "30 days" : range === "7d" ? "7 days" : "Today",
     timezone: "Asia/Bangkok",
     timezoneLabel: "BKK · UTC+7",
-    day: new Date(startMs + BANGKOK_OFFSET_MS).toISOString().slice(0, 10),
+    day: new Date(todayStartMs + BANGKOK_OFFSET_MS).toISOString().slice(0, 10),
     from: new Date(startMs).toISOString(),
     to: new Date(nowMs).toISOString(),
   };
 }
 
-async function usageWindow(env: AdminEnv, period: ReturnType<typeof bangkokToday>, userId?: string) {
+async function usageWindow(env: AdminEnv, period: ReturnType<typeof dashboardPeriod>, userId?: string) {
   const query = new URLSearchParams({ from: period.from, to: period.to });
   if (userId) query.set("userId", userId);
   const response = await usageStub(env).fetch("https://usage.internal/window?" + query);
@@ -583,7 +587,9 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   if (path === "/admin/api/overview" && request.method === "GET") {
-    const period = bangkokToday();
+    const requestedRange = url.searchParams.get("range");
+    const range: DashboardRange = requestedRange === "7d" || requestedRange === "30d" ? requestedRange : "today";
+    const period = dashboardPeriod(range);
     if (!adminAuthorized) {
       const [usage, terminals] = await Promise.all([
         usageWindow(env, period, selfUserId),

@@ -71,7 +71,7 @@ input:focus,select:focus,button:focus-visible,[data-detail-id]:focus-visible{bor
 .notice.notice-error{border-color:#ebcbcb;background:#fff3f3;color:#8f3535}
 .section-toolbar,.overview-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
 .period-chips{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.period-chip{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;background:#f8fafb}
+.period-chip{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;background:#f8fafb;appearance:none;cursor:pointer}
 .period-chip.primary{background:#fff;color:#252b31;font-weight:700;box-shadow:0 1px 1px rgba(20,25,30,.025)}
 .period-chip .icon,.privacy-chip .icon,.window-chip .icon,.status-pill .icon{width:14px;height:14px}
 .privacy-chip{display:inline-flex;align-items:center;gap:6px;background:transparent;color:#7e8791}

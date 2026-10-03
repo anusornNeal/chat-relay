@@ -12,10 +12,13 @@ let reconnectAttempt = 0;
 let socketEverOpened = false;
 let refreshRunning = false;
 let refreshQueued = false;
+let dataRetryTimer = null;
+let dataRetryAttempt = 0;
 const pendingLiveTopics = new Set();
 const agentNameCache = new Map();
 let pendingDeleteUser = null;
 let dashboardPeriod = null;
+let dashboardRange = "today";
 let adminUsersCache = [];
 const PAGE_SIZE = 50;
 let callFilters = { userId: "", status: "", query: "", activityId: "", from: "", to: "", drilldown: false };
@@ -25,6 +28,8 @@ let errorMode = "attention";
 let runningClockTimer = null;
 
 const BKK_TZ = "Asia/Bangkok";
+const API_TIMEOUT_MS = 12000;
+const DATA_RETRY_MAX_MS = 15000;
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtNum = (v) => new Intl.NumberFormat("en-US").format(Number(v || 0));
@@ -289,27 +294,70 @@ async function api(path, options = {}) {
     headers["content-type"] = "application/json";
     if (csrf) headers["x-csrf-token"] = csrf;
   }
-  const response = await fetch(path, { ...options, headers, credentials: "same-origin" });
-  const text = await response.text();
-  let data = {};
-  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-  if (response.status === 401) {
-    signOutUi("Session expired. Sign in again.");
-    throw new Error("unauthorized");
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, API_TIMEOUT_MS);
+  const externalSignal = options.signal;
+  const forwardAbort = () => controller.abort(externalSignal?.reason);
+  if (externalSignal) {
+    if (externalSignal.aborted) forwardAbort();
+    else externalSignal.addEventListener("abort", forwardAbort, { once: true });
   }
-  if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
-  return data;
+
+  try {
+    const response = await fetch(path, { ...options, headers, credentials: "same-origin", signal: controller.signal });
+    const text = await response.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (response.status === 401) {
+      signOutUi("Session expired. Sign in again.");
+      throw new Error("unauthorized");
+    }
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    return data;
+  } catch (error) {
+    if (timedOut) throw new Error("request_timeout");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener?.("abort", forwardAbort);
+  }
 }
 
+function clearDataRetry() {
+  clearTimeout(dataRetryTimer);
+  dataRetryTimer = null;
+  dataRetryAttempt = 0;
+}
+function scheduleDataRetry() {
+  if (!currentUser || dataRetryTimer) return;
+  const delay = Math.min(DATA_RETRY_MAX_MS, 1000 * (2 ** Math.min(dataRetryAttempt, 4)));
+  dataRetryAttempt += 1;
+  const freshness = $("freshness");
+  if (freshness) freshness.textContent = "Retrying data…";
+  dataRetryTimer = setTimeout(() => {
+    dataRetryTimer = null;
+    void refreshActiveIncrementally();
+  }, delay);
+}
 function signOutUi(message = "") {
   sessionStorage.removeItem("chat_relay_csrf");
+  clearDataRetry();
   stopLiveChannel();
   csrf = "";
   currentUser = null;
   dashboardPeriod = null;
   $("appView").hidden = true;
   $("loginView").hidden = false;
-  $("loginError").textContent = message;
+  const loginError = $("loginError");
+  if (loginError) {
+    loginError.textContent = message;
+    loginError.hidden = !message;
+  }
 }
 function setNotice(message = "", error = false) {
   const node = $("notice");
@@ -363,7 +411,7 @@ async function switchView(view) {
   activeView = view;
   renderNav();
   showLoading();
-  await loadActive({ patch: false });
+  await refreshActiveIncrementally({ initial: true });
 }
 async function loadActive({ patch = false } = {}) {
   setNotice("");
@@ -372,25 +420,34 @@ async function loadActive({ patch = false } = {}) {
     else if (activeView === "calls") await loadCalls({ patch });
     else if (activeView === "users") await loadUsers({ patch });
     else if (activeView === "errors") await loadErrors({ patch });
+    clearDataRetry();
     touchFreshness();
+    return true;
   } catch (error) {
     if (error.message !== "unauthorized") {
-      setNotice("Dashboard data is temporarily unavailable. Live updates will retry automatically.", true);
+      const timeout = error.message === "request_timeout";
+      setNotice(timeout
+        ? "Dashboard data timed out. Retrying automatically…"
+        : "Dashboard data is temporarily unavailable. Retrying automatically…", true);
+      scheduleDataRetry();
     }
+    return false;
   }
 }
 
-async function refreshActiveIncrementally() {
+async function refreshActiveIncrementally({ initial = false } = {}) {
   if (!currentUser) return;
   if (refreshRunning) {
     refreshQueued = true;
     return;
   }
   refreshRunning = true;
+  let patch = !initial;
   try {
     do {
       refreshQueued = false;
-      await loadActive({ patch: true });
+      await loadActive({ patch });
+      patch = true;
     } while (refreshQueued);
   } finally {
     refreshRunning = false;
@@ -524,7 +581,12 @@ function metricCard(label, value, meta = "", tone = "") {
     '<div class="metric-value">' + esc(value) + '</div><div class="metric-meta">' + esc(meta) + "</div></div>";
 }
 function periodChips(period) {
-  return '<div class="period-chips"><span class="period-chip primary">' + icon("clock") + esc(period?.label || "Today") + "</span></div>";
+  const current = period?.range || dashboardRange || "today";
+  const ranges = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]];
+  return '<div class="period-chips">' + ranges.map(([value, label]) =>
+    '<button type="button" class="period-chip' + (current === value ? ' primary' : '') + '" data-overview-range="' + value + '">' +
+      (current === value ? icon("clock") : "") + esc(label) + "</button>"
+  ).join("") + "</div>";
 }
 
 function resetCallPaging() {
@@ -540,10 +602,10 @@ function resetErrorPaging() {
 function paginationMarkup(kind, paging, hasMore) {
   const page = paging.stack.length + 1;
   return '<div class="pagination-bar" data-live-key="' + kind + '-pagination">' +
-    '<span class="pagination-summary">Page ' + page + ' · up to ' + PAGE_SIZE + ' rows</span>' +
+    '<span class="pagination-summary">Page ' + page + ' Â· up to ' + PAGE_SIZE + ' rows</span>' +
     '<div class="pagination-actions">' +
-      '<button class="button small" type="button" data-page-newer="' + kind + '"' + (page === 1 ? " disabled" : "") + '>← Newer</button>' +
-      '<button class="button small" type="button" data-page-older="' + kind + '"' + (!hasMore ? " disabled" : "") + '>Older →</button>' +
+      '<button class="button small" type="button" data-page-newer="' + kind + '"' + (page === 1 ? " disabled" : "") + '>â† Newer</button>' +
+      '<button class="button small" type="button" data-page-older="' + kind + '"' + (!hasMore ? " disabled" : "") + '>Older â†’</button>' +
     "</div></div>";
 }
 function bindPaging(kind, paging, load) {
@@ -574,11 +636,11 @@ function chartMarkup(buckets = []) {
     const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
     const start = bkkHourMinute(bucket.from);
     const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
-    const label = start + "–" + end;
+    const label = start + "â€“" + end;
     const current = index === buckets.length - 1 ? " current" : "";
     return '<button class="chart-bar' + current + '" style="--bar-height:' + height + '%" data-chart-from="' + esc(bucket.from) + '" data-chart-to="' + esc(bucket.to) + '"' +
       ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
-      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations · ' + fmtNum(errors) + ' operational errors</span><small>Open filtered tool calls</small></span>' +
+      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations Â· ' + fmtNum(errors) + ' operational errors</span><small>Open filtered tool calls</small></span>' +
       '<span class="bar-fill"></span>' +
       "</button>";
   }).join("");
@@ -593,12 +655,13 @@ function chartMarkup(buckets = []) {
 
 async function loadOverview({ patch = false } = {}) {
   setHeader(isAdmin() ? "System overview" : "My overview", isAdmin() ? "Today across Chat Relay" : "Your activity today");
-  const data = await api("/admin/api/overview");
-  dashboardPeriod = data.period || dashboardPeriod || { label: "Today" };
+  const data = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange));
+  dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
+  dashboardRange = dashboardPeriod.range || dashboardRange;
   const m = data.usage || {};
-  const exactMeta = data.bounded ? "partial — safety bound reached" : "today";
+  const exactMeta = data.bounded ? "partial â€” safety bound reached" : "today";
   const cards = [
-    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only · excludes Worker HTTP requests"),
+    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only Â· excludes Worker HTTP requests"),
     metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
     metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), exactMeta),
     metricCard(
@@ -630,6 +693,19 @@ async function loadOverview({ patch = false } = {}) {
       ).join("") : '<div class="empty-inline">No tool invocations yet today.</div>') +
     "</div></section></div>";
   renderContent(liveMarkup, patch);
+  document.querySelectorAll("[data-overview-range]").forEach((button) => {
+    button.onclick = async () => {
+      const nextRange = button.dataset.overviewRange || "today";
+      if (nextRange === dashboardRange) return;
+      dashboardRange = nextRange;
+      dashboardPeriod = null;
+      callFilters.from = "";
+      callFilters.to = "";
+      callFilters.drilldown = false;
+      resetCallPaging();
+      await loadOverview();
+    };
+  });
 
   document.querySelectorAll("[data-chart-from]").forEach((bar) => {
     bar.onclick = async () => {
@@ -704,7 +780,7 @@ function callFilterMarkup() {
   const statusOptions = [["", "All statuses"], ["running", "Running"], ["success", "Success"], ["error", "Error"]]
     .map(([value, label]) => '<option value="' + value + '"' + (callFilters.status === value ? " selected" : "") + ">" + label + "</option>").join("");
   const windowLabel = callFilters.drilldown && callFilters.from
-    ? bkkHourMinute(callFilters.from) + "–" + bkkHourMinute(new Date(Date.parse(callFilters.to) + 1).toISOString())
+    ? bkkHourMinute(callFilters.from) + "â€“" + bkkHourMinute(new Date(Date.parse(callFilters.to) + 1).toISOString())
     : "Today";
   const related = callFilters.activityId
     ? '<button id="clearActivity" class="button subtle activity-filter-chip" type="button">' + icon("activity") + esc(activityLabel(callFilters.activityId)) + ' ' + icon("x") + "</button>"
@@ -723,7 +799,7 @@ function rememberAgentName(event) {
   if (event?.agentId && event?.agentName) agentNameCache.set(String(event.agentId), String(event.agentName));
 }
 function callAgentName(event) {
-  return event?.agentName || (event?.agentId ? agentNameCache.get(String(event.agentId)) : "") || "Resolving…";
+  return event?.agentName || (event?.agentId ? agentNameCache.get(String(event.agentId)) : "") || "Resolvingâ€¦";
 }
 function userDisplayName(userId) {
   const id = String(userId || "");
@@ -888,7 +964,7 @@ async function loadUsers({ patch = false } = {}) {
   const data = await api("/admin/api/users?limit=100");
   adminUsersCache = Array.isArray(data.items) ? data.items : adminUsersCache;
   const rows = (data.items || []).map((user) => {
-    const agentMeta = fmtNum(user.agentCount) + " assigned · " + fmtNum(user.onlineAgentCount) + " online";
+    const agentMeta = fmtNum(user.agentCount) + " assigned Â· " + fmtNum(user.onlineAgentCount) + " online";
     const assignedAgents = Array.isArray(user.assignedAgents) ? user.assignedAgents : [];
     const agentMarkup = assignedAgents.length
       ? '<div class="agent-assignment-list">' + assignedAgents.map((agent) =>
@@ -942,7 +1018,7 @@ function diagnosticStageLabel(stage) {
 function diagnosticResult(event) {
   if (event.exitCode !== null && event.exitCode !== undefined) return "Exit " + event.exitCode;
   if (event.statusCode !== null && event.statusCode !== undefined) return "HTTP " + event.statusCode;
-  return "—";
+  return "â€”";
 }
 async function loadErrors({ patch = false } = {}) {
   detailRecords.clear();
@@ -971,9 +1047,9 @@ async function loadErrors({ patch = false } = {}) {
     const rowKey = event.toolCallId || [event.timestamp, event.userId, event.tool, event.agentId].join(":");
     return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Error diagnostic">' +
       '<td class="time-cell"><strong>' + esc(bkkTime(event.timestamp)) + "</strong></td>" +
-      '<td><div class="error-cell"><span class="error-icon ' + esc(event.severity || "warning") + '">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(category + " · " + retry) + "</span></div></div></td>" +
+      '<td><div class="error-cell"><span class="error-icon ' + esc(event.severity || "warning") + '">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(category + " Â· " + retry) + "</span></div></div></td>" +
       '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + '</span></td><td>' + esc(event.tool) + "</td>" +
-      '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving…") + "</strong></div></td>" +
+      '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolvingâ€¦") + "</strong></div></td>" +
       "<td>" + esc(fmtMs(event.durationMs)) + "</td>" +
       '<td><span class="diagnostic-result">' + esc(diagnosticResult(event)) + '</span></td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
   }).join("") : '<tr><td colspan="8"><div class="table-empty">' + icon("check") + '<strong>' + (errorMode === "attention" ? "No operational errors today" : "No failures today") + '</strong><span>' + (errorMode === "attention" ? "Handled tool failures are hidden from this view." : "Safe diagnostics will appear here if a tool invocation fails.") + '</span></div></td></tr>';
@@ -1009,7 +1085,10 @@ $("logout").onclick = async () => {
 };
 $("refresh").innerHTML = icon("refresh");
 $("refresh").setAttribute("aria-label", "Refresh dashboard");
-$("refresh").onclick = () => void refreshActiveIncrementally();
+$("refresh").onclick = () => {
+  clearDataRetry();
+  void refreshActiveIncrementally();
+};
 $("logout").insertAdjacentHTML("afterbegin", icon("logout"));
 document.querySelectorAll("[data-close-dialog]").forEach((button) => button.onclick = () => button.closest("dialog").close());
 $("cancelDelete").onclick = () => { $("confirmDialog").close(); pendingDeleteUser = null; };
@@ -1029,12 +1108,22 @@ $("closeDetail").onclick = () => $("detailDialog").close();
     currentUser = data.user;
     $("loginView").hidden = true;
     $("appView").hidden = false;
-    $("who").textContent = (currentUser.name || currentUser.login) + " · " + (isAdmin() ? "Admin" : "User");
+    $("who").textContent = (currentUser.name || currentUser.login) + " Â· " + (isAdmin() ? "Admin" : "User");
     $("roleBadge").innerHTML = icon(isAdmin() ? "server" : "users") + (isAdmin() ? "Admin workspace" : "User workspace");
     renderNav();
-    await loadActive({ patch: false });
+    showLoading();
     startLiveChannel();
-  } catch {}
+    await refreshActiveIncrementally({ initial: true });
+  } catch (error) {
+    if (error?.message === "unauthorized") return;
+    const loginError = $("loginError");
+    if (loginError) {
+      loginError.textContent = error?.message === "request_timeout"
+        ? "Dashboard session check timed out. Refresh to retry."
+        : "Dashboard session is temporarily unavailable. Refresh to retry.";
+      loginError.hidden = false;
+    }
+  }
 })();
 
 window.addEventListener("online", () => { if (currentUser && liveSocket?.readyState !== WebSocket.OPEN) connectLiveChannel(); });

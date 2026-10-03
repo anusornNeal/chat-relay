@@ -561,7 +561,7 @@ export class Usage extends DurableObject {
     if (url.pathname === "/window" && request.method === "GET") {
       const fromMs = Date.parse(url.searchParams.get("from") || "");
       const toMs = Date.parse(url.searchParams.get("to") || "");
-      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs || toMs - fromMs > 48 * 60 * 60 * 1000) {
+      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs || toMs - fromMs > 31 * 24 * 60 * 60 * 1000) {
         return Response.json({ error: "invalid_usage_window" }, { status: 400 });
       }
 
@@ -578,11 +578,12 @@ export class Usage extends DurableObject {
       let metric: Metric | undefined;
       let operationalErrors = 0;
       const topTools = new Map<string, number>();
-      const hourMs = 60 * 60 * 1000;
-      const bucketCount = Math.max(1, Math.min(48, Math.ceil((toMs - fromMs + 1) / hourMs)));
+      const windowMs = toMs - fromMs + 1;
+      const bucketMs = windowMs > 48 * 60 * 60 * 1000 ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+      const bucketCount = Math.max(1, Math.min(48, Math.ceil(windowMs / bucketMs)));
       const buckets = Array.from({ length: bucketCount }, (_, index) => ({
-        from: new Date(fromMs + index * hourMs).toISOString(),
-        to: new Date(Math.min(toMs, fromMs + (index + 1) * hourMs - 1)).toISOString(),
+        from: new Date(fromMs + index * bucketMs).toISOString(),
+        to: new Date(Math.min(toMs, fromMs + (index + 1) * bucketMs - 1)).toISOString(),
         calls: 0,
         errors: 0,
         operationalErrors: 0,
@@ -592,7 +593,7 @@ export class Usage extends DurableObject {
         metric = addMetric(metric, event);
         topTools.set(event.tool, (topTools.get(event.tool) || 0) + 1);
         const when = Date.parse(event.timestamp);
-        const bucketIndex = Math.min(bucketCount - 1, Math.max(0, Math.floor((when - fromMs) / hourMs)));
+        const bucketIndex = Math.min(bucketCount - 1, Math.max(0, Math.floor((when - fromMs) / bucketMs)));
         const bucket = buckets[bucketIndex];
         bucket.calls += 1;
         bucket.errors += event.ok ? 0 : 1;
