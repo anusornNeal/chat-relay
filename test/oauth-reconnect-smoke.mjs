@@ -9,15 +9,15 @@ function assert(condition, message) {
 
 assert(
   registry.includes("const OAUTH_REFRESH_REPLAY_TTL_MS = 5 * 60 * 1000;"),
-  "refresh retry grace must stay bounded to 5 minutes",
+  "legacy refresh retry grace must stay bounded during migration",
 );
 assert(
   registry.includes("oauthRefreshReplay: (hash: string) => `oauth-refresh-replay:${hash}`"),
-  "refresh replay storage key is missing",
+  "legacy refresh replay storage key is missing",
 );
 assert(
   registry.includes('{ prefix: "oauth-refresh-replay:", device: false }'),
-  "expired refresh replay records are not covered by auth cleanup",
+  "expired legacy refresh replay records are not covered by auth cleanup",
 );
 
 const exchangeStart = registry.indexOf("private async exchangeOAuthRefresh");
@@ -25,19 +25,27 @@ const exchangeEnd = registry.indexOf("private async issueAdminSession", exchange
 const exchange = registry.slice(exchangeStart, exchangeEnd);
 const replayLookup = exchange.indexOf("get<OAuthRefreshReplayRecord>");
 const activeLookup = exchange.indexOf("get<OAuthTokenRecord>");
-const replayWrite = exchange.indexOf("[replayKey]: replayRecord");
-const oldDelete = exchange.lastIndexOf("delete(key.oauthRefresh(refreshTokenHash))");
+const stableWrite = exchange.indexOf("[key.oauthRefresh(refreshTokenHash)]: refreshedRecord");
+const deleteAfterStableWrite = exchange.indexOf(
+  "delete(key.oauthRefresh(refreshTokenHash))",
+  stableWrite,
+);
 
 assert(exchangeStart >= 0 && exchangeEnd > exchangeStart, "refresh exchange implementation missing");
-assert(replayLookup >= 0 && replayLookup < activeLookup, "retry replay must be checked before active token rotation");
-assert(replayWrite >= 0 && replayWrite < oldDelete, "replay result must be persisted before the old refresh token is deleted");
+assert(replayLookup >= 0 && replayLookup < activeLookup, "legacy rotated-token replay must be checked before active refresh lookup");
+assert(stableWrite >= 0, "active refresh token is not preserved during refresh");
+assert(deleteAfterStableWrite === -1, "active refresh token is still rotated after a successful refresh");
 assert(
-  oauthSmoke.includes("retriedRefresh.data.refresh_token !== refreshed.data.refresh_token"),
-  "OAuth smoke test no longer verifies idempotent refresh retry",
+  exchange.includes("expiresAt: new Date(now.getTime() + OAUTH_REFRESH_TTL_MS).toISOString()"),
+  "active refresh token must use sliding expiry",
 );
 assert(
-  oauthSmoke.includes("rotatedAgain.data.refresh_token === refreshed.data.refresh_token"),
-  "OAuth smoke test no longer verifies continued rotation",
+  oauthSmoke.includes("stable refresh token reuse ok"),
+  "OAuth smoke test no longer verifies repeated reuse of one refresh token",
+);
+assert(
+  oauthSmoke.includes("retriedRefresh.data.access_token === refreshed.data.access_token"),
+  "OAuth smoke test no longer verifies a fresh access token on repeated refresh",
 );
 
 console.log("OAuth reconnect regression guard passed");

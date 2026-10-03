@@ -1145,12 +1145,34 @@ export class Registry extends DurableObject {
     }
     const user = await this.ctx.storage.get<UserRecord>(key.user(record.userId));
     if (!user?.enabled) return json({ error: "invalid_grant" }, 400);
-    const tokens = await this.createOAuthTokens(record.userId, record.clientId, record.scope, record.resource);
+
+    // Keep the refresh token stable. Connector clients can retry or refresh concurrently,
+    // so rotating it here can strand a client on an older token and force re-authorization.
     const now = new Date();
-    const replayRecord: OAuthRefreshReplayRecord = { userId: record.userId, clientId: record.clientId, resource: record.resource, response: tokens.result, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + OAUTH_REFRESH_REPLAY_TTL_MS).toISOString() };
-    await this.ctx.storage.put({ ...tokens.records, [replayKey]: replayRecord });
-    await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
-    return json(tokens.result);
+    const accessToken = newToken("access");
+    const access: OAuthTokenRecord = {
+      tokenHash: await hashToken(accessToken),
+      userId: record.userId,
+      clientId: record.clientId,
+      scope: record.scope,
+      resource: record.resource,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + OAUTH_ACCESS_TTL_MS).toISOString(),
+    };
+    const refreshedRecord: OAuthTokenRecord = {
+      ...record,
+      expiresAt: new Date(now.getTime() + OAUTH_REFRESH_TTL_MS).toISOString(),
+    };
+    await this.ctx.storage.put({
+      [key.oauthAccess(access.tokenHash)]: access,
+      [key.oauthRefresh(refreshTokenHash)]: refreshedRecord,
+    });
+    return json({
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: Math.floor(OAUTH_ACCESS_TTL_MS / 1000),
+      scope: record.scope.join(" "),
+    });
   }
   private async issueAdminSession(user: UserRecord, ttlMs = ADMIN_SESSION_TTL_MS): Promise<Response> {
     if (!user.enabled || user.deletedAt) return json({ error: "access_denied" }, 403);
