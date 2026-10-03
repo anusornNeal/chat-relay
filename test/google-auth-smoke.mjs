@@ -17,6 +17,10 @@ for (const required of ['case "/google/upsert"','key.userGoogleSub(googleSub)','
 if (!adminSource.includes('path === "/admin/google/start"') || !adminSource.includes('path === "/admin/google/callback"')) throw new Error("admin Google routes are missing");
 if (!oauthSource.includes('path === "/authorize/google/start"') || !oauthSource.includes("completeGoogleConnectorAuthorization")) throw new Error("connector Google authorization flow is missing");
 if (!oauthSource.includes("sessionUser?.id") || !oauthSource.includes('"/oauth/client/authorized"') || !oauthSource.includes("showRecovery")) throw new Error("connector reconnect auto-authorization is missing");
+for (const required of ["OAuthConsentRecord", "oauthClientFingerprint", "oauthConsentKey", "OAUTH_CONSENT_TTL_MS", 'prefix: "oauth-consent:"']) {
+  if (!registrySource.includes(required)) throw new Error(`remembered connector consent contract missing: ${required}`);
+}
+if (!oauthSource.includes("scope: validated.params.scope")) throw new Error("remembered connector consent must remain scope-bound");
 if (!adminSource.includes("SameSite=Lax") || !adminSource.includes("Path=/; Max-Age=")) throw new Error("persistent browser session cookie is not connector-compatible");
 if (!adminSource.includes('"oauth.google.login"')) throw new Error("connector Google callback audit is missing");
 if (!dashboard.includes('href="/admin/google/start"')) throw new Error("dashboard Google sign-in entrypoint is missing");

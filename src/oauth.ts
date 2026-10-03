@@ -434,6 +434,7 @@ export async function handleOAuth(
         userId: sessionUser.id,
         clientId: validated.params.clientId,
         resource: validated.params.resource,
+        scope: validated.params.scope,
       });
       const previousData = await previous.json<any>().catch(() => ({}));
       if (previous.ok && previousData.authorized === true) {

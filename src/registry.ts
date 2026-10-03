@@ -111,6 +111,16 @@ type OAuthRefreshReplayRecord = {
   expiresAt: string;
 };
 
+type OAuthConsentRecord = {
+  userId: string;
+  clientFingerprint: string;
+  resource: string;
+  scope: string[];
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+};
+
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const REMEMBERED_ADMIN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -122,6 +132,7 @@ const DEVICE_APPROVE_WINDOW_MS = 15 * 60 * 1000;
 const DEVICE_APPROVE_MAX = 60;
 const OAUTH_ACCESS_TTL_MS = 60 * 60 * 1000;
 const OAUTH_REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const OAUTH_CONSENT_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const OAUTH_REFRESH_REPLAY_TTL_MS = 5 * 60 * 1000;
 const OAUTH_REGISTER_WINDOW_MS = 15 * 60 * 1000;
 const OAUTH_REGISTER_MAX = 60;
@@ -143,12 +154,25 @@ const key = {
   deviceStartRate: (sourceHash: string) => `device-start-rate:${sourceHash}`,
   deviceApproveRate: (sourceHash: string) => `device-approve-rate:${sourceHash}`,
   oauthClient: (clientId: string) => `oauth-client:${clientId}`,
+  oauthConsent: (hash: string) => `oauth-consent:${hash}`,
   oauthCode: (hash: string) => `oauth-code:${hash}`,
   oauthAccess: (hash: string) => `oauth-access:${hash}`,
   oauthRefresh: (hash: string) => `oauth-refresh:${hash}`,
   oauthRefreshReplay: (hash: string) => `oauth-refresh-replay:${hash}`,
   oauthRegisterRate: (sourceHash: string) => `oauth-register-rate:${sourceHash}`,
 };
+
+function oauthClientFingerprint(client: OAuthClientRecord): string {
+  return JSON.stringify({
+    clientName: client.clientName,
+    redirectUris: [...client.redirectUris].sort(),
+    tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
+  });
+}
+
+async function oauthConsentKey(userId: string, client: OAuthClientRecord, resource: string): Promise<string> {
+  return key.oauthConsent(await hashToken(JSON.stringify({ userId, resource, client: oauthClientFingerprint(client) })));
+}
 
 function hasScope(grant: GrantRecord, scope: string): boolean {
   return grant.scopes.includes("*") || grant.scopes.includes(scope);
@@ -585,6 +609,7 @@ export class Registry extends DurableObject {
       { prefix: "device:", device: true },
       { prefix: "us:", device: false },
       { prefix: "admin-session:", device: false },
+      { prefix: "oauth-consent:", device: false },
       { prefix: "oauth-code:", device: false },
       { prefix: "oauth-access:", device: false },
       { prefix: "oauth-refresh:", device: false },
@@ -862,7 +887,18 @@ export class Registry extends DurableObject {
     const userId = String(body?.userId ?? "");
     const clientId = String(body?.clientId ?? "");
     const resource = String(body?.resource ?? "");
+    const requestedScope = Array.isArray(body?.scope) ? body.scope.map(String) : [];
     if (!userId || !clientId || !resource) return json({ error: "invalid_request" }, 400);
+
+    const client = await this.ctx.storage.get<OAuthClientRecord>(key.oauthClient(clientId));
+    if (!client) return json({ error: "invalid_client" }, 404);
+
+    const consentKey = await oauthConsentKey(userId, client, resource);
+    const consent = await this.ctx.storage.get<OAuthConsentRecord>(consentKey);
+    if (consent && !isExpired(consent.expiresAt) && requestedScope.every((scope: string) => consent.scope.includes(scope))) {
+      return json({ ok: true, authorized: true, remembered: true });
+    }
+    if (consent && isExpired(consent.expiresAt)) await this.ctx.storage.delete(consentKey);
 
     for (const prefix of ["oauth-refresh:", "oauth-access:"]) {
       const records = await this.ctx.storage.list<OAuthTokenRecord>({ prefix });
@@ -1022,7 +1058,21 @@ export class Registry extends DurableObject {
       resource,
       expiresAt,
     };
-    await this.ctx.storage.put(key.oauthCode(codeHash), record);
+    const now = new Date();
+    const consent: OAuthConsentRecord = {
+      userId,
+      clientFingerprint: oauthClientFingerprint(client),
+      resource,
+      scope,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + OAUTH_CONSENT_TTL_MS).toISOString(),
+    };
+    const consentStorageKey = await oauthConsentKey(userId, client, resource);
+    await this.ctx.storage.put({
+      [key.oauthCode(codeHash)]: record,
+      [consentStorageKey]: consent,
+    });
     return json({ ok: true });
   }
 
