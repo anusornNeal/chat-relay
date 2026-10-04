@@ -57,6 +57,7 @@ test("formats remote header as two columns", () => {
     account: "Anusorn Hankasemsak",
     agent: "DESKTOP-5IQPSSC",
     status: "connected",
+    relayHealth: { state: "limited", code: 1027, checkedAt: Date.now() },
     relay: "chat-relay.anusorn-hank.workers.dev",
     uptimeMs: 3_723_000,
     reconnects: 12,
@@ -65,11 +66,33 @@ test("formats remote header as two columns", () => {
   }, 118);
 
   const lines = output.split("\n");
-  assert.equal(lines.length, 4);
+  assert.equal(lines.length, 5);
   assert.match(lines[0], /^Account\s+Anusorn Hankasemsak\s+Agent\s+DESKTOP-5IQPSSC/);
-  assert.match(lines[1], /^Status\s+● Connected\s+Relay\s+chat-relay\.anusorn-hank\.workers\.dev/);
-  assert.match(lines[2], /^Uptime\s+01:02:03\s+Reconnects\s+12/);
-  assert.match(lines[3], /^Terminal\s+enabled\s+Desktop\s+enabled/);
+  assert.match(lines[1], /^Agent link\s+● WebSocket open\s+Relay\s+chat-relay\.anusorn-hank\.workers\.dev/);
+  assert.match(lines[2], /^Relay API\s+✕ Cloudflare 1027\s+Reconnects\s+12/);
+  assert.match(lines[3], /^Session up\s+01:02:03\s+Terminal\s+enabled/);
+  assert.match(lines[4], /^Desktop\s+enabled\s+Checked\s+just now/);
+});
+
+test("labels agent authorization states separately from sign-in failures", () => {
+  const states = [
+    [{ state: "unauthorized", code: 401 }, "Sign-in required"],
+    [{ state: "unauthorized", code: 403 }, "Access denied"],
+    [{ state: "reauthorize" }, "Agent reauthorization required"],
+    [{ state: "agent-disabled" }, "Agent disabled"],
+    [{ state: "agent-access" }, "Agent access required"],
+  ];
+
+  for (const [relayHealth, label] of states) {
+    const output = formatTwoColumnHeader({
+      account: "Anusorn",
+      agent: "Work PC",
+      status: "connected",
+      relayHealth: { ...relayHealth, checkedAt: Date.now() },
+      relay: "chat-relay.example.dev",
+    }, 118);
+    assert.ok(output.split("\n")[2].includes(label), `missing Relay API label: ${label}`);
+  }
 });
 
 test("formats transaction rows and tui selection", () => {
@@ -115,6 +138,7 @@ test("tui redraw stays inside terminal bounds and uses alternate screen", () => 
     },
     version: "0.11.1-test",
     output,
+    env: {},
   });
 
   tui.start();
@@ -131,4 +155,19 @@ test("tui redraw stays inside terminal bounds and uses alternate screen", () => 
   assert.ok(lines.length <= output.rows - 1);
   assert.ok(lines.every((line) => stripAnsi(line).length <= output.columns - 1));
   assert.match(frame, /\x1b\[36m/);
+});
+
+test("TUI keeps agent socket state separate from Worker HTTP health", () => {
+  const tui = new RemoteTui({
+    config: { relayUrl: "https://chat-relay.example.workers.dev" },
+    version: "test",
+    output: { isTTY: false, write() {} },
+  });
+  tui.handleMessage({ type: "chat-relay-ui", event: "connection", state: "connected" });
+  tui.setRelayHealth({ state: "limited", code: 1027 });
+
+  const header = formatTwoColumnHeader({ ...tui.state, uptimeMs: 0 }, 118);
+  assert.match(header, /Agent link\s+● WebSocket open/);
+  assert.match(header, /Relay API\s+✕ Cloudflare 1027/);
+  assert.match(header, /Checked\s+just now/);
 });

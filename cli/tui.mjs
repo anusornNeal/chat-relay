@@ -16,7 +16,7 @@ const LABEL_WIDTH = 12;
 const GAP = 3;
 const MIN_FRAME_WIDTH = 60;
 const MAX_FRAME_WIDTH = 179;
-const FRAME_FIXED_ROWS = 11;
+const FRAME_FIXED_ROWS = 12;
 const FRAME_BOTTOM_MARGIN = 1;
 
 function clamp(value, min, max) {
@@ -57,19 +57,62 @@ function statusStyle(value) {
   }
 }
 
+function relayHealthStyle(health) {
+  switch (health?.state) {
+    case "reachable": return STYLE.green;
+    case "checking": return STYLE.yellow;
+    default: return STYLE.red;
+  }
+}
+
+function relayHealthText(health) {
+  switch (health?.state) {
+    case "reachable": return "● Online";
+    case "checking": return "◐ Checking";
+    case "limited":
+      return health.code === 1027
+        ? "✕ Cloudflare 1027"
+        : `✕ Rate limited (${health.code || "429"})`;
+    case "cloudflare-error": return `✕ Cloudflare ${health.code || "error"}`;
+    case "unauthorized": return health.code === 403 ? "✕ Access denied" : "✕ Sign-in required";
+    case "reauthorize": return "✕ Agent reauthorization required";
+    case "agent-disabled": return "✕ Agent disabled";
+    case "agent-access": return "✕ Agent access required";
+    case "unavailable":
+      if (health.reason === "relay_unavailable") return "✕ Relay unavailable";
+      if (health.reason === "agent_offline") return "✕ Agent offline";
+      return `✕ ${health.code ? `HTTP ${health.code}` : "Unavailable"}`;
+    default: return "? Unknown";
+  }
+}
+
+function relayHealthAge(health, now = Date.now()) {
+  const checkedAt = Number(health?.checkedAt);
+  if (!Number.isFinite(checkedAt)) return "pending";
+  const ageSeconds = Math.max(0, Math.floor((now - checkedAt) / 1000));
+  if (ageSeconds < 10) return "just now";
+  if (ageSeconds < 60) return `${ageSeconds}s ago`;
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) return `${ageMinutes}m ago`;
+  return `${Math.floor(ageMinutes / 60)}h ago`;
+}
+
 export function formatTwoColumnHeader(state, width = 110, { color = false } = {}) {
   const usable = clamp(Number(width) || 110, MIN_FRAME_WIDTH, MAX_FRAME_WIDTH);
   const leftWidth = Math.floor((usable - GAP) / 2);
   const rightWidth = usable - GAP - leftWidth;
   const rows = [
     ["Account", state.account || "-", "Agent", state.agent || "-"],
-    ["Status", statusText(state.status), "Relay", state.relay || "-"],
-    ["Uptime", formatUptime(state.uptimeMs), "Reconnects", String(state.reconnects ?? 0)],
-    ["Terminal", state.terminal ? "enabled" : "disabled", "Desktop", state.desktop ? "enabled" : "disabled"],
+    ["Agent link", statusText(state.status), "Relay", state.relay || "-"],
+    ["Relay API", relayHealthText(state.relayHealth), "Reconnects", String(state.reconnects ?? 0)],
+    ["Session up", formatUptime(state.uptimeMs), "Terminal", state.terminal ? "enabled" : "disabled"],
+    ["Desktop", state.desktop ? "enabled" : "disabled", "Checked", relayHealthAge(state.relayHealth)],
   ];
   return rows
     .map(([leftLabel, leftValue, rightLabel, rightValue]) => {
-      const leftStyle = leftLabel === "Status" ? statusStyle(state.status) : null;
+      const leftStyle = leftLabel === "Agent link"
+        ? statusStyle(state.status)
+        : leftLabel === "Relay API" ? relayHealthStyle(state.relayHealth) : null;
       const rightStyle = rightLabel === "Reconnects" && Number(state.reconnects || 0) > 0 ? STYLE.yellow : null;
       return field(leftLabel, leftValue, leftWidth, color, leftStyle)
         + " ".repeat(GAP)
@@ -80,7 +123,7 @@ export function formatTwoColumnHeader(state, width = 110, { color = false } = {}
 
 function statusText(value) {
   switch (String(value || "").toLowerCase()) {
-    case "connected": return "● Connected";
+    case "connected": return "● WebSocket open";
     case "connecting": return "◐ Connecting";
     case "reconnecting": return "◐ Reconnecting";
     case "stopping": return "○ Stopping";
@@ -190,7 +233,7 @@ export function shouldUseColor(stdout = process.stdout, env = process.env) {
 }
 
 export class RemoteTui {
-  constructor({ config, version, output = process.stdout }) {
+  constructor({ config, version, output = process.stdout, env = process.env }) {
     this.output = output;
     this.startedAt = Date.now();
     this.state = {
@@ -198,12 +241,13 @@ export class RemoteTui {
       agent: config.agentName || config.agentId || "-",
       relay: normalizeRelay(config.relayUrl),
       status: "starting",
+      relayHealth: { state: "checking" },
       reconnects: 0,
       terminal: config.terminalEnabled !== false,
       desktop: config.desktopEnabled === true,
     };
     this.version = version || "-";
-    this.colorEnabled = shouldUseColor(output);
+    this.colorEnabled = shouldUseColor(output, env);
     this.transactions = [];
     this.timer = null;
     this.closed = false;
@@ -261,6 +305,15 @@ export class RemoteTui {
       });
       if (this.transactions.length > 100) this.transactions.splice(0, this.transactions.length - 100);
     }
+    this.scheduleRender();
+  }
+
+  setRelayHealth(health) {
+    if (this.closed) return;
+    this.state.relayHealth = {
+      ...(health && typeof health === "object" ? health : { state: "unavailable" }),
+      checkedAt: Date.now(),
+    };
     this.scheduleRender();
   }
 

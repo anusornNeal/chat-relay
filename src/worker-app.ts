@@ -7,6 +7,7 @@ import { browserSessionUser, handleAdmin } from "./admin";
 import { hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 import { DEFAULT_QUOTA_POLICY, normalizeQuotaPolicy, type QuotaPolicy, type UsageEvent } from "./usage";
 import { AGENT_PROTOCOL_VERSION } from "./agent-state";
+import { handleStatusRequest } from "./status-route.mjs";
 import { error, hasPayload, readJson } from "./http-utils";
 import type { AuthUser, Env } from "./env";
 
@@ -320,26 +321,33 @@ function bearerToken(request: Request): string | null {
   return value?.startsWith("Bearer ") ? value.slice(7) : null;
 }
 
-async function authenticateUser(request: Request, env: Env): Promise<AuthUser | null> {
+async function authenticateUserResult(
+  request: Request,
+  env: Env,
+): Promise<{ user: AuthUser | null; response?: Response }> {
   const url = new URL(request.url);
   const queryToken = url.searchParams.get("key");
   const headerToken = bearerToken(request);
   const token = queryToken || headerToken;
-  if (!token) return null;
+  if (!token) return { user: null };
   const tokenHash = await hashToken(token);
   const resource = !queryToken && headerToken && url.pathname === "/mcp"
     ? oauthResource(request)
     : undefined;
   const cacheKey = tokenHash + "|" + (resource || "");
   const cached = cacheGet(authUserCache, cacheKey);
-  if (cached) return cached;
+  if (cached) return { user: cached };
   const { response, data } = await registryJson<{ user?: AuthUser }>(env, "/auth/user", {
     tokenHash,
     ...(resource ? { resource } : {}),
   });
-  if (!response.ok || !data.user) return null;
+  if (!response.ok || !data.user) return { user: null, response };
   cachePut(authUserCache, cacheKey, data.user);
-  return data.user;
+  return { user: data.user };
+}
+
+async function authenticateUser(request: Request, env: Env): Promise<AuthUser | null> {
+  return (await authenticateUserResult(request, env)).user;
 }
 
 async function authenticateAgent(request: Request, env: Env, agentId: string): Promise<boolean> {
@@ -1488,48 +1496,17 @@ export default {
 
     if (path === "/status") {
       if (request.method !== "GET") return error(405, "method_not_allowed");
-      const user = await authenticateUser(request, env);
-      if (!user) return error(401, "unauthorized");
-
-      const requestedAgentId = url.searchParams.get("agentId") || undefined;
-      let agentId = requestedAgentId;
-      if (!agentId) {
-        const resolved = await resolveAgent(env, user.id, "read");
-        if (!resolved.ok) return resolved.response;
-        agentId = resolved.agentId;
-      }
-
-      const access = await registryJson<any>(env, "/agent-access", {
-        userId: user.id,
-        agentId,
-      });
-      if (!access.response.ok) {
-        return Response.json(access.data, { status: access.response.status });
-      }
-
-      let relayStatus: any = { online: false };
-      if (access.data.authorized) {
-        const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
-        relayStatus = await stub.fetch("https://relay.internal/status")
-          .then((response) => response.json<any>())
-          .catch(() => ({ online: false }));
-      }
-      const online = Boolean(relayStatus.online);
-
-      return Response.json({
-        agentId,
-        agentName: access.data.agent?.name ?? agentId,
-        ownerUserId: access.data.agent?.ownerUserId ?? null,
-        enabled: access.data.agent?.enabled === true,
-        retiredAt: access.data.agent?.retiredAt ?? null,
-        lastSeenAt: access.data.agent?.lastSeenAt ?? null,
-        scopes: access.data.scopes ?? [],
-        authorized: access.data.authorized === true,
-        reauthorizationRequired: access.data.reauthorizationRequired === true,
-        online,
-        connection: relayStatus,
-        lifecycle: relayStatus.lifecycle ?? null,
+      return handleStatusRequest({
+        request,
         expectedProtocolVersion: AGENT_PROTOCOL_VERSION,
+        authenticate: () => authenticateUserResult(request, env),
+        resolveAgent: (userId) => resolveAgent(env, userId, "read"),
+        getAgentAccess: (userId, agentId) => registryJson(env, "/agent-access", {
+          userId,
+          agentId,
+        }),
+        getRelayStatus: (agentId) => env.RELAY.get(env.RELAY.idFromName(agentId))
+          .fetch("https://relay.internal/status"),
       });
     }
     if (path === "/relay") {

@@ -107,8 +107,14 @@ async function status() {
   }
 
   const reauthorizationRequired = agentStatus.response.ok
-    ? agentStatus.data.reauthorizationRequired === true || agentStatus.data.authorized === false
-    : agentStatus.response.status === 401 || agentStatus.response.status === 403;
+    ? agentStatus.data.reauthorizationRequired === true
+    : agentStatus.response.status === 401;
+  const agentDisabled = agentStatus.response.ok && agentStatus.data.enabled === false && !reauthorizationRequired;
+  const agentAccessUnavailable = agentStatus.response.ok && agentStatus.data.authorized === false &&
+    !reauthorizationRequired && !agentDisabled;
+  const accessDenied = !agentStatus.response.ok && agentStatus.response.status === 403;
+  const relayUnavailable = !agentStatus.response.ok && agentStatus.data?.error === "relay_unavailable";
+  const rateLimited = !agentStatus.response.ok && agentStatus.response.status === 429;
 
   console.log("Chat Relay");
   console.log("----------");
@@ -120,10 +126,13 @@ async function status() {
   console.log("Login:   " + (me.data.user?.login || "-"));
   console.log("Device:  " + serverAgentName + " (" + config.agentId + ")");
   console.log("Relay:   " + config.relayUrl);
-  console.log("Access:  " + (reauthorizationRequired ? "re-authorization required" : "authorized"));
+  console.log("Access:  " + (reauthorizationRequired
+    ? "re-authorization required"
+    : agentDisabled ? "agent disabled" : agentAccessUnavailable ? "agent access unavailable"
+      : accessDenied ? "access denied" : "authorized"));
   console.log(
     "Remote:  " +
-    (agentStatus.response.ok && agentStatus.data.online ? "connected" : "offline"),
+    (relayUnavailable ? "relay unavailable" : rateLimited ? "rate limited" : agentStatus.response.ok && agentStatus.data.online ? "connected" : "offline"),
   );
   if (agentStatus.response.ok) {
     console.log("LastSeen: " + (agentStatus.data.lastSeenAt || "-"));
@@ -147,6 +156,14 @@ async function status() {
 
   if (reauthorizationRequired) {
     console.log('Recovery: run "chat-relay login --force", then "chat-relay remote".');
+    return 1;
+  }
+  if (agentDisabled || agentAccessUnavailable || accessDenied) {
+    console.log("Recovery: ask the Relay administrator to restore Agent access.");
+    return 1;
+  }
+  if (relayUnavailable || rateLimited) {
+    console.log("Recovery: retry status when the Relay service is available.");
     return 1;
   }
   if (!agentStatus.response.ok && agentStatus.response.status === 0) {

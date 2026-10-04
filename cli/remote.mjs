@@ -6,6 +6,7 @@ import { login, requestJson } from "./device-login.mjs";
 import { acquireRunnerOwnership, RunnerAlreadyActiveError } from "./runner-ownership.mjs";
 import { getAgentVersion } from "../agent/protocol.mjs";
 import { RemoteTui, shouldUseTui } from "./tui.mjs";
+import { startRelayHealthMonitor } from "./relay-health.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let stopping = false;
@@ -57,7 +58,7 @@ function printSummary(config) {
   console.log("");
 }
 
-function spawnAgent(config, { tui = null } = {}) {
+function spawnAgent(config, { tui = null, onConnectionState = null } = {}) {
   const agentPath = path.join(packageRoot, "agent", "local-agent.mjs");
   const cwd = String(config.allowedRoots || process.cwd()).split(";")[0] || process.cwd();
   const useTui = Boolean(tui);
@@ -77,7 +78,12 @@ function spawnAgent(config, { tui = null } = {}) {
     stdio: useTui ? ["inherit", "inherit", "inherit", "ipc"] : "inherit",
     windowsHide: false,
   });
-  if (useTui) child.on("message", (message) => tui.handleMessage(message));
+  if (useTui) child.on("message", (message) => {
+    tui.handleMessage(message);
+    if (message?.type === "chat-relay-ui" && message.event === "connection") {
+      onConnectionState?.(message.state);
+    }
+  });
   return child;
 }
 
@@ -98,6 +104,7 @@ export async function remote(options = {}) {
     return 1;
   }
   let tui = null;
+  let stopRelayHealthMonitor = null;
   try {
     if (options.allowedRoot && options.allowedRoot !== config.allowedRoots) {
       config = { ...config, allowedRoots: options.allowedRoot };
@@ -110,11 +117,23 @@ export async function remote(options = {}) {
 
     const useTui = shouldUseTui(options);
     tui = useTui ? new RemoteTui({ config, version: getAgentVersion() }) : null;
-    if (tui) tui.start();
+    if (tui) {
+      tui.start();
+      stopRelayHealthMonitor = startRelayHealthMonitor(config.relayUrl, {
+        userToken: config.userToken,
+        agentId: config.agentId,
+        onStatus: (health) => tui?.setRelayHealth(health),
+      });
+    }
     else printSummary(config);
 
     while (!stopping) {
-      const child = spawnAgent(config, { tui });
+      const child = spawnAgent(config, {
+        tui,
+        onConnectionState: (state) => {
+          if (state === "connected") stopRelayHealthMonitor?.checkNow?.();
+        },
+      });
 
       const stop = () => {
         stopping = true;
@@ -155,6 +174,7 @@ export async function remote(options = {}) {
       }
     }
   } finally {
+    try { stopRelayHealthMonitor?.(); } catch {}
     try { tui?.stop?.(); } catch {}
     await ownership.release();
   }
