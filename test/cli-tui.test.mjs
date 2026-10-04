@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { humanizeToolCall } from "../agent/toolcall-summary.mjs";
-import { formatTransactionRow, formatTwoColumnHeader, shouldUseTui } from "../cli/tui.mjs";
+import { RemoteTui, formatTransactionRow, formatTwoColumnHeader, shouldUseTui } from "../cli/tui.mjs";
 
 test("humanizes filesystem and terminal calls without file contents", () => {
   assert.equal(
@@ -55,4 +55,41 @@ test("formats transaction rows and tui selection", () => {
   assert.equal(shouldUseTui({ tuiEnabled: true }, { isTTY: false }), true);
   assert.equal(shouldUseTui({}, { isTTY: true }), true);
   assert.equal(shouldUseTui({}, { isTTY: false }), false);
+});
+
+test("tui redraw stays inside terminal bounds and uses alternate screen", () => {
+  const writes = [];
+  const output = {
+    isTTY: true,
+    columns: 72,
+    rows: 18,
+    write(value) {
+      writes.push(String(value));
+      return true;
+    },
+  };
+  const tui = new RemoteTui({
+    config: {
+      user: { name: "Anusorn Hankasemsak" },
+      agentName: "DESKTOP-5IQPSSC",
+      relayUrl: "https://chat-relay.example.workers.dev",
+      terminalEnabled: true,
+      desktopEnabled: true,
+    },
+    version: "0.11.1-test",
+    output,
+  });
+
+  tui.start();
+  tui.stop();
+
+  assert.match(writes[0], /\x1b\[\?1049h/);
+  assert.match(writes.at(-1), /\x1b\[\?1049l/);
+
+  const frame = writes.find((value) => value.includes("Chat Relay  v0.11.1-test"));
+  assert.ok(frame);
+  const visible = frame.replace(/^\x1b\[2J\x1b\[H/, "");
+  const lines = visible.split("\n");
+  assert.ok(lines.length <= output.rows - 1);
+  assert.ok(lines.every((line) => line.length <= output.columns - 1));
 });

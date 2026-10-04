@@ -3,6 +3,10 @@ import { humanizeToolCall } from "../agent/toolcall-summary.mjs";
 const ESC = "\x1b[";
 const LABEL_WIDTH = 12;
 const GAP = 3;
+const MIN_FRAME_WIDTH = 60;
+const MAX_FRAME_WIDTH = 179;
+const FRAME_FIXED_ROWS = 11;
+const FRAME_BOTTOM_MARGIN = 1;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -22,7 +26,7 @@ function field(label, value, width) {
 }
 
 export function formatTwoColumnHeader(state, width = 110) {
-  const usable = clamp(Number(width) || 110, 72, 180);
+  const usable = clamp(Number(width) || 110, MIN_FRAME_WIDTH, MAX_FRAME_WIDTH);
   const leftWidth = Math.floor((usable - GAP) / 2);
   const rightWidth = usable - GAP - leftWidth;
   const rows = [
@@ -117,7 +121,9 @@ export class RemoteTui {
 
   start() {
     if (this.closed) return;
-    this.output.write(ESC + "?25l");
+    // Use the terminal's alternate screen so periodic redraws never accumulate
+    // in scrollback. Keep one column unused to avoid automatic line wrapping.
+    this.output.write(ESC + "?1049h" + ESC + "?25l" + ESC + "2J" + ESC + "H");
     this.render();
     this.timer = setInterval(() => this.render(), 1000);
     this.timer.unref?.();
@@ -128,7 +134,7 @@ export class RemoteTui {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    this.output.write(ESC + "?25h\n");
+    this.output.write(ESC + "?25h" + ESC + "?1049l");
   }
 
   handleMessage(message) {
@@ -178,14 +184,17 @@ export class RemoteTui {
 
   render() {
     if (this.closed) return;
-    const width = clamp(Number(this.output.columns) || 110, 72, 180);
+    const terminalWidth = Number(this.output.columns) || 110;
+    const width = clamp(terminalWidth - 1, MIN_FRAME_WIDTH, MAX_FRAME_WIDTH);
     const height = Math.max(16, Number(this.output.rows) || 30);
     const separator = "─".repeat(width);
     const header = formatTwoColumnHeader({
       ...this.state,
       uptimeMs: Date.now() - this.startedAt,
     }, width);
-    const availableRows = Math.max(3, height - 10);
+    // Fixed frame content occupies 11 rows. Leave one spare row at the
+    // bottom so Windows Terminal never scrolls the screen while repainting.
+    const availableRows = Math.max(1, height - FRAME_FIXED_ROWS - FRAME_BOTTOM_MARGIN);
     const rows = this.transactions.slice(-availableRows).map((item) => formatTransactionRow(item, width));
     while (rows.length < Math.min(availableRows, 4)) rows.unshift("");
 
