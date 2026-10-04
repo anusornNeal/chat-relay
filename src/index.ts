@@ -90,10 +90,11 @@ export class Relay extends DurableObject {
     }
   }
 
-  private queueDiagnosticsUpdate(update: (current: AgentDiagnostics) => AgentDiagnostics): Promise<void> {
+  private queueDiagnosticsUpdate(update: (current: AgentDiagnostics) => AgentDiagnostics, persisted?: () => void): Promise<void> {
     const write = this.diagnosticsWrites.then(async () => {
       const current = await this.ctx.storage.get<AgentDiagnostics>(AGENT_DIAGNOSTICS_KEY) ?? emptyAgentDiagnostics();
       await this.ctx.storage.put(AGENT_DIAGNOSTICS_KEY, update(current));
+      persisted?.();
     });
     const safeWrite = write.catch(() => {});
     this.diagnosticsWrites = safeWrite;
@@ -366,6 +367,13 @@ export class Relay extends DurableObject {
     }
     if (control === "agent_heartbeat") {
       const health = normalizeAgentHealth((message as any).health);
+      const previous = readAgentAttachment(socket);
+      const epochSignature = (processId: unknown, value: any) => JSON.stringify([
+        Number(processId), value?.processStartedAt, value?.reconnectCount, value?.lastDisconnectedAt,
+        value?.lastCloseCode, value?.lastDisconnectReason, value?.lastSocketError, value?.lastConnectionDurationMs,
+      ]);
+      const signature = epochSignature((message as any).processId, health);
+      const changed = previous.persistedEpochSignature !== signature;
       writeAgentAttachment(socket, {
         lastSeenAt: Date.now(),
         heartbeatEnabled: true,
@@ -374,10 +382,10 @@ export class Relay extends DurableObject {
         lifecycle: normalizeAgentLifecycle((message as any).lifecycle),
         health,
       });
-      this.queueDiagnosticsUpdate((current) => recordAgentProcessEpoch(current, {
+      if (changed) this.queueDiagnosticsUpdate((current) => recordAgentProcessEpoch(current, {
         processId: (message as any).processId,
         health,
-      }));
+      }), () => writeAgentAttachment(socket, { persistedEpochSignature: signature }));
       try {
         socket.send(JSON.stringify({ control: "agent_heartbeat_ack", at: Date.now() }));
       } catch {}

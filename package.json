@@ -43,6 +43,7 @@
         "test:admin-api": "node test/admin-api-smoke.mjs",
         "test:admin-auth": "node test/admin-auth-smoke.mjs",
         "test:dashboard": "node test/dashboard-smoke.mjs",
+        "test:dashboard-timers": "node test/dashboard-timers.test.mjs",
         "test:quota": "node test/quota-smoke.mjs",
         "test:ops": "node test/ops-smoke.mjs",
         "test:desktop": "node test/mcp-desktop-smoke.mjs",

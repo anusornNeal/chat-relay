@@ -292,11 +292,11 @@ async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], gra
     };
   }));
 }
-async function terminalActivity(env: AdminEnv, selfUserId?: string) {
-  const state = await registryState(env);
+async function terminalActivity(env: AdminEnv, selfUserId?: string, loadedState?: any, statuses?: any[]) {
+  const state = loadedState ?? await registryState(env);
   const allowed = new Set<string>();
   for (const agent of state.agents ?? []) {
-    if (!agent.enabled || agent.retiredAt) continue;
+    if (!agent.enabled || agent.retiredAt || statuses?.find(status => status.id === agent.id)?.online === false) continue;
     if (!selfUserId || (state.grants ?? []).some((grant: any) => grant.userId === selfUserId && grant.agentId === agent.id)) {
       allowed.add(agent.id);
     }
@@ -613,11 +613,11 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     }
 
     const state = await registryState(env);
-    const [agents, usage, terminals] = await Promise.all([
+    const [agents, usage] = await Promise.all([
       onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []),
       usageWindow(env, period),
-      terminalActivity(env),
     ]);
+    const terminals = await terminalActivity(env, undefined, state, agents);
     const activeTerminals = terminals.reduce((count, agent) => count +
       agent.sessions.filter((session: any) => session.status === "running").length +
       agent.batches.reduce((sum: number, batch: any) => sum + Number(batch.counts?.running || 0), 0), 0);
@@ -782,7 +782,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     };
     if (query.get("state") === "history" || query.get("cursor")) return Response.json(enriched);
     const terminalUserId = adminAuthorized ? (query.get("userId") || undefined) : selfUserId;
-    const terminals = await terminalActivity(env, terminalUserId);
+    const terminals = await terminalActivity(env, terminalUserId, state);
     return Response.json({ ...enriched, terminals });
   }
 

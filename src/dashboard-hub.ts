@@ -162,7 +162,14 @@ export class DashboardHub extends DurableObject {
       const body = await request.json<DashboardPublishEvent>().catch(() => ({}));
       const topics = normalizeTopics(body.topics);
       if (topics.includes("agents")) this.agentNames.clear();
-      const lifecycle = await this.enrichLifecycle(normalizeLifecycleEvent(body.event));
+      const rawLifecycle = normalizeLifecycleEvent(body.event);
+      const audience = safeString(body.userId, 128) || rawLifecycle?.userId || "";
+      const sockets = this.ctx.getWebSockets().filter(socket => {
+        const attachment = socket.deserializeAttachment() as DashboardSocketAttachment | null;
+        return attachment && (!audience || attachment.admin || attachment.userId === audience);
+      });
+      if (!sockets.length) return Response.json({ ok: true, delivered: 0 });
+      const lifecycle = await this.enrichLifecycle(rawLifecycle);
       if (!topics.length && !lifecycle) return Response.json({ ok: true, delivered: 0 });
 
       const requestedAudience = safeString(body.userId, 128);
@@ -177,7 +184,7 @@ export class DashboardHub extends DurableObject {
       ];
 
       let delivered = 0;
-      for (const socket of this.ctx.getWebSockets()) {
+      for (const socket of sockets) {
         const attachment = socket.deserializeAttachment() as DashboardSocketAttachment | null;
         if (!attachment) continue;
         if (audienceUserId && !attachment.admin && attachment.userId !== audienceUserId) continue;

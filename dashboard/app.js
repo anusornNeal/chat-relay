@@ -29,7 +29,9 @@ let runningClockTimer = null;
 
 const BKK_TZ = "Asia/Bangkok";
 const API_TIMEOUT_MS = 12000;
-const DATA_RETRY_MAX_MS = 15000;
+const DATA_RETRY_MAX_MS = 300000;
+let lastLiveRefreshAt = 0;
+function dashboardAvailable() { return !document.hidden && navigator.onLine !== false; }
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtNum = (v) => new Intl.NumberFormat("en-US").format(Number(v || 0));
@@ -334,8 +336,8 @@ function clearDataRetry() {
   dataRetryAttempt = 0;
 }
 function scheduleDataRetry() {
-  if (!currentUser || dataRetryTimer) return;
-  const delay = Math.min(DATA_RETRY_MAX_MS, 1000 * (2 ** Math.min(dataRetryAttempt, 4)));
+  if (!currentUser || !dashboardAvailable() || dataRetryTimer) return;
+  const delay = Math.min(DATA_RETRY_MAX_MS, 60000 * (2 ** Math.min(dataRetryAttempt, 4)));
   dataRetryAttempt += 1;
   const freshness = $("freshness");
   if (freshness) freshness.textContent = "Retrying data…";
@@ -436,7 +438,7 @@ async function loadActive({ patch = false } = {}) {
 }
 
 async function refreshActiveIncrementally({ initial = false } = {}) {
-  if (!currentUser) return;
+  if (!currentUser || !dashboardAvailable()) return;
   if (refreshRunning) {
     refreshQueued = true;
     return;
@@ -446,7 +448,8 @@ async function refreshActiveIncrementally({ initial = false } = {}) {
   try {
     do {
       refreshQueued = false;
-      await loadActive({ patch });
+      const loaded = await loadActive({ patch });
+      if (!loaded || !dashboardAvailable()) { refreshQueued = false; break; }
       patch = true;
     } while (refreshQueued);
   } finally {
@@ -463,12 +466,15 @@ function topicsTouchActiveView(topics) {
 }
 function queueLiveRefresh(topics = []) {
   for (const topic of topics) pendingLiveTopics.add(topic);
-  clearTimeout(liveRefreshTimer);
+  if (!dashboardAvailable() || liveRefreshTimer || dataRetryTimer) return;
   liveRefreshTimer = setTimeout(async () => {
+    liveRefreshTimer = null;
+    if (!dashboardAvailable()) return;
+    lastLiveRefreshAt = Date.now();
     const topicsNow = [...pendingLiveTopics];
     pendingLiveTopics.clear();
     if (topicsTouchActiveView(topicsNow)) await refreshActiveIncrementally();
-  }, 120);
+  }, Math.max(0, 30000 - (Date.now() - lastLiveRefreshAt)));
 }
 function stopFallbackPolling() {
   clearTimeout(fallbackStartTimer);
@@ -477,22 +483,22 @@ function stopFallbackPolling() {
   fallbackPollTimer = null;
 }
 function scheduleFallbackPolling() {
-  if (fallbackStartTimer || fallbackPollTimer) return;
+  if (!dashboardAvailable() || fallbackStartTimer || fallbackPollTimer) return;
   fallbackStartTimer = setTimeout(() => {
     fallbackStartTimer = null;
-    if (liveSocket?.readyState === WebSocket.OPEN || !currentUser) return;
+    if (liveSocket?.readyState === WebSocket.OPEN || !currentUser || !dashboardAvailable()) return;
     setLiveState("fallback");
-    void refreshActiveIncrementally();
+    if (!dataRetryTimer) void refreshActiveIncrementally();
     fallbackPollTimer = setInterval(() => {
-      if (liveSocket?.readyState === WebSocket.OPEN) return;
+      if (liveSocket?.readyState === WebSocket.OPEN || !dashboardAvailable() || dataRetryTimer) return;
       void refreshActiveIncrementally();
-    }, 15000);
-  }, 8000);
+    }, 60000);
+  }, 60000);
 }
 function scheduleReconnect() {
   clearTimeout(reconnectTimer);
-  if (!currentUser) return;
-  const delay = Math.min(10000, 500 * (2 ** Math.min(reconnectAttempt, 5)));
+  if (!currentUser || !dashboardAvailable()) return;
+  const delay = Math.min(300000, 5000 * (2 ** Math.min(reconnectAttempt, 6)));
   reconnectAttempt += 1;
   setLiveState("reconnecting");
   reconnectTimer = setTimeout(connectLiveChannel, delay);
@@ -517,7 +523,7 @@ function stopLiveChannel() {
   }
 }
 function connectLiveChannel() {
-  if (!currentUser) return;
+  if (!currentUser || !dashboardAvailable()) return;
   if (liveSocket && (liveSocket.readyState === WebSocket.OPEN || liveSocket.readyState === WebSocket.CONNECTING)) return;
   setLiveState(reconnectAttempt ? "reconnecting" : "connecting");
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -534,7 +540,7 @@ function connectLiveChannel() {
     clearInterval(heartbeatTimer);
     lastPongAt = Date.now();
     heartbeatTimer = setInterval(() => {
-      if (socket.readyState !== WebSocket.OPEN) return;
+      if (socket.readyState !== WebSocket.OPEN || !dashboardAvailable()) return;
       if (Date.now() - lastPongAt > 60000) {
         try { socket.close(4000, "heartbeat_timeout"); } catch {}
         return;
@@ -542,7 +548,7 @@ function connectLiveChannel() {
       socket.send(JSON.stringify({ type: "ping" }));
     }, 25000);
     setLiveState("live");
-    if (reconnect) await refreshActiveIncrementally();
+    if (reconnect && !dataRetryTimer) queueLiveRefresh(["overview", "calls", "users", "errors", "agents"]);
   };
   socket.onmessage = (event) => {
     if (liveSocket !== socket || typeof event.data !== "string") return;
@@ -916,7 +922,7 @@ async function loadCalls({ patch = false } = {}) {
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) +
       '<span class="privacy-chip">' + icon("info") + "Safe metadata only</span></div>" +
-    (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>History reached its safe bound; results are partial.</span></div>" : "") +
+    (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>This page scanned up to 500 history rows. Use Older to continue; totals are a lower bound.</span></div>" : "") +
     callFilterMarkup() +
     '<div class="table-wrap calls-table"><table><thead><tr><th>Time</th>' + (isAdmin() ? "<th>User</th>" : "") +
       "<th>Tool</th><th>Agent</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody>" + tableRows + "</tbody></table></div>" +
@@ -1056,7 +1062,7 @@ async function loadErrors({ patch = false } = {}) {
 
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) + '<span class="privacy-chip">' + icon("info") + "No commands, args, payloads, or output stored</span></div>" +
-    (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>Error history reached its safe bound; results are partial.</span></div>" : "") +
+    (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>This page scanned up to 500 history rows. Use Older to continue; totals are a lower bound.</span></div>" : "") +
     '<div class="filters-panel compact"><div class="filters-row"><div class="error-mode-toggle"><button type="button" class="button small ' + (errorMode === "attention" ? "primary" : "") + '" data-error-mode="attention">Needs attention</button><button type="button" class="button small ' + (errorMode === "all" ? "primary" : "") + '" data-error-mode="all">All failures</button></div><label class="filter-control grow"><span>Search errors</span><div class="input-with-icon">' + icon("search") +
       '<input id="errorSearch" placeholder="Code, category, user, tool, agent"></div></label></div></div>' +
     '<div class="table-wrap error-table"><table><thead><tr><th>Time</th><th>Diagnostic</th><th>User</th><th>Tool</th><th>Agent</th><th>Duration</th><th>Result</th><th></th></tr></thead><tbody>' +
@@ -1126,5 +1132,18 @@ $("closeDetail").onclick = () => $("detailDialog").close();
   }
 })();
 
-window.addEventListener("online", () => { if (currentUser && liveSocket?.readyState !== WebSocket.OPEN) connectLiveChannel(); });
-document.addEventListener("visibilitychange", () => { if (!document.hidden && currentUser && liveSocket?.readyState !== WebSocket.OPEN) connectLiveChannel(); });
+function updateDashboardAvailability() {
+  if (!dashboardAvailable()) {
+    clearTimeout(dataRetryTimer);
+    dataRetryTimer = null;
+    refreshQueued = false;
+    stopLiveChannel();
+    return;
+  }
+  if (!currentUser) return;
+  connectLiveChannel();
+  void refreshActiveIncrementally();
+}
+window.addEventListener("online", updateDashboardAvailability);
+window.addEventListener("offline", updateDashboardAvailability);
+document.addEventListener("visibilitychange", updateDashboardAvailability);

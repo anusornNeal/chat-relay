@@ -223,6 +223,30 @@ function classifyFailure(event: UsageEvent) {
 }
 
 type ActivityCursor = { timestamp: string; id: string };
+type ScanCursor = { v: 2; before: string; legacy?: ActivityCursor };
+const RAW_QUERY_SCAN_LIMIT = 500;
+
+function encodeScanCursor(cursor: ScanCursor) {
+  return btoa(JSON.stringify(cursor)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeScanCursor(value: string | null): ScanCursor | ActivityCursor | null {
+  if (!value || value.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const parsed = JSON.parse(atob(value.replace(/-/g, "+").replace(/_/g, "/")));
+    if (parsed.v !== undefined) {
+      if (parsed.v !== 2 || typeof parsed.before !== "string" || parsed.before.length > 1024 ||
+          !/^event:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z:/.test(parsed.before)) return null;
+      const timestamp = parsed.before.slice(6,30);
+      if (!Number.isFinite(Date.parse(timestamp)) || new Date(timestamp).toISOString() !== timestamp ||
+          !/^[A-Za-z0-9%_.:~-]+$/.test(parsed.before.slice(31))) return null;
+      if (parsed.legacy && (typeof parsed.legacy.timestamp !== "string" || !Number.isFinite(Date.parse(parsed.legacy.timestamp)) ||
+          typeof parsed.legacy.id !== "string" || parsed.legacy.id.length > 200)) return null;
+      return { v: 2, before: parsed.before, ...(parsed.legacy ? { legacy: parsed.legacy } : {}) };
+    }
+    return decodeActivityCursor(value);
+  } catch { return null; }
+}
 
 function activityTimestamp(event: any) {
   return String(event.timestamp || event.startedAt || "");
@@ -230,17 +254,6 @@ function activityTimestamp(event: any) {
 
 function activityStableId(event: any) {
   return String(event.toolCallId || event.activityId || [event.userId, event.tool, event.agentId || "", activityTimestamp(event)].join(":"));
-}
-
-function sortActivityDesc(a: any, b: any) {
-  const time = Date.parse(activityTimestamp(b)) - Date.parse(activityTimestamp(a));
-  if (time) return time;
-  return activityStableId(b).localeCompare(activityStableId(a));
-}
-
-function encodeActivityCursor(event: any) {
-  const raw = JSON.stringify({ timestamp: activityTimestamp(event), id: activityStableId(event) } satisfies ActivityCursor);
-  return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 function decodeActivityCursor(value: string | null): ActivityCursor | null {
@@ -308,43 +321,6 @@ export class Usage extends DurableObject {
     this.usageEnv = env;
     this.aggregates = new UsageAggregates(ctx.storage, event => !event.ok && classifyFailure(event).operational);
   }
-  private async readWindowEvents(fromMs: number, toMs: number, maxEvents = 20000) {
-    const events: UsageEvent[] = [];
-    const startKey = "event:" + new Date(fromMs).toISOString();
-    const endKey = "event:" + new Date(toMs).toISOString() + ":\uffff";
-    let startAfter: string | undefined;
-    let bounded = false;
-
-    for (let page = 0; page < 25 && events.length < maxEvents; page++) {
-      const remaining = Math.max(1, Math.min(1000, maxEvents - events.length + 1));
-      const records = await this.ctx.storage.list<UsageEvent>({
-        prefix: "event:",
-        ...(startAfter ? { startAfter } : { start: startKey }),
-        end: endKey,
-        limit: remaining,
-      });
-      if (!records.size) break;
-
-      let lastKey = "";
-      for (const [key, event] of records) {
-        lastKey = key;
-        const when = Date.parse(event.timestamp);
-        if (!Number.isFinite(when) || when < fromMs || when > toMs) continue;
-        if (events.length >= maxEvents) {
-          bounded = true;
-          break;
-        }
-        events.push(event);
-      }
-      if (bounded) break;
-      if (!lastKey || records.size < remaining) break;
-      startAfter = lastKey;
-      if (page === 24) bounded = true;
-    }
-
-    return { events, bounded };
-  }
-
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -625,137 +601,59 @@ export class Usage extends DurableObject {
         bounded: summary.bounded, coverage: summary.coverage, p95Approximate: true });
     }
 
-    if (url.pathname === "/activity/query" && request.method === "GET") {
-      const requestedState = url.searchParams.get("state") || "all";
-      const state = requestedState === "active" || requestedState === "history" ? requestedState : "all";
+    if ((url.pathname === "/activity/query" || url.pathname === "/errors/query") && request.method === "GET") {
+      const errors = url.pathname === "/errors/query";
+      const requestedState = url.searchParams.get("state");
+      const state = errors || requestedState === "history" ? "history" : requestedState === "active" ? "active" : "all";
       const limit = boundedInt(url.searchParams.get("limit"), 50, 1, 100);
       const cursorValue = url.searchParams.get("cursor");
-      const cursor = decodeActivityCursor(cursorValue);
+      const cursor = decodeScanCursor(cursorValue);
       if (cursorValue && !cursor) return Response.json({ error: "invalid_cursor" }, { status: 400 });
-      const userId = url.searchParams.get("userId");
-      const tool = url.searchParams.get("tool");
-      const agentId = url.searchParams.get("agentId");
-      const activityId = url.searchParams.get("activityId");
-      const status = url.searchParams.get("status");
+      const scan = cursor && "v" in cursor ? cursor : null;
+      const legacy = scan?.legacy || (cursor && !("v" in cursor) ? cursor : null);
       const fromMs = Date.parse(url.searchParams.get("from") || "");
       const toMs = Date.parse(url.searchParams.get("to") || "");
       const matches = (event: any) => {
-        const when = Date.parse(event.startedAt || event.timestamp || "");
-        return (!userId || event.userId === userId) &&
-          (!tool || event.tool === tool) &&
-          (!agentId || event.agentId === agentId) &&
-          (!activityId || event.activityId === activityId) &&
-          (!Number.isFinite(fromMs) || when >= fromMs) &&
-          (!Number.isFinite(toMs) || when <= toMs);
+        const when = Date.parse(errors ? event.timestamp : event.startedAt || event.timestamp);
+        return (!errors || event.ok === false) && ["userId", "tool", "agentId", ...(errors ? ["errorClass"] : ["activityId", "status"])].every(key =>
+          !url.searchParams.get(key) || event[key] === url.searchParams.get(key)) &&
+          (!errors || (url.searchParams.get("operational") === null || String(event.operational) === url.searchParams.get("operational"))) &&
+          (!Number.isFinite(fromMs) || when >= fromMs) && (!Number.isFinite(toMs) || when <= toMs) &&
+          (!legacy || olderThanCursor(event, legacy));
       };
-
-      const activeRecords = state === "history"
-        ? new Map<string, ActiveUsageEvent>()
-        : await this.activeEvents();
-      const activeCutoffMs = Date.now() - 60 * 60 * 1000;
-      const staleKeys: string[] = [];
-      const activeItems = [...activeRecords.entries()]
-        .filter(([key, event]) => {
-          const fresh = Date.parse(event.startedAt) >= activeCutoffMs;
-          if (!fresh) staleKeys.push(key);
-          return fresh && matches(event);
-        })
-        .map(([, event]) => ({
-          ...event,
-          activityId: event.activityId || fallbackActivityId(event.toolCallId),
-          timestamp: event.startedAt,
-          status: "running" as const,
-        }));
-      if (staleKeys.length) {
-        for (let offset = 0; offset < staleKeys.length; offset += 128) await this.ctx.storage.delete(staleKeys.slice(offset,offset+128));
-        for (const key of staleKeys) activeRecords.delete(key);
-      }
-
-      let historyEvents: UsageEvent[] = [];
-      let bounded = false;
-      if (state !== "active") {
-        if (Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs >= fromMs) {
-          const window = await this.readWindowEvents(fromMs, toMs);
-          historyEvents = window.events;
-          bounded = window.bounded;
-        } else {
-          const records = await this.ctx.storage.list<UsageEvent>({ prefix: "event:", reverse: true, limit: 1000 });
-          historyEvents = [...records.values()];
-          bounded = records.size >= 1000;
-        }
-      }
-      const historyItems = historyEvents
-        .filter(matches)
-        .map((event) => ({
-          ...event,
-          ...(event.activityId ? {} : event.toolCallId ? { activityId: fallbackActivityId(event.toolCallId) } : {}),
-          status: event.ok ? "success" as const : "error" as const,
-        }));
-
-      const matched = [
-        ...(state === "history" ? [] : activeItems),
-        ...(state === "active" ? [] : historyItems),
-      ]
-        .filter((event: any) => !status || event.status === status)
-        .sort(sortActivityDesc);
-      const cursorFiltered = cursor ? matched.filter((event: any) => olderThanCursor(event, cursor)) : matched;
-      const pageItems = cursorFiltered.slice(0, limit);
-      const hasMore = cursorFiltered.length > limit;
-      const nextCursor = hasMore && pageItems.length ? encodeActivityCursor(pageItems[pageItems.length - 1]) : null;
-
-      return Response.json({
-        state,
-        items: pageItems,
-        pageSize: pageItems.length,
-        matchedTotal: matched.length,
-        hasMore,
-        nextCursor,
-        bounded,
+      // Storage order is the completion timestamp plus the unique storage key. Activity
+      // date filters still use startedAt, so they must not narrow completion key bounds.
+      const toEnd = errors && Number.isFinite(toMs) ? "event:" + new Date(toMs).toISOString() + ":\uffff" : undefined;
+      const end = scan?.before && toEnd ? (scan.before < toEnd ? scan.before : toEnd) : scan?.before || toEnd;
+      const start = errors && Number.isFinite(fromMs) ? "event:" + new Date(fromMs).toISOString() : undefined;
+      if (Number.isFinite(fromMs) && Number.isFinite(toMs) && fromMs > toMs) return Response.json({ error: "invalid_usage_window" }, { status: 400 });
+      const records = state === "active" || (start && end && end <= start) ? new Map<string, UsageEvent>() : await this.ctx.storage.list<UsageEvent>({
+        prefix: "event:", reverse: true, limit: RAW_QUERY_SCAN_LIMIT,
+        ...(end ? { end } : {}),
+        ...(start ? { start } : {}),
       });
-    }
-
-    if (url.pathname === "/errors/query" && request.method === "GET") {
-      const limit = boundedInt(url.searchParams.get("limit"), 50, 1, 100);
-      const cursorValue = url.searchParams.get("cursor");
-      const cursor = decodeActivityCursor(cursorValue);
-      if (cursorValue && !cursor) return Response.json({ error: "invalid_cursor" }, { status: 400 });
-      const userId = url.searchParams.get("userId");
-      const tool = url.searchParams.get("tool");
-      const agentId = url.searchParams.get("agentId");
-      const errorClass = url.searchParams.get("errorClass");
-      const operational = url.searchParams.get("operational");
-      const fromMs = Date.parse(url.searchParams.get("from") || "");
-      const toMs = Date.parse(url.searchParams.get("to") || "");
-
-      let events: UsageEvent[];
-      let bounded = false;
-      if (Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs >= fromMs) {
-        const window = await this.readWindowEvents(fromMs, toMs);
-        events = window.events;
-        bounded = window.bounded;
-      } else {
-        const records = await this.ctx.storage.list<UsageEvent>({ prefix: "event:", reverse: true, limit: 1000 });
-        events = [...records.values()];
-        bounded = records.size >= 1000;
-      }
-
-      const matched = events
-        .filter((event) => !event.ok)
-        .map((event) => ({ ...event, ...classifyFailure(event) }))
-        .filter((event) => {
-          const when = Date.parse(event.timestamp);
-          return (!userId || event.userId === userId) &&
-            (!tool || event.tool === tool) && (!agentId || event.agentId === agentId) &&
-            (!errorClass || event.errorClass === errorClass) &&
-            (operational === null || String(event.operational) === operational) &&
-            (!Number.isFinite(fromMs) || when >= fromMs) && (!Number.isFinite(toMs) || when <= toMs);
-        })
-        .sort(sortActivityDesc);
-      const cursorFiltered = cursor ? matched.filter((event) => olderThanCursor(event, cursor)) : matched;
-      const items = cursorFiltered.slice(0, limit);
-      const hasMore = cursorFiltered.length > limit;
-      const nextCursor = hasMore && items.length ? encodeActivityCursor(items[items.length - 1]) : null;
-      return Response.json({ items, pageSize: items.length, matchedTotal: matched.length, hasMore, nextCursor, bounded });
+      const history = [...records].map(([key, event]) => ({ key, event: errors ? { ...event, ...classifyFailure(event) } : {
+        ...event, activityId: event.activityId || (event.toolCallId ? fallbackActivityId(event.toolCallId) : undefined),
+        status: event.ok ? "success" : "error",
+      } }));
+      const frontier = [...records.keys()].at(-1);
+      const storageHasMore = records.size === RAW_QUERY_SCAN_LIMIT;
+      const active = state === "history" ? [] : [...(await this.activeEvents()).values()]
+        .filter(event => Date.parse(event.startedAt) >= Date.now() - 3600000)
+        .map(event => ({ key: "event:" + new Date(event.startedAt).toISOString() + ":~active:" + encodeURIComponent(event.toolCallId)
+          .replace(/[!'()*]/g, character => "%" + character.charCodeAt(0).toString(16).toUpperCase()), event: {
+          ...event, activityId: event.activityId || fallbackActivityId(event.toolCallId), timestamp: event.startedAt, status: "running",
+        } }))
+        .filter(row => (!scan || row.key < scan.before) && (!storageHasMore || !frontier || row.key >= frontier));
+      const matched = [...history, ...active].filter(row => matches(row.event))
+        .sort((a,b) => a.key < b.key ? 1 : a.key > b.key ? -1 : 0);
+      const page = matched.slice(0, limit);
+      const hasMore = matched.length > limit || storageHasMore;
+      const before = matched.length > limit ? page.at(-1)!.key : frontier;
+      const nextCursor = hasMore && before ? encodeScanCursor({ v: 2, before, ...(legacy ? { legacy } : {}) }) : null;
+      return Response.json({ ...(errors ? {} : { state }), items: page.map(row => row.event), pageSize: page.length,
+        matchedTotal: matched.length, matchedTotalLowerBound: hasMore, hasMore: Boolean(nextCursor), nextCursor,
+        bounded: storageHasMore, scanned: records.size, scanLimit: RAW_QUERY_SCAN_LIMIT });
     }
 
     if (url.pathname === "/query" && request.method === "GET") {

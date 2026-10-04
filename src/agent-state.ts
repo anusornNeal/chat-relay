@@ -5,6 +5,7 @@ export type AgentSocketAttachment = {
   heartbeatEnabled?: boolean;
   heartbeatMs?: number;
   processId?: number;
+  persistedEpochSignature?: string;
   protocolVersion?: number;
   agentVersion?: string;
   platform?: string;

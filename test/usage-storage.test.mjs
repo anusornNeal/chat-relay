@@ -5,7 +5,7 @@ if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const bundled = await build({
   stdin: {
     contents:
-      'export { Usage } from "./src/usage"; export { Registry } from "./src/registry";',
+      'export { Usage } from "./src/usage"; export { Registry } from "./src/registry"; export { DashboardHub } from "./src/dashboard-hub"; export { handleAdmin } from "./src/admin"; export { Relay } from "./src/index";',
     resolveDir: process.cwd(),
   },
   bundle: true,
@@ -16,6 +16,8 @@ const bundled = await build({
     {
       name: "host",
       setup(b) {
+        b.onResolve({filter:/^\.\/worker-app$/},()=>({path:"app",namespace:"app"}));
+        b.onLoad({filter:/.*/,namespace:"app"},()=>({contents:"export default {}; export async function publishDashboard() {}"}));
         b.onResolve({ filter: /^cloudflare:workers$/ }, () => ({
           path: "host",
           namespace: "host",
@@ -28,7 +30,7 @@ const bundled = await build({
     },
   ],
 });
-const { Usage, Registry } = await import(
+const { Usage, Registry, DashboardHub, handleAdmin, Relay } = await import(
   "data:text/javascript;base64," +
     Buffer.from(bundled.outputFiles[0].text).toString("base64")
 );
@@ -579,4 +581,113 @@ const window = (from, to, filter = {}) =>
   } finally {
     Date.now = originalNow;
   }
+}
+
+{
+  const f = fixture();
+  const timestamp = "2026-10-04T12:00:00.000Z";
+  for (let i = 0; i < 1201; i++) f.records.set(`event:${timestamp}:${String(i).padStart(6,"0")}`,
+    event(timestamp, { toolCallId: `tc_${i}`, ok: i !== 0, startedAt: "2026-10-03T00:00:00.000Z" }));
+  const ids = new Set();
+  let cursor = "";
+  do {
+    f.reset();
+    const page = await f.call("/activity/query?state=history&limit=100&from=2026-10-02T00:00:00Z&to=2026-10-03T01:00:00Z&cursor="+cursor);
+    assert.equal(page.status,200);
+    assert.ok(f.stats.rows <= 500);
+    for (const row of page.items) { assert.ok(!ids.has(row.toolCallId)); ids.add(row.toolCallId); }
+    cursor = page.nextCursor || "";
+  } while (cursor);
+  assert.equal(ids.size,1201,"same completion timestamps and startedAt filters do not skip rows");
+  cursor = ""; let empty = 0; let failures = [];
+  do {
+    f.reset();
+    const page = await f.call("/errors/query?cursor="+cursor);
+    assert.ok(f.stats.rows <= 500);
+    failures.push(...page.items);
+    if (!page.items.length && page.nextCursor) empty++;
+    cursor = page.nextCursor || "";
+  } while (cursor);
+  assert.equal(empty,2); assert.equal(failures.length,1); assert.equal(failures[0].toolCallId,"tc_0");
+  const legacy = Buffer.from(JSON.stringify({ timestamp, id:"tc_5" })).toString("base64url");
+  cursor = legacy; const legacyIds = new Set();
+  do {
+    f.reset();
+    const page = await f.call("/activity/query?state=history&cursor="+cursor);
+    assert.ok(f.stats.rows <=500);
+    for (const row of page.items) { assert.ok(row.toolCallId.localeCompare("tc_5")<0); assert.ok(!legacyIds.has(row.toolCallId)); legacyIds.add(row.toolCallId); }
+    cursor = page.nextCursor || "";
+  } while(cursor);
+  assert.equal(legacyIds.size,[...f.records.values()].filter(row => row.toolCallId.localeCompare("tc_5")<0).length);
+  const invalid = Buffer.from(JSON.stringify({v:2,before:"event:2026-99-99T12:00:00.000Z:x"})).toString("base64url");
+  assert.equal((await f.call("/errors/query?cursor="+invalid)).status,400);
+  assert.equal((await f.call("/errors/query?tool=missing")).items.length,0);
+  assert.equal((await f.call("/errors/query?operational=true")).items.length,0);
+  console.log("PASS bounded raw paging, sparse empty continuation, same timestamp ties, startedAt filters and legacy cursor");
+}
+{
+  const f=fixture(); const timestamp=new Date().toISOString();
+  for(let i=0;i<501;i++) f.records.set(`event:${timestamp}:${String(i).padStart(6,"0")}`,event(timestamp,{toolCallId:`history_${i}`}));
+  f.records.set("active:active_a",{userId:"alice",tool:"terminal",agentId:"laptop",toolCallId:"active_a",startedAt:timestamp});
+  f.records.set("active:active_b",{userId:"alice",tool:"terminal",agentId:"laptop",toolCallId:"active_b",startedAt:new Date(Date.now()-1000).toISOString()});
+  let cursor=""; const ids=new Set();
+  do { const page=await f.call("/activity/query?limit=1&cursor="+cursor);
+    for(const row of page.items) { assert.ok(!ids.has(row.toolCallId));ids.add(row.toolCallId); }
+    cursor=page.nextCursor||"";
+  }while(cursor);
+  assert.equal(ids.size,503);
+  console.log("PASS active/history merging including ties and active rows beyond history scan frontier");
+}
+{
+  let reads=0; let sockets=[];
+  const hub=new DashboardHub({ getWebSockets:()=>sockets },{REGISTRY:{ idFromName:x=>x,get:()=>({fetch:async()=>{reads++; return Response.json({agents:[{id:"a",name:"Agent"}]});}})}});
+  const publish=()=>hub.fetch(new Request("https://internal/publish",{method:"POST",body:JSON.stringify({topics:["calls"],event:{type:"tool_started",userId:"alice",tool:"terminal",toolCallId:"t",agentId:"a",startedAt:new Date().toISOString()}})}));
+  await publish();assert.equal(reads,0);
+  sockets=[{deserializeAttachment:()=>({userId:"bob",admin:false}),send:()=>assert.fail("wrong audience")}];
+  await publish();assert.equal(reads,0);
+  const messages=[];sockets.push({deserializeAttachment:()=>({userId:"owner",admin:true}),send:x=>messages.push(JSON.parse(x))});
+  await publish();assert.equal(reads,1);assert.equal(messages[0].agentName,"Agent");
+  await publish();assert.equal(reads,1);
+  console.log("PASS hub registry reads only for eligible subscribers with name cache");
+}
+{
+  const calls=[];
+  const state={agents:[{id:"offline",name:"Offline",enabled:true},{id:"online",name:"Online",enabled:true}],users:[],grants:[]};
+  const env={ADMIN_TOKEN:"test",REGISTRY:{idFromName:x=>x,get:()=>({fetch:async request=>{const path=new URL(typeof request==="string"?request:request.url).pathname;calls.push("registry"+path);return Response.json(state);}})},
+    RELAY:{idFromName:x=>x,get:id=>({fetch:async request=>{const path=new URL(typeof request==="string"?request:request.url).pathname;calls.push(id+path);return Response.json(path==="/status"?{online:id==="online"}:{payload:{ok:true,sessions:[],batches:[]}});}})},
+    USAGE:{idFromName:x=>x,get:()=>({fetch:async()=>Response.json({metric:{},items:[]})})}};
+  const call=path=>handleAdmin(new Request("https://internal"+path,{headers:{authorization:"Bearer test"}}),env);
+  assert.equal((await call("/admin/api/overview")).status,200);
+  assert.equal(calls.filter(x=>x==="registry/state").length,1);
+  assert.ok(!calls.includes("offline/relay"));assert.ok(calls.includes("online/relay"));
+  calls.length=0;assert.equal((await call("/admin/api/tool-calls")).status,200);
+  assert.equal(calls.filter(x=>x==="registry/state").length,1);
+  console.log("PASS admin overview and tool-call state reuse and offline probe suppression");
+}
+
+{
+  const records=new Map();let writes=0;let fail=false;let pending=[];
+  let attachment={connectionGeneration:1};const socket={deserializeAttachment:()=>structuredClone(attachment),serializeAttachment:x=>{attachment=structuredClone(x);},send:()=>{}};
+  const ctx={getWebSockets:()=>[socket],waitUntil:p=>pending.push(p),storage:{get:async key=>structuredClone(records.get(key)),put:async(key,value)=>{if(fail)throw Error("write failed");writes++;records.set(key,structuredClone(value));}}};
+  let relay=new Relay(ctx,{});
+  const health={processStartedAt:"2026-10-04T00:00:00.000Z",reconnectCount:0};
+  const beat=async(extra={})=>{relay.webSocketMessage(socket,JSON.stringify({control:"agent_heartbeat",processId:42,heartbeatMs:15000,health:{...health,...extra}}));await Promise.all(pending);pending=[];};
+  await beat();assert.equal(writes,1);
+  await beat({queues:{terminal:{active:1,queued:1}}});assert.equal(writes,1);
+  relay=new Relay(ctx,{});await beat();assert.equal(writes,1,"hibernation retains persisted signature");
+  await beat({reconnectCount:1,lastDisconnectedAt:"2026-10-04T01:00:00.000Z",lastCloseCode:1006});assert.equal(writes,2);
+  fail=true;await beat({processStartedAt:"2026-10-04T02:00:00.000Z"});assert.equal(writes,2);
+  fail=false;await beat({processStartedAt:"2026-10-04T02:00:00.000Z"});assert.equal(writes,3,"failed writes retry next heartbeat");
+  assert.equal(records.get("agent:diagnostics").processEpochs.length,2);
+  console.log("PASS real Relay heartbeat write suppression, diagnostic changes, eviction and failed-write retry");
+}
+{
+  const f=fixture();const now=new Date();const startedAt=now.toISOString().replace(/\.\d{3}Z$/,"Z");
+  const callIds = ["noncanonical_!'()*_0", "noncanonical_!'()*_1", "日".repeat(96), "日".repeat(95) + "本"];
+  for (const [i, toolCallId] of callIds.entries()) f.records.set("active:"+i,{userId:"alice",tool:"terminal",toolCallId,startedAt});
+  let cursor="";const ids=[];
+  do{const page=await f.call("/activity/query?state=active&limit=1&cursor="+cursor);assert.equal(page.status,200);ids.push(...page.items.map(x=>x.toolCallId));cursor=page.nextCursor||"";}while(cursor);
+  assert.equal(new Set(ids).size,4);
+  assert.equal((await f.call("/errors/query?from=2026-10-05&to=2026-10-04")).status,400);
+  console.log("PASS active-only noncanonical timestamp and punctuation ID continuation and reversed window validation");
 }
