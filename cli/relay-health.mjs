@@ -1,5 +1,23 @@
 export const RELAY_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 export const RELAY_HEALTH_CHECK_TIMEOUT_MS = 8 * 1000;
+export const RELAY_HEALTH_LIMITED_INTERVAL_MS = 60 * 60 * 1000;
+export const RELAY_HEALTH_CLOUDFLARE_ERROR_INTERVAL_MS = 15 * 60 * 1000;
+
+export function relayHealthRetryDelay(
+  health,
+  intervalMs = RELAY_HEALTH_CHECK_INTERVAL_MS,
+  {
+    limitedIntervalMs = RELAY_HEALTH_LIMITED_INTERVAL_MS,
+    cloudflareErrorIntervalMs = RELAY_HEALTH_CLOUDFLARE_ERROR_INTERVAL_MS,
+  } = {},
+) {
+  const base = Math.max(1000, Number(intervalMs) || RELAY_HEALTH_CHECK_INTERVAL_MS);
+  if (health?.state === "limited") return Math.max(base, Number(limitedIntervalMs) || RELAY_HEALTH_LIMITED_INTERVAL_MS);
+  if (health?.state === "cloudflare-error") {
+    return Math.max(base, Number(cloudflareErrorIntervalMs) || RELAY_HEALTH_CLOUDFLARE_ERROR_INTERVAL_MS);
+  }
+  return base;
+}
 
 const MAX_RESPONSE_BYTES = 4096;
 
@@ -121,6 +139,8 @@ export function startRelayHealthMonitor(relayUrl, {
   let timer = null;
   let activeRequest = null;
   let rerunRequested = false;
+  let cooldownUntil = 0;
+  const baseIntervalMs = Math.max(1000, Number(intervalMs) || RELAY_HEALTH_CHECK_INTERVAL_MS);
 
   const check = async () => {
     if (stopped || activeRequest) return;
@@ -131,10 +151,15 @@ export function startRelayHealthMonitor(relayUrl, {
     rerunRequested = false;
     activeRequest = null;
     if (stopped) return;
-    if (!shouldRerun) {
+
+    const retryDelay = relayHealthRetryDelay(result, baseIntervalMs, checkOptions);
+    const underCloudflarePressure = retryDelay > baseIntervalMs;
+    const rerunImmediately = shouldRerun && !underCloudflarePressure;
+    if (!shouldRerun || underCloudflarePressure) {
       try { onStatus?.(result); } catch {}
     }
-    timer = setTimeout(check, shouldRerun ? 0 : Math.max(1000, Number(intervalMs) || RELAY_HEALTH_CHECK_INTERVAL_MS));
+    cooldownUntil = underCloudflarePressure ? Date.now() + retryDelay : 0;
+    timer = setTimeout(check, rerunImmediately ? 0 : retryDelay);
     timer.unref?.();
   };
 
@@ -145,14 +170,16 @@ export function startRelayHealthMonitor(relayUrl, {
     activeRequest?.abort();
   };
   stop.checkNow = () => {
-    if (stopped) return;
+    if (stopped) return false;
+    if (cooldownUntil > Date.now()) return false;
     if (timer) clearTimeout(timer);
     timer = null;
     if (activeRequest) {
       rerunRequested = true;
-      return;
+      return true;
     }
     void check();
+    return true;
   };
   return stop;
 }

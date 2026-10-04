@@ -1,8 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DashboardTopic } from "./dashboard-hub";
 import { UsageAggregates } from "./usage-aggregates";
+import { DailyOptionalBudget } from "./usage-budget.mjs";
 
-type UsageEnv = { DASHBOARD: DurableObjectNamespace };
+type UsageEnv = {
+  DASHBOARD: DurableObjectNamespace;
+  USAGE_DASHBOARD_PUBLISH_DAILY_BUDGET?: string;
+};
 
 async function publishDashboard(
   env: UsageEnv,
@@ -96,6 +100,7 @@ export class Usage extends DurableObject {
   private readonly usageEnv: UsageEnv;
   private readonly aggregates: UsageAggregates;
   private readonly lastOverviewPublishAt = new Map<string, number>();
+  private readonly dashboardPublishBudget = new DailyOptionalBudget();
 
   constructor(ctx: DurableObjectState, env: UsageEnv) {
     super(ctx, env);
@@ -207,6 +212,14 @@ export class Usage extends DurableObject {
       return Response.json(decision);
     }
 
+    if (url.pathname === "/budget/status" && request.method === "GET") {
+      return Response.json({
+        dashboardPublish: this.dashboardPublishBudget.snapshot(
+          this.usageEnv.USAGE_DASHBOARD_PUBLISH_DAILY_BUDGET,
+        ),
+      });
+    }
+
     if (url.pathname === "/record" && request.method === "POST") {
       const body = await request.json<UsageEvent>().catch(() => null);
       if (!body?.userId || !body?.timestamp) {
@@ -229,7 +242,13 @@ export class Usage extends DurableObject {
       const lastPublishedAt = this.lastOverviewPublishAt.get(event.userId) || 0;
       if (now - lastPublishedAt >= 60_000) {
         this.lastOverviewPublishAt.set(event.userId, now);
-        await publishDashboard(this.usageEnv, ["overview"], event.userId);
+        const publishBudget = this.dashboardPublishBudget.consume(
+          this.usageEnv.USAGE_DASHBOARD_PUBLISH_DAILY_BUDGET,
+          now,
+        );
+        if (publishBudget.allowed) {
+          await publishDashboard(this.usageEnv, ["overview"], event.userId);
+        }
       }
       return Response.json({ ok: true });
     }

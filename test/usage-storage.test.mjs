@@ -28,9 +28,9 @@ const { Usage, Registry } = await import(
   "data:text/javascript;base64," + Buffer.from(bundled.outputFiles[0].text).toString("base64")
 );
 
-function fixture(Class = Usage) {
+function fixture(Class = Usage, envOverrides = {}) {
   const records = new Map();
-  const stats = { gets: 0, puts: 0, lists: 0, rows: 0 };
+  const stats = { gets: 0, puts: 0, lists: 0, rows: 0, dashboardFetches: 0 };
   let queue = Promise.resolve();
   const storage = {
     async get(key) {
@@ -70,8 +70,12 @@ function fixture(Class = Usage) {
   const env = {
     DASHBOARD: {
       idFromName: (value) => value,
-      get: () => ({ fetch: async () => Response.json({ ok: true }) }),
+      get: () => ({ fetch: async () => {
+        stats.dashboardFetches++;
+        return Response.json({ ok: true });
+      } }),
     },
+    ...envOverrides,
   };
   const instance = new Class({ storage }, env);
   const call = async (path, body) => {
@@ -93,6 +97,7 @@ function fixture(Class = Usage) {
       stats.puts = 0;
       stats.lists = 0;
       stats.rows = 0;
+      stats.dashboardFetches = 0;
     },
   };
 }
@@ -202,3 +207,16 @@ const event = (timestamp, overrides = {}) => ({
 }
 
 console.log("usage storage/query optimization tests passed");
+
+{
+  const f = fixture(Usage, { USAGE_DASHBOARD_PUBLISH_DAILY_BUDGET: "1" });
+  await f.call("/record", event("2026-10-04T08:00:00Z", { userId: "budget-a" }));
+  await f.call("/record", event("2026-10-04T08:00:01Z", { userId: "budget-b" }));
+  assert.equal(f.stats.dashboardFetches, 1, "dashboard publishes must stop at the configured optional budget");
+  const budget = await f.call("/budget/status");
+  assert.equal(budget.dashboardPublish.enabled, true);
+  assert.equal(budget.dashboardPublish.limit, 1);
+  assert.equal(budget.dashboardPublish.used, 1);
+  assert.equal(budget.dashboardPublish.suppressed, 1);
+  console.log("PASS optional dashboard publish budget adds no durable budget writes");
+}

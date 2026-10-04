@@ -6,6 +6,7 @@ import { handleOAuth, oauthChallenge, oauthResource } from "./oauth";
 import { browserSessionUser, handleAdmin } from "./admin";
 import { hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 import { DEFAULT_QUOTA_POLICY, normalizeQuotaPolicy, type QuotaPolicy, type UsageEvent } from "./usage";
+import { DailyOptionalBudget } from "./usage-budget.mjs";
 import { AGENT_PROTOCOL_VERSION } from "./agent-state";
 import { handleStatusRequest } from "./status-route.mjs";
 import { error, hasPayload, readJson } from "./http-utils";
@@ -111,6 +112,7 @@ type ResolvedAgentAccess = { agentId: string; scopes: string[] };
 const authUserCache = new Map<string, TimedCacheEntry<AuthUser>>();
 const resolvedAgentCache = new Map<string, TimedCacheEntry<ResolvedAgentAccess>>();
 let quotaDisabledUntil = 0;
+const usageRecordBudget = new DailyOptionalBudget();
 
 function cacheGet<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {
   const entry = cache.get(key);
@@ -152,6 +154,8 @@ async function activityContextForRequest(request: Request): Promise<ToolActivity
 }
 
 async function recordUsage(env: Env, event: Pick<UsageEvent, "userId" | "agentId" | "timestamp">): Promise<void> {
+  const budget = usageRecordBudget.consume(env.USAGE_RECORD_DAILY_BUDGET);
+  if (!budget.allowed) return;
   try {
     await usageStub(env).fetch(new Request("https://usage.internal/record", {
       method: "POST",
@@ -1369,7 +1373,12 @@ export default {
 
     if (path === "/health") {
       return request.method === "GET"
-        ? Response.json({ status: "ok", service: "chat-relay", version: "0.7.0" })
+        ? Response.json({
+          status: "ok",
+          service: "chat-relay",
+          version: "0.7.0",
+          optionalUsageBudget: usageRecordBudget.snapshot(env.USAGE_RECORD_DAILY_BUDGET),
+        })
         : error(405, "method_not_allowed");
     }
 

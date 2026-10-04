@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { checkRelayHealth, startRelayHealthMonitor } from "../cli/relay-health.mjs";
+import {
+  checkRelayHealth,
+  relayHealthRetryDelay,
+  startRelayHealthMonitor,
+} from "../cli/relay-health.mjs";
 
 test("checks the authenticated relay status endpoint for the configured agent", async () => {
   let requestedUrl;
@@ -117,6 +121,43 @@ test("checkNow reruns a pending health check without publishing its stale result
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(requestCount, 2);
     assert.deepEqual(statuses, ["reachable"]);
+  } finally {
+    stop();
+  }
+});
+
+test("backs off health checks during Cloudflare request pressure", () => {
+  assert.equal(relayHealthRetryDelay({ state: "reachable" }, 5_000), 5_000);
+  assert.equal(
+    relayHealthRetryDelay({ state: "limited", code: 1027 }, 5_000, { limitedIntervalMs: 60_000 }),
+    60_000,
+  );
+  assert.equal(
+    relayHealthRetryDelay({ state: "cloudflare-error", code: 1102 }, 5_000, { cloudflareErrorIntervalMs: 30_000 }),
+    30_000,
+  );
+});
+
+test("checkNow cannot bypass Cloudflare pressure cooldown", async () => {
+  let requestCount = 0;
+  const statuses = [];
+  const stop = startRelayHealthMonitor("https://relay.example.dev", {
+    intervalMs: 1_000,
+    limitedIntervalMs: 60_000,
+    onStatus: (health) => statuses.push(health),
+    fetchImpl: async () => {
+      requestCount += 1;
+      return new Response("Error 1027: Worker exceeded daily request limit", { status: 429 });
+    },
+  });
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(requestCount, 1);
+    assert.equal(statuses[0]?.state, "limited");
+    assert.equal(stop.checkNow(), false);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(requestCount, 1);
   } finally {
     stop();
   }
