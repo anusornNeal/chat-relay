@@ -249,6 +249,7 @@ export class Registry extends DurableObject {
       case "/admin-session/create": return this.createAdminSession(body);
       case "/admin-session/create-for-user": return this.createAdminSessionForUser(body);
       case "/admin-session/auth": return this.authAdminSession(body);
+      case "/admin-session/refresh-csrf": return this.refreshAdminSessionCsrf(body);
       case "/admin-session/revoke": return this.revokeAdminSession(body);
       case "/admin-session/revoke-user": return this.revokeAdminUserSessions(body);
       case "/users/set-admin": return this.setUserAdmin(body);
@@ -1273,6 +1274,25 @@ export class Registry extends DurableObject {
       return json({ error: "csrf_invalid" }, 403);
     }
     return json({ ok: true, user: publicUser(user), expiresAt: record.expiresAt });
+  }
+
+  private async refreshAdminSessionCsrf(body: any): Promise<Response> {
+    const tokenHash = String(body?.tokenHash ?? "");
+    if (!tokenHash) return json({ error: "unauthorized" }, 401);
+    const record = await this.ctx.storage.get<AdminSessionRecord>(key.adminSession(tokenHash));
+    if (!record || isExpired(record.expiresAt)) {
+      if (record) await this.ctx.storage.delete(key.adminSession(tokenHash));
+      return json({ error: "unauthorized" }, 401);
+    }
+    const user = await this.ctx.storage.get<UserRecord>(key.user(record.userId));
+    if (!user?.enabled || user.deletedAt) {
+      await this.ctx.storage.delete(key.adminSession(tokenHash));
+      return json({ error: "unauthorized" }, 401);
+    }
+    const csrfToken = newToken("csrf");
+    record.csrfHash = await hashToken(csrfToken);
+    await this.ctx.storage.put(key.adminSession(tokenHash), record);
+    return json({ ok: true, user: publicUser(user), csrfToken, expiresAt: record.expiresAt });
   }
 
   private async revokeAdminSession(body: any): Promise<Response> {

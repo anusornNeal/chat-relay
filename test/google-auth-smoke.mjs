@@ -25,6 +25,9 @@ if (!adminSource.includes("SameSite=Lax") || !adminSource.includes("Path=/; Max-
 if (!adminSource.includes('"oauth.google.login"')) throw new Error("connector Google callback audit is missing");
 if (!dashboard.includes('href="/admin/google/start"')) throw new Error("dashboard Google sign-in entrypoint is missing");
 if (!app.includes('sessionStorage.getItem("chat_relay_csrf")') || !app.includes('sessionStorage.removeItem("chat_relay_csrf")')) throw new Error("dashboard CSRF persistence contract is incomplete");
+if (!app.includes('/admin/session?refreshCsrf=1') || !app.includes('csrf_required') || !app.includes('csrf_invalid')) throw new Error("dashboard CSRF recovery contract is incomplete");
+if (!registrySource.includes('case "/admin-session/refresh-csrf"') || !registrySource.includes('refreshAdminSessionCsrf')) throw new Error("registry CSRF refresh contract is missing");
+if (!adminSource.includes('url.searchParams.get("refreshCsrf") === "1"')) throw new Error("admin CSRF refresh route is missing");
 
 const base = process.env.TEST_RELAY_URL?.replace(/\/$/, "");
 if (base) {

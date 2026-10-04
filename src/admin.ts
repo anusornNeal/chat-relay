@@ -476,10 +476,18 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
   if (path === "/admin/session" && request.method === "GET") {
     const headers = new Headers({ "cache-control": "no-store" });
-    if (browserAuth?.ok && browserAuth.token && browserAuth.data.expiresAt) {
-      const maxAge = Math.max(1, Math.floor((Date.parse(browserAuth.data.expiresAt) - Date.now()) / 1000));
+    if (browserAuth?.ok && browserAuth.token && browserAuth.tokenHash && browserAuth.data.expiresAt && url.searchParams.get("refreshCsrf") === "1") {
+      const refreshed = await registryCall(env, "/admin-session/refresh-csrf", { tokenHash: browserAuth.tokenHash });
+      const refreshedData = await refreshed.json<any>();
+      if (!refreshed.ok) return Response.json(refreshedData, { status: refreshed.status, headers });
+      const expiresAt = refreshedData.expiresAt || browserAuth.data.expiresAt;
+      const maxAge = Math.max(1, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000));
       headers.append("set-cookie", adminCookie(browserAuth.token, maxAge));
       headers.append("set-cookie", clearLegacyAdminCookie());
+      return Response.json(
+        { ok: true, user: refreshedData.user || browserAuth.data.user, csrfToken: refreshedData.csrfToken, expiresAt },
+        { headers },
+      );
     }
     return Response.json(
       { ok: true, user: browserAuth?.ok ? browserAuth.data.user : { operator: true }, expiresAt: browserAuth?.ok ? browserAuth.data.expiresAt : null },

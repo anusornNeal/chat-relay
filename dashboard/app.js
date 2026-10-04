@@ -315,9 +315,20 @@ async function api(path, options = {}) {
     const text = await response.text();
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (data.csrfToken) {
+      csrf = String(data.csrfToken);
+      sessionStorage.setItem("chat_relay_csrf", csrf);
+    }
     if (response.status === 401) {
       signOutUi("Session expired. Sign in again.");
       throw new Error("unauthorized");
+    }
+    const canRetryCsrf = options.method && options.method !== "GET" && options._csrfRetry !== false;
+    if (!response.ok && canRetryCsrf && (data.error === "csrf_required" || data.error === "csrf_invalid")) {
+      await api("/admin/session?refreshCsrf=1", { _csrfRetry: false });
+      const retryOptions = { ...options, _csrfRetry: false };
+      delete retryOptions.signal;
+      return api(path, retryOptions);
     }
     if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
     return data;
@@ -1100,17 +1111,32 @@ document.querySelectorAll("[data-close-dialog]").forEach((button) => button.oncl
 $("cancelDelete").onclick = () => { $("confirmDialog").close(); pendingDeleteUser = null; };
 $("confirmDelete").onclick = async () => {
   if (!pendingDeleteUser) return;
-  await api("/admin/api/users/soft-delete", { method: "POST", body: JSON.stringify({ userId: pendingDeleteUser }) });
-  pendingDeleteUser = null;
-  adminUsersCache = [];
-  $("confirmDialog").close();
-  await loadUsers({ patch: true });
+  const button = $("confirmDelete");
+  const userId = pendingDeleteUser;
+  button.disabled = true;
+  button.textContent = "Deleting...";
+  setNotice("");
+  try {
+    await api("/admin/api/users/soft-delete", { method: "POST", body: JSON.stringify({ userId }) });
+    pendingDeleteUser = null;
+    adminUsersCache = [];
+    $("confirmDialog").close();
+    await loadUsers({ patch: true });
+    setNotice("User soft deleted.");
+  } catch (error) {
+    const message = error?.message || "request_failed";
+    $("confirmCopy").textContent = "Soft delete failed: " + message;
+    setNotice("Soft delete failed: " + message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Soft delete";
+  }
 };
 $("closeDetail").onclick = () => $("detailDialog").close();
 
 (async () => {
   try {
-    const data = await api("/admin/session");
+    const data = await api("/admin/session?refreshCsrf=1");
     currentUser = data.user;
     $("loginView").hidden = true;
     $("appView").hidden = false;
