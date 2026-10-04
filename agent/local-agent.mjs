@@ -6,7 +6,7 @@ import { TerminalManager } from "./terminal-manager.mjs";
 import { CapabilityScheduler } from "./capability-scheduler.mjs";
 import { AgentConnectionState } from "./connection-state.mjs";
 import { buildAgentHello } from "./protocol.mjs";
-import { AgentLifecycle, AGENT_RESTART_EXIT_CODE } from "./lifecycle.mjs";
+import { AgentLifecycle, AGENT_RESTART_EXIT_CODE, AGENT_UPGRADE_EXIT_CODE } from "./lifecycle.mjs";
 import { humanizeToolCall } from "./toolcall-summary.mjs";
 import {
   HeartbeatAckWatchdog,
@@ -190,6 +190,11 @@ async function handlePayload(payload) {
     case "agent.lifecycle.restart": {
       const result = lifecycle.requestRestart();
       if (result.ok) setTimeout(restartAgentProcess, 150);
+      return result;
+    }
+    case "agent.lifecycle.upgrade": {
+      const result = lifecycle.requestUpgrade();
+      if (result.ok) setTimeout(upgradeAgentProcess, 150);
       return result;
     }
 
@@ -610,6 +615,20 @@ function restartAgentProcess() {
   terminals.close();
   desktop.close();
   setTimeout(() => process.exit(AGENT_RESTART_EXIT_CODE), 50);
+}
+
+function upgradeAgentProcess() {
+  if (stopping) return;
+  stopping = true;
+  connectionState.markStopping("upgrade_requested");
+  clearReconnectTimer();
+  stopHeartbeat();
+  const socket = activeSocket;
+  activeSocket = null;
+  try { socket?.close(1012, "upgrade_requested"); } catch {}
+  terminals.close();
+  desktop.close();
+  setTimeout(() => process.exit(AGENT_UPGRADE_EXIT_CODE), 50);
 }
 
 function shutdown(reason) {

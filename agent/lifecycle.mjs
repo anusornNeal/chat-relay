@@ -6,6 +6,7 @@ const ALLOWED_WHILE_DRAINING = new Set([
   "agent.lifecycle.drain",
   "agent.lifecycle.resume",
   "agent.lifecycle.restart",
+  "agent.lifecycle.upgrade",
   "fs.stat",
   "fs.list",
   "fs.read",
@@ -30,6 +31,7 @@ const ALLOWED_WHILE_DRAINING = new Set([
 ]);
 
 export const AGENT_RESTART_EXIT_CODE = 4;
+export const AGENT_UPGRADE_EXIT_CODE = 5;
 
 function normalizeWork(value = {}) {
   const count = (key) => Math.max(0, Number(value[key]) || 0);
@@ -49,6 +51,7 @@ export class AgentLifecycle {
     this.state = "running";
     this.drainStartedAt = null;
     this.restartRequestedAt = null;
+    this.upgradeRequestedAt = null;
     this.now = options.now ?? (() => Date.now());
     this.workSummary = options.workSummary ?? (() => ({}));
   }
@@ -59,13 +62,15 @@ export class AgentLifecycle {
       state: this.state,
       drainStartedAt: this.drainStartedAt,
       restartRequestedAt: this.restartRequestedAt,
+      upgradeRequestedAt: this.upgradeRequestedAt,
       readyToRestart: this.state === "draining" && work.total === 0,
+      readyToUpgrade: this.state === "draining" && work.total === 0,
       work,
     };
   }
 
   drain() {
-    if (this.state !== "restart-pending") {
+    if (this.state !== "restart-pending" && this.state !== "upgrade-pending") {
       this.state = "draining";
       this.drainStartedAt ??= new Date(this.now()).toISOString();
     }
@@ -73,8 +78,12 @@ export class AgentLifecycle {
   }
 
   resume() {
-    if (this.state === "restart-pending") {
-      return { ok: false, error: "restart_pending", lifecycle: this.snapshot() };
+    if (this.state === "restart-pending" || this.state === "upgrade-pending") {
+      return {
+        ok: false,
+        error: this.state === "upgrade-pending" ? "upgrade_pending" : "restart_pending",
+        lifecycle: this.snapshot(),
+      };
     }
     this.state = "running";
     this.drainStartedAt = null;
@@ -97,5 +106,18 @@ export class AgentLifecycle {
     this.state = "restart-pending";
     this.restartRequestedAt = new Date(this.now()).toISOString();
     return { ok: true, restart: true, lifecycle: this.snapshot() };
+  }
+
+  requestUpgrade() {
+    if (this.state !== "draining") {
+      return { ok: false, error: "drain_required", lifecycle: this.snapshot() };
+    }
+    const snapshot = this.snapshot();
+    if (snapshot.work.total > 0) {
+      return { ok: false, error: "active_work_remaining", lifecycle: snapshot };
+    }
+    this.state = "upgrade-pending";
+    this.upgradeRequestedAt = new Date(this.now()).toISOString();
+    return { ok: true, upgrade: true, lifecycle: this.snapshot() };
   }
 }

@@ -1,6 +1,8 @@
 import { clearConfig, configPath, loadConfig, saveConfig } from "./config.mjs";
 import { login, requestJson } from "./device-login.mjs";
 import { protocolCompatibility, remote, validateConfig } from "./remote.mjs";
+import { launchLatestRemote } from "./self-update.mjs";
+import { AGENT_UPGRADE_EXIT_CODE } from "../agent/lifecycle.mjs";
 
 function parseOptions(args) {
   const options = {};
@@ -36,6 +38,7 @@ Usage:
   chat-relay drain              Stop accepting new long-running work
   chat-relay resume             Resume normal work admission
   chat-relay restart            Restart after drain completes
+  chat-relay upgrade            Relaunch the latest package after drain completes
   chat-relay logout             Revoke this computer login
   chat-relay help               Show this help
 
@@ -251,8 +254,20 @@ export async function runCli(argv = process.argv.slice(2)) {
   if (command === "drain") return lifecycleAction("drain");
   if (command === "resume") return lifecycleAction("resume");
   if (command === "restart") return lifecycleAction("restart");
+  if (command === "upgrade") return lifecycleAction("upgrade");
   if (command === "remote") {
-    return (await remote(options)) || 0;
+    const remoteCode = (await remote(options)) || 0;
+    if (remoteCode === AGENT_UPGRADE_EXIT_CODE) {
+      const relaunched = launchLatestRemote(options);
+      if (!relaunched.ok) {
+        console.error("Upgrade relaunch failed: " + (relaunched.message || relaunched.error || "unknown_error"));
+        if (relaunched.retryAt) console.error("Retry after: " + relaunched.retryAt);
+        return 1;
+      }
+      console.log("Upgrade handoff started with " + relaunched.package + ".");
+      return 0;
+    }
+    return remoteCode;
   }
 
   console.error(`Unknown command: ${command}`);

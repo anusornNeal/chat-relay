@@ -5,6 +5,7 @@ import { loadConfig, saveConfig } from "./config.mjs";
 import { login, requestJson } from "./device-login.mjs";
 import { acquireRunnerOwnership, RunnerAlreadyActiveError } from "./runner-ownership.mjs";
 import { getAgentVersion } from "../agent/protocol.mjs";
+import { AGENT_UPGRADE_EXIT_CODE } from "../agent/lifecycle.mjs";
 import { RemoteTui, shouldUseTui } from "./tui.mjs";
 import { startRelayHealthMonitor } from "./relay-health.mjs";
 
@@ -12,7 +13,10 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 let stopping = false;
 
 export function shouldRestartAgent(result, stoppingNow = false) {
-  return !stoppingNow && result?.code !== 2 && result?.code !== 3;
+  return !stoppingNow
+    && result?.code !== 2
+    && result?.code !== 3
+    && result?.code !== AGENT_UPGRADE_EXIT_CODE;
 }
 
 export function protocolCompatibility(agentProtocolVersion, expectedProtocolVersion) {
@@ -105,6 +109,7 @@ export async function remote(options = {}) {
   }
   let tui = null;
   let stopRelayHealthMonitor = null;
+  let supervisorCode = 0;
   try {
     if (options.allowedRoot && options.allowedRoot !== config.allowedRoots) {
       config = { ...config, allowedRoots: options.allowedRoot };
@@ -165,6 +170,12 @@ export async function remote(options = {}) {
         console.log("Agent restart requested. Restarting local agent...");
         continue;
       }
+      if (result.code === AGENT_UPGRADE_EXIT_CODE) {
+        console.log("Agent upgrade requested. Handing off to the latest package...");
+        supervisorCode = AGENT_UPGRADE_EXIT_CODE;
+        stopping = true;
+        break;
+      }
 
       if (shouldRestartAgent(result, stopping)) {
         console.error(
@@ -178,6 +189,7 @@ export async function remote(options = {}) {
     try { tui?.stop?.(); } catch {}
     await ownership.release();
   }
+  return supervisorCode;
 }
 
 export { validateConfig };

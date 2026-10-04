@@ -30,6 +30,7 @@ function connectionStateTests() {
   if (shouldRestartAgent({ code: 2 }) !== false) throw new Error("reauthorization restart loop guard failed");
   if (shouldRestartAgent({ code: 3 }) !== false) throw new Error("protocol mismatch restart loop guard failed");
   if (shouldRestartAgent({ code: 4 }) !== true) throw new Error("explicit restart exit code failed");
+  if (shouldRestartAgent({ code: 5 }) !== false) throw new Error("upgrade handoff must not enter crash restart loop");
   if (protocolCompatibility(1, 1) !== "compatible" || protocolCompatibility(1, 2) !== "incompatible" || protocolCompatibility(null, 1) !== "unknown") throw new Error("protocol compatibility notice failed");
   if (shouldRestartAgent({ code: 1 }) !== true) throw new Error("crash restart policy failed");
   if (shouldRestartAgent({ code: 1 }, true) !== false) throw new Error("intentional stop restart guard failed");
@@ -54,6 +55,13 @@ function lifecycleTests() {
   const recovery = new AgentLifecycle();
   recovery.drain();
   if (!recovery.resume().ok || recovery.snapshot().state !== "running") throw new Error("failed update recovery resume failed");
+
+  const upgrade = new AgentLifecycle({ now: () => 2000, workSummary: () => ({}) });
+  if (upgrade.requestUpgrade().error !== "drain_required") throw new Error("upgrade drain guard failed");
+  upgrade.drain();
+  const requestedUpgrade = upgrade.requestUpgrade();
+  if (!requestedUpgrade.ok || !requestedUpgrade.upgrade || upgrade.snapshot().state !== "upgrade-pending") throw new Error("upgrade request failed");
+  if (upgrade.resume().error !== "upgrade_pending") throw new Error("upgrade pending resume guard failed");
 }
 
 connectionStateTests();
