@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { clearSecrets, readSecrets, writeSecrets } from "./secret-store.mjs";
 
 export function configDir() {
   if (process.env.CHAT_RELAY_HOME) return path.resolve(process.env.CHAT_RELAY_HOME);
@@ -80,17 +81,21 @@ function migrateLegacyConfig() {
   return config;
 }
 
-export function loadConfig() {
-  const file = configPath();
-  if (!fs.existsSync(file)) return migrateLegacyConfig();
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    throw new Error(`Invalid Chat Relay config: ${file}`);
-  }
+function configSecrets(config = {}) {
+  return {
+    ...(typeof config.userToken === "string" && config.userToken ? { userToken: config.userToken } : {}),
+    ...(typeof config.agentToken === "string" && config.agentToken ? { agentToken: config.agentToken } : {}),
+  };
 }
 
-export function saveConfig(config) {
+function persistedConfig(config, credentialStorage) {
+  const persisted = { ...config, credentialStorage };
+  delete persisted.userToken;
+  delete persisted.agentToken;
+  return persisted;
+}
+
+function writeConfigFile(config) {
   const dir = configDir();
   fs.mkdirSync(dir, { recursive: true });
   const file = configPath();
@@ -102,8 +107,39 @@ export function saveConfig(config) {
   return file;
 }
 
+export function loadConfig() {
+  const file = configPath();
+  if (!fs.existsSync(file)) return migrateLegacyConfig();
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    const embeddedSecrets = configSecrets(stored);
+    if (embeddedSecrets.userToken || embeddedSecrets.agentToken) {
+      // One-time migration from pre-0.11.3 plaintext config storage.
+      saveConfig(stored);
+      return stored;
+    }
+    const secrets = readSecrets(configDir(), { store: stored.credentialStorage });
+    return { ...stored, ...secrets };
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`Invalid Chat Relay config: ${file}`);
+    throw error;
+  }
+}
+
+export function saveConfig(config) {
+  const dir = configDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const storage = writeSecrets(dir, configSecrets(config));
+  return writeConfigFile(persistedConfig(config, storage));
+}
+
 export function clearConfig() {
   const file = configPath();
+  let storage;
+  if (fs.existsSync(file)) {
+    try { storage = JSON.parse(fs.readFileSync(file, "utf8"))?.credentialStorage; } catch {}
+  }
+  clearSecrets(configDir(), { store: storage });
   if (fs.existsSync(file)) fs.rmSync(file, { force: true });
 }
 
