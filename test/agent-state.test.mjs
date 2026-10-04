@@ -8,6 +8,8 @@ import {
   emptyAgentDiagnostics,
   recordAgentProcessEpoch,
   normalizeAgentHealth,
+  normalizeAgentLifecycle,
+  normalizeAgentDiagnosticReason,
   agentConnectionGeneration,
   isAuthoritativeAgentSocket,
   nextAgentConnectionGeneration,
@@ -120,4 +122,25 @@ test("disconnect diagnostics retention is bounded", () => {
   assert.equal(diagnostics.processEpochs.length, AGENT_PROCESS_EPOCH_LIMIT);
   assert.equal(diagnostics.events[0].at, new Date(6).toISOString());
   assert.equal(diagnostics.processEpochs[0].processId, 4);
+});
+
+test("upgrade lifecycle and generation diagnostics survive normalization", () => {
+  const lifecycle = normalizeAgentLifecycle({
+    state: "upgrade-pending",
+    drainStartedAt: "2026-10-04T00:00:00.000Z",
+    upgradeRequestedAt: "2026-10-04T00:00:01.000Z",
+    readyToUpgrade: true,
+    work: { total: 0 },
+  });
+  assert.equal(lifecycle.state, "upgrade-pending");
+  assert.equal(lifecycle.upgradeRequestedAt, "2026-10-04T00:00:01.000Z");
+  assert.equal(lifecycle.readyToUpgrade, true);
+
+  const health = normalizeAgentHealth({
+    serverConnectionGeneration: 42,
+    lastSocketError: "connection_generation_changed",
+  });
+  assert.equal(health.serverConnectionGeneration, 42);
+  assert.equal(health.lastSocketError, "connection_generation_changed");
+  assert.equal(normalizeAgentDiagnosticReason("upgrade_requested"), "upgrade_requested");
 });

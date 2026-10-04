@@ -476,7 +476,11 @@ export class Relay extends DurableObject {
         health,
       }), () => writeAgentAttachment(socket, { persistedEpochSignature: signature }));
       try {
-        socket.send(JSON.stringify({ control: "agent_heartbeat_ack", at: Date.now() }));
+        socket.send(JSON.stringify({
+          control: "agent_heartbeat_ack",
+          at: Date.now(),
+          connectionGeneration: agentConnectionGeneration(socket),
+        }));
       } catch {}
       return;
     }

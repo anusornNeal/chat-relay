@@ -11,7 +11,15 @@ export type AgentSocketAttachment = {
   platform?: string;
   arch?: string;
   capabilities?: string[];
-  lifecycle?: { state: string; drainStartedAt: string | null; restartRequestedAt: string | null; readyToRestart?: boolean; work: Record<string, number> };
+  lifecycle?: {
+    state: string;
+    drainStartedAt: string | null;
+    restartRequestedAt: string | null;
+    upgradeRequestedAt?: string | null;
+    readyToRestart?: boolean;
+    readyToUpgrade?: boolean;
+    work: Record<string, number>;
+  };
   health?: {
     reconnectCount: number;
     reconnectAttempt: number;
@@ -21,6 +29,7 @@ export type AgentSocketAttachment = {
     lastCloseCode: number | null;
     lastDisconnectReason: string | null;
     lastSocketError: string | null;
+    serverConnectionGeneration?: number | null;
     lastConnectionDurationMs: number | null;
     queues: Record<string, { concurrency: number; active: number; queued: number; maxQueued: number; queueTimeoutMs: number }>;
   };
@@ -72,6 +81,7 @@ function boundedInteger(value: unknown, max: number): number {
 const SAFE_AGENT_DIAGNOSTIC_REASONS = new Set([
   "heartbeat_ack_timeout", "transport_pong_timeout", "transport_ping_failed", "socket_closed",
   "credential_revoked", "credential_rejected", "protocol_incompatible", "restart_requested",
+  "upgrade_requested", "connection_generation_changed",
   "client_shutdown", "replaced", "heartbeat_timeout", "shutdown", "SIGINT", "SIGTERM",
 ]);
 const SAFE_NETWORK_ERROR_CODES = ["ENOTFOUND", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"];
@@ -201,14 +211,18 @@ export function normalizeAgentHello(message: any) {
 }
 
 export function normalizeAgentLifecycle(value: any) {
-  const state = ["running", "draining", "restart-pending"].includes(String(value?.state)) ? String(value.state) : "running";
+  const state = ["running", "draining", "restart-pending", "upgrade-pending"].includes(String(value?.state))
+    ? String(value.state)
+    : "running";
   const work = value?.work && typeof value.work === "object" ? value.work : {};
   const count = (key: string) => Math.max(0, Number(work[key]) || 0);
   return {
     state,
     drainStartedAt: normalizeAgentText(value?.drainStartedAt, 64),
     restartRequestedAt: normalizeAgentText(value?.restartRequestedAt, 64),
+    upgradeRequestedAt: normalizeAgentText(value?.upgradeRequestedAt, 64),
     readyToRestart: value?.readyToRestart === true,
+    readyToUpgrade: value?.readyToUpgrade === true,
     work: {
       activeSessions: count("activeSessions"),
       activeBatchJobs: count("activeBatchJobs"),
@@ -236,6 +250,9 @@ export function normalizeAgentHealth(value: any) {
     };
   }
   const closeCode = value?.lastCloseCode === null || value?.lastCloseCode === undefined ? NaN : Number(value.lastCloseCode);
+  const generation = value?.serverConnectionGeneration === null || value?.serverConnectionGeneration === undefined
+    ? NaN
+    : Number(value.serverConnectionGeneration);
   const duration = value?.lastConnectionDurationMs === null || value?.lastConnectionDurationMs === undefined ? NaN : Number(value.lastConnectionDurationMs);
   return {
     reconnectCount: bounded(value?.reconnectCount, 1_000_000),
@@ -246,6 +263,7 @@ export function normalizeAgentHealth(value: any) {
     lastCloseCode: Number.isInteger(closeCode) && closeCode >= 0 && closeCode <= 4999 ? closeCode : null,
     lastDisconnectReason: normalizeAgentDiagnosticReason(value?.lastDisconnectReason),
     lastSocketError: normalizeAgentDiagnosticReason(value?.lastSocketError),
+    serverConnectionGeneration: Number.isSafeInteger(generation) && generation > 0 ? generation : null,
     lastConnectionDurationMs: Number.isFinite(duration) && duration >= 0 ? Math.min(Math.trunc(duration), 365 * 24 * 60 * 60 * 1000) : null,
     queues,
   };

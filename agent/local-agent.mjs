@@ -352,6 +352,7 @@ function sendHeartbeat(socket) {
         lastDisconnectReason: connectionState.lastDisconnectReason,
         lastConnectionDurationMs: connectionState.lastConnectionDurationMs,
         lastSocketError: connectionState.lastSocketError,
+        serverConnectionGeneration: connectionState.serverConnectionGeneration,
         heartbeatAckWatchdog: heartbeatAckWatchdog.snapshot(now),
         queues: scheduler.snapshot(),
       },
@@ -477,6 +478,9 @@ function connect() {
 
     if (message?.control === "agent_heartbeat_ack") {
       heartbeatAckWatchdog.acknowledge();
+      if (!connectionState.markServerConnectionGeneration(message.connectionGeneration)) {
+        try { socket.terminate(); } catch {}
+      }
       return;
     }
     if (message?.control === "credential_revoked") {

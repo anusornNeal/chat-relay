@@ -41,6 +41,7 @@ export class AgentConnectionState {
     this.lastDisconnectReason = null;
     this.lastConnectionDurationMs = null;
     this.lastSocketError = null;
+    this.serverConnectionGeneration = null;
     this.reconnectAttempt = 0;
     this.reconnectCount = 0;
     this.nextReconnectAt = null;
@@ -58,6 +59,7 @@ export class AgentConnectionState {
     this.state = "connected";
     this.connectedAt = isoTime(now);
     this.disconnectedAt = null;
+    this.serverConnectionGeneration = null;
     this.reconnectAttempt = 0;
     this.nextReconnectAt = null;
     this.nextReconnectDelayMs = null;
@@ -85,6 +87,22 @@ export class AgentConnectionState {
 
   markSocketError(reason) {
     this.lastSocketError = cleanReason(reason);
+  }
+
+  markServerConnectionGeneration(value) {
+    if (value === null || value === undefined) return true;
+    const generation = Number(value);
+    if (!Number.isSafeInteger(generation) || generation <= 0) {
+      this.markSocketError("connection_generation_changed");
+      return false;
+    }
+    if (this.serverConnectionGeneration === null) {
+      this.serverConnectionGeneration = generation;
+      return true;
+    }
+    if (this.serverConnectionGeneration === generation) return true;
+    this.markSocketError("connection_generation_changed");
+    return false;
   }
 
   scheduleReconnect(delayMs, now = Date.now()) {
@@ -130,6 +148,7 @@ export class AgentConnectionState {
       lastDisconnectReason: this.lastDisconnectReason,
       lastConnectionDurationMs: this.lastConnectionDurationMs,
       lastSocketError: this.lastSocketError,
+      serverConnectionGeneration: this.serverConnectionGeneration,
       reconnectAttempt: this.reconnectAttempt,
       reconnectCount: this.reconnectCount,
       nextReconnectAt: this.nextReconnectAt,
