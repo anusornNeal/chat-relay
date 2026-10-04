@@ -20,12 +20,14 @@ let pendingDeleteUser = null;
 let dashboardPeriod = null;
 let dashboardRange = "today";
 let adminUsersCache = [];
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
 let callFilters = { userId: "", status: "", query: "", activityId: "", from: "", to: "", drilldown: false };
 const callPaging = { cursor: "", stack: [], nextCursor: null };
 const errorPaging = { cursor: "", stack: [], nextCursor: null };
 let errorMode = "attention";
+let userMode = "active";
 let runningClockTimer = null;
+let callSearchTimer = null;
 
 const BKK_TZ = "Asia/Bangkok";
 const API_TIMEOUT_MS = 12000;
@@ -915,6 +917,7 @@ async function loadCalls({ patch = false } = {}) {
   if (to) params.set("to", to);
   if (callPaging.cursor) params.set("cursor", callPaging.cursor);
   if (callFilters.status) params.set("status", callFilters.status);
+  if (callFilters.query.trim()) params.set("q", callFilters.query.trim());
   if (callFilters.activityId) params.set("activityId", callFilters.activityId);
   if (isAdmin() && callFilters.userId) params.set("userId", callFilters.userId);
   const data = await api("/admin/api/tool-calls?" + params);
@@ -933,7 +936,7 @@ async function loadCalls({ patch = false } = {}) {
   const liveMarkup =
     '<div class="section-toolbar">' + periodChips(dashboardPeriod) +
       '<span class="privacy-chip">' + icon("info") + "Safe metadata only</span></div>" +
-    (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>This page scanned up to 500 history rows. Use Older to continue; totals are a lower bound.</span></div>" : "") +
+    (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>This page hit the legacy history scan bound. Use Older to continue; totals are a lower bound.</span></div>" : "") +
     callFilterMarkup() +
     '<div class="table-wrap calls-table"><table><thead><tr><th>Time</th>' + (isAdmin() ? "<th>User</th>" : "") +
       "<th>Tool</th><th>Agent</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody>" + tableRows + "</tbody></table></div>" +
@@ -946,8 +949,13 @@ async function loadCalls({ patch = false } = {}) {
     search.oninput = () => {
       callFilters.query = search.value;
       applyCallSearchFilter();
+      clearTimeout(callSearchTimer);
+      callSearchTimer = setTimeout(async () => {
+        resetCallPaging();
+        await loadCalls({ patch: true });
+      }, 250);
     };
-    search.dispatchEvent(new Event("input"));
+    applyCallSearchFilter();
   }
   if ($("callUser")) $("callUser").onchange = async () => {
     callFilters.userId = $("callUser").value;
@@ -978,8 +986,8 @@ async function loadCalls({ patch = false } = {}) {
 async function loadUsers({ patch = false } = {}) {
   if (!isAdmin()) return switchView("overview");
   setHeader("Users", "Access, roles, and connected agents");
-  const data = await api("/admin/api/users?limit=100");
-  adminUsersCache = Array.isArray(data.items) ? data.items : adminUsersCache;
+  const deleted = userMode === "deleted";
+  const data = await api("/admin/api/users?limit=100&deleted=" + deleted);
   const rows = (data.items || []).map((user) => {
     const agentMeta = fmtNum(user.agentCount) + " assigned \u00b7 " + fmtNum(user.onlineAgentCount) + " online";
     const assignedAgents = Array.isArray(user.assignedAgents) ? user.assignedAgents : [];
@@ -1002,13 +1010,19 @@ async function loadUsers({ patch = false } = {}) {
   }).join("");
 
   const liveMarkup =
-    '<div class="filters-panel compact"><div class="filters-row"><label class="filter-control grow"><span>Search users</span><div class="input-with-icon">' +
+    '<div class="filters-panel compact"><div class="filters-row"><div class="error-mode-toggle"><button type="button" class="button small ' + (userMode === "active" ? "primary" : "") + '" data-user-mode="active">Active</button><button type="button" class="button small ' + (userMode === "deleted" ? "primary" : "") + '" data-user-mode="deleted">Deleted</button></div><label class="filter-control grow"><span>Search users</span><div class="input-with-icon">' +
       icon("search") + '<input id="userSearch" placeholder="Name, login, role, agent"></div></label></div></div>' +
     '<div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Agents</th><th>Created</th><th>Action</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="6"><div class="table-empty">No users.</div></td></tr>') + "</tbody></table></div>";
+      (rows || '<tr><td colspan="6"><div class="table-empty">' + (deleted ? "No deleted users." : "No active users.") + '</div></td></tr>') + "</tbody></table></div>";
   renderContent(liveMarkup, patch);
 
   bindTableFilter("userSearch");
+  document.querySelectorAll("[data-user-mode]").forEach((button) => button.onclick = async () => {
+    const nextMode = button.dataset.userMode === "deleted" ? "deleted" : "active";
+    if (nextMode === userMode) return;
+    userMode = nextMode;
+    await loadUsers({ patch: true });
+  });
   document.querySelectorAll("[data-delete]").forEach((button) => button.onclick = () => {
     pendingDeleteUser = button.dataset.delete;
     $("confirmCopy").textContent = "Disable dashboard and relay access for " + button.dataset.name + "?";

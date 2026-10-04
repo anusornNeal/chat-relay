@@ -686,12 +686,14 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const state = await registryState(env);
     const q = String(url.searchParams.get("q") || "").toLowerCase();
     const enabled = url.searchParams.get("enabled");
+    const deleted = url.searchParams.get("deleted");
     const agents = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
     const agentById = new Map(agents.map((agent: any) => [agent.id, agent]));
     const items = (state.users ?? [])
       .filter((user: any) =>
         (!q || String(user.id + " " + user.name + " " + (user.login ?? "")).toLowerCase().includes(q)) &&
-        (enabled === null || String(user.enabled) === enabled)
+        (enabled === null || String(user.enabled) === enabled) &&
+        (deleted === null || String(Boolean(user.deletedAt)) === deleted)
       )
       .map((user: any) => {
         const ids = new Set<string>();
@@ -766,7 +768,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
   if (path === "/admin/api/tool-calls" && request.method === "GET") {
     const query = new URLSearchParams();
-    for (const key of ["state", "limit", "cursor", "tool", "agentId", "from", "to", "activityId", "status"]) {
+    for (const key of ["state", "limit", "cursor", "tool", "agentId", "from", "to", "activityId", "status", "q"]) {
       const value = url.searchParams.get(key);
       if (value) query.set(key, value);
     }
