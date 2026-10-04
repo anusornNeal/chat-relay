@@ -15,6 +15,7 @@ type Pending = {
   resolve: (response: Response) => void;
   timeout: ReturnType<typeof setTimeout>;
   startedAt: number;
+  maxResponseBytes: number;
 };
 
 const TIMEOUT_MS = 30_000;
@@ -23,6 +24,9 @@ const AGENT_CONNECTION_GENERATION_KEY = "agent:connection-generation";
 const TEMP_ARTIFACT_DEFAULT_TTL_SECONDS = 300;
 const TEMP_ARTIFACT_MAX_TTL_SECONDS = 900;
 const TEMP_ARTIFACT_EXPIRED_TOMBSTONE_MS = 60_000;
+const MAX_NATIVE_SCREENSHOT_BYTES = 2 * 1024 * 1024;
+const MAX_NATIVE_SCREENSHOT_RESPONSE_BYTES = 3 * 1024 * 1024;
+const TEMP_SHOT_CHUNK_BYTES = 48 * 1024;
 const TEMP_ARTIFACT_MIME_TYPES = new Set([
   "text/plain; charset=utf-8",
   "text/markdown; charset=utf-8",
@@ -149,8 +153,9 @@ export class Relay extends DurableObject {
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(body.data), (c) => c.charCodeAt(0)); }
     catch { return error(400, screenshotOnly ? "invalid_screenshot" : "invalid_artifact"); }
-    if (bytes.byteLength <= 0 || bytes.byteLength > MAX_BYTES) {
-      return error(413, screenshotOnly ? "screenshot_too_large" : "artifact_too_large", { maxBytes: MAX_BYTES });
+    const maxArtifactBytes = screenshotOnly ? MAX_NATIVE_SCREENSHOT_BYTES : MAX_BYTES;
+    if (bytes.byteLength <= 0 || bytes.byteLength > maxArtifactBytes) {
+      return error(413, screenshotOnly ? "screenshot_too_large" : "artifact_too_large", { maxBytes: maxArtifactBytes });
     }
 
     const requestedTtl = Number(body?.ttlSeconds);
@@ -162,12 +167,28 @@ export class Relay extends DurableObject {
     const token = crypto.randomUUID().replaceAll("-", "");
     const expiresAt = Date.now() + ttlSeconds * 1000;
     const filename = screenshotOnly ? null : safeArtifactFilename(body?.filename);
-    await this.ctx.storage.put(prefix + token, {
-      mimeType,
-      data: body.data,
-      expiresAt,
-      ...(filename ? { filename } : {}),
-    });
+    if (screenshotOnly && bytes.byteLength > MAX_BYTES) {
+      const chunkCount = Math.ceil(bytes.byteLength / TEMP_SHOT_CHUNK_BYTES);
+      for (let index = 0; index < chunkCount; index += 1) {
+        const start = index * TEMP_SHOT_CHUNK_BYTES;
+        const end = Math.min(bytes.byteLength, start + TEMP_SHOT_CHUNK_BYTES);
+        await this.ctx.storage.put(`temp-shot-chunk:${token}:${index}`, bytes.slice(start, end));
+      }
+      await this.ctx.storage.put(prefix + token, {
+        mimeType,
+        chunked: true,
+        chunkCount,
+        byteLength: bytes.byteLength,
+        expiresAt,
+      });
+    } else {
+      await this.ctx.storage.put(prefix + token, {
+        mimeType,
+        data: body.data,
+        expiresAt,
+        ...(filename ? { filename } : {}),
+      });
+    }
 
     const currentAlarm = await this.ctx.storage.getAlarm();
     if (currentAlarm === null || currentAlarm > expiresAt) {
@@ -198,8 +219,26 @@ export class Relay extends DurableObject {
     }
 
     let bytes: Uint8Array;
-    try { bytes = Uint8Array.from(atob(artifact.data), (c) => c.charCodeAt(0)); }
-    catch {
+    try {
+      if (artifact.chunked === true && prefix === "temp-shot:" && Number.isInteger(artifact.chunkCount)) {
+        const chunks: Uint8Array[] = [];
+        let totalBytes = 0;
+        for (let index = 0; index < artifact.chunkCount; index += 1) {
+          const chunk = await this.ctx.storage.get<Uint8Array>(`temp-shot-chunk:${token}:${index}`);
+          if (!(chunk instanceof Uint8Array)) throw new Error("missing_screenshot_chunk");
+          chunks.push(chunk);
+          totalBytes += chunk.byteLength;
+        }
+        bytes = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+      } else {
+        bytes = Uint8Array.from(atob(artifact.data), (c) => c.charCodeAt(0));
+      }
+    } catch {
       await this.ctx.storage.delete(key);
       return error(500, invalidCode);
     }
@@ -323,14 +362,15 @@ export class Relay extends DurableObject {
   private handleMessage(socket: WebSocket, data: string | ArrayBuffer): void {
     if (!isAuthoritativeAgentSocket(socket, this.resolveAgent()) || typeof data !== "string") return;
 
-    if (new TextEncoder().encode(data).byteLength > MAX_BYTES) {
-      const requestId = data.slice(0, 256).match(/"requestId"\s*:\s*"([^"]+)"/)?.[1];
-      if (!requestId) return;
-      const pending = this.pending.get(requestId);
-      if (!pending) return;
-      clearTimeout(pending.timeout);
-      this.pending.delete(requestId);
-      pending.resolve(error(502, "agent_response_too_large", { maxBytes: MAX_BYTES }));
+    const responseBytes = new TextEncoder().encode(data).byteLength;
+    const requestIdHint = data.slice(0, 256).match(/"requestId"\s*:\s*"([^"]+)"/)?.[1];
+    const pendingHint = requestIdHint ? this.pending.get(requestIdHint) : undefined;
+    const maxResponseBytes = pendingHint?.maxResponseBytes ?? MAX_BYTES;
+    if (responseBytes > maxResponseBytes) {
+      if (!requestIdHint || !pendingHint) return;
+      clearTimeout(pendingHint.timeout);
+      this.pending.delete(requestIdHint);
+      pendingHint.resolve(error(502, "agent_response_too_large", { maxBytes: maxResponseBytes }));
       return;
     }
 
@@ -461,7 +501,14 @@ export class Relay extends DurableObject {
         resolve(error(504, "agent_timeout"));
       }, TIMEOUT_MS);
 
-      this.pending.set(requestId, { resolve, timeout, startedAt: Date.now() });
+      const payload = (body as any).payload;
+      const isNativeScreenshot = payload?.action === "desktop.screenshot" && payload?.native === true;
+      this.pending.set(requestId, {
+        resolve,
+        timeout,
+        startedAt: Date.now(),
+        maxResponseBytes: isNativeScreenshot ? MAX_NATIVE_SCREENSHOT_RESPONSE_BYTES : MAX_BYTES,
+      });
       try {
         agent.send(JSON.stringify({ requestId, payload: body.payload }));
       } catch {

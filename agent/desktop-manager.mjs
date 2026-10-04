@@ -2,7 +2,7 @@ import { BoundedLane } from "./capability-scheduler.mjs";
 import { PersistentDesktopRunner } from "./windows-desktop-runner.mjs";
 import { MacOSDesktopRunner } from "./macos-desktop-runner.mjs";
 
-const MAX_SCREENSHOT_BINARY_BYTES = 32 * 1024;
+const MAX_SCREENSHOT_BINARY_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_LENGTH = 8192;
 const MAX_CLIPBOARD_TEXT_LENGTH = 8192;
 const MIN_SCREENSHOT_WIDTH = 320;
@@ -201,8 +201,9 @@ export class DesktopManager {
       return { ok: false, error: "invalid_monitor" };
     }
 
+    const native = input.native === true;
     const maxWidth = input.maxWidth === undefined ? 960 : Number(input.maxWidth);
-    if (!Number.isInteger(maxWidth) || maxWidth < MIN_SCREENSHOT_WIDTH || maxWidth > MAX_SCREENSHOT_WIDTH) {
+    if (!native && (!Number.isInteger(maxWidth) || maxWidth < MIN_SCREENSHOT_WIDTH || maxWidth > MAX_SCREENSHOT_WIDTH)) {
       return { ok: false, error: "invalid_max_width" };
     }
     const quality = input.quality === undefined ? 58 : Number(input.quality);
@@ -210,7 +211,7 @@ export class DesktopManager {
       return { ok: false, error: "invalid_quality" };
     }
 
-    const result = await this.runner("screenshot", { monitor, maxWidth, quality });
+    const result = await this.runner("screenshot", { monitor, maxWidth, quality, native });
     return this.normalizeScreenshotResult(result);
   }
 

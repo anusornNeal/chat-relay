@@ -572,6 +572,7 @@ async function screenshotToolResult(env: Env, agentId: string | undefined, resul
       virtualDesktopHeight: payload.virtualDesktopHeight,
       monitorCount: payload.monitorCount,
       jpegQuality: payload.jpegQuality,
+      native: payload.native === true,
       tempUrl: baseUrl ? baseUrl + tempPath : tempPath,
       expiresAt: new Date(temp.expiresAt).toISOString(),
       expiresInSeconds: 300,
@@ -581,7 +582,7 @@ async function screenshotToolResult(env: Env, agentId: string | undefined, resul
     return {
       structuredContent: metadata,
       content: [
-        { type: "image" as const, data: payload.data, mimeType: payload.mimeType },
+        ...(payload.native === true ? [] : [{ type: "image" as const, data: payload.data, mimeType: payload.mimeType }]),
         { type: "text" as const, text: JSON.stringify(metadata) },
       ],
     };
@@ -1005,18 +1006,19 @@ function createMcpServer(env: Env, user: AuthUser) {
   server.registerTool(
     "screenshot",
     {
-      description: "Capture a Windows monitor and return a temporary JPEG URL valid for 5 minutes. monitor can be primary, secondary, or a zero-based monitor index. Requires local desktop opt-in and desktop_read permission.",
+      description: "Capture a full monitor and return a temporary JPEG URL valid for 5 minutes. monitor can be primary, secondary, or a zero-based monitor index. Set native=true to preserve native pixel dimensions; otherwise maxWidth controls the bounded preview size. Requires local desktop opt-in and desktop_read permission.",
       inputSchema: {
         agentId: agentIdSchema,
         monitor: z.union([z.enum(["primary", "secondary"]), z.number().int().min(0).max(15)]).optional(),
         maxWidth: z.number().int().min(320).max(1920).optional(),
         quality: z.number().int().min(20).max(85).optional(),
+        native: z.boolean().optional(),
       },
       annotations: annotationsForTool("screenshot"),
       ...oauthToolSecurity(),
     } as any,
-    async ({ agentId, monitor, maxWidth, quality }: any) => instrumentTool(env, user, "screenshot", { agentId, monitor, maxWidth, quality }, async () => {
-      const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot", monitor, maxWidth, quality });
+    async ({ agentId, monitor, maxWidth, quality, native }: any) => instrumentTool(env, user, "screenshot", { agentId, monitor, maxWidth, quality, native }, async () => {
+      const call = await callAgent(env, user, "desktop_read", agentId, { action: "desktop.screenshot", monitor, maxWidth, quality, native });
       return {
         value: await screenshotToolResult(env, call.agentId, call),
         ok: call.ok,

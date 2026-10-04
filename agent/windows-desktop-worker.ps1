@@ -228,20 +228,26 @@ function Invoke-Screenshot($Payload) {
       Select-Object -First 1
     if ($null -eq $codec) { return Result-Error "capture_failed" }
 
-    $maxBytes = 32768
+    $native = $Payload.native -eq $true
+    $maxBytes = if ($native) { 2097152 } else { 32768 }
     $requestedMaxWidth = if ($null -eq $Payload.maxWidth) { 960 } else { [int]$Payload.maxWidth }
-    if ($requestedMaxWidth -lt 320 -or $requestedMaxWidth -gt 1920) { return Result-Error "invalid_max_width" }
+    if (-not $native -and ($requestedMaxWidth -lt 320 -or $requestedMaxWidth -gt 1920)) { return Result-Error "invalid_max_width" }
     $requestedQuality = if ($null -eq $Payload.quality) { 58 } else { [int]$Payload.quality }
     if ($requestedQuality -lt 20 -or $requestedQuality -gt 85) { return Result-Error "invalid_quality" }
-    $targetWidth = [Math]::Min($bounds.Width, $requestedMaxWidth)
+    $targetWidth = if ($native) { $bounds.Width } else { [Math]::Min($bounds.Width, $requestedMaxWidth) }
     $targetHeight = [Math]::Max(1, [int][Math]::Round($bounds.Height * ($targetWidth / [double]$bounds.Width)))
-    $qualities = @([long]$requestedQuality, [long][Math]::Min($requestedQuality, 42), [long][Math]::Min($requestedQuality, 30), 20L) | Select-Object -Unique
+    $qualities = if ($native) {
+      @([long]$requestedQuality, 75L, 60L, 45L, 30L, 20L) | Where-Object { $_ -le $requestedQuality } | Select-Object -Unique
+    } else {
+      @([long]$requestedQuality, [long][Math]::Min($requestedQuality, 42), [long][Math]::Min($requestedQuality, 30), 20L) | Select-Object -Unique
+    }
     $bytes = $null
     $finalWidth = $targetWidth
     $finalHeight = $targetHeight
     $finalQuality = $requestedQuality
 
-    for ($sizeAttempt = 0; $sizeAttempt -lt 3 -and $null -eq $bytes; $sizeAttempt++) {
+    $maxSizeAttempts = if ($native) { 1 } else { 3 }
+    for ($sizeAttempt = 0; $sizeAttempt -lt $maxSizeAttempts -and $null -eq $bytes; $sizeAttempt++) {
       $resized = New-Object System.Drawing.Bitmap $targetWidth, $targetHeight
       $draw = [System.Drawing.Graphics]::FromImage($resized)
       try {
@@ -305,6 +311,7 @@ function Invoke-Screenshot($Payload) {
       virtualDesktopHeight = $virtualBounds.Height
       monitorCount = $monitorCount
       jpegQuality = $finalQuality
+      native = $native
       desktopOriginX = $bounds.Left
       desktopOriginY = $bounds.Top
       desktopWidth = $bounds.Width

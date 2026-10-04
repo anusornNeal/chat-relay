@@ -124,15 +124,20 @@ export class MacOSDesktopRunner {
         return { ok: false, error: "capture_failed" };
       }
 
-      let targetWidth = Math.min(Number(args.maxWidth || 960), originalInfo.width);
+      const native = args.native === true;
+      let targetWidth = native ? originalInfo.width : Math.min(Number(args.maxWidth || 960), originalInfo.width);
       const requestedQuality = Math.max(20, Math.min(85, Number(args.quality || 58)));
-      const qualities = [...new Set([requestedQuality, 55, 45, 35, 25, 20].filter((q) => q <= requestedQuality))];
+      const maxBytes = native ? (2 * 1024 * 1024) : MAX_SCREENSHOT_BINARY_BYTES;
+      const qualities = [...new Set((native
+        ? [requestedQuality, 75, 60, 45, 30, 20]
+        : [requestedQuality, 55, 45, 35, 25, 20]
+      ).filter((q) => q <= requestedQuality))];
       let data = null;
       let finalWidth = 0;
       let finalHeight = 0;
       let finalQuality = requestedQuality;
 
-      for (let attempt = 0; attempt < 5 && !data; attempt += 1) {
+      for (let attempt = 0; attempt < (native ? 1 : 5) && !data; attempt += 1) {
         for (const quality of qualities) {
           await fs.rm(output, { force: true });
           await execNative("/usr/bin/sips", [
@@ -143,7 +148,7 @@ export class MacOSDesktopRunner {
             "--out", output,
           ]);
           const bytes = await fs.readFile(output);
-          if (bytes.byteLength > 0 && bytes.byteLength <= MAX_SCREENSHOT_BINARY_BYTES) {
+          if (bytes.byteLength > 0 && bytes.byteLength <= maxBytes) {
             const resized = parseSipsSize(await execNative("/usr/bin/sips", [
               "-g", "pixelWidth", "-g", "pixelHeight", output,
             ]));
@@ -181,6 +186,7 @@ export class MacOSDesktopRunner {
         virtualDesktopHeight: Number(info.virtualDesktopHeight),
         monitorCount: info.screens.length,
         jpegQuality: finalQuality,
+        native,
         timing: {
           captureMs,
           encodeMs: Math.max(0, Date.now() - encodeStartedAt),
