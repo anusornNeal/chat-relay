@@ -340,7 +340,7 @@ function scheduleDataRetry() {
   const delay = Math.min(DATA_RETRY_MAX_MS, 60000 * (2 ** Math.min(dataRetryAttempt, 4)));
   dataRetryAttempt += 1;
   const freshness = $("freshness");
-  if (freshness) freshness.textContent = "Retrying data…";
+  if (freshness) freshness.textContent = "Retrying data\u2026";
   dataRetryTimer = setTimeout(() => {
     dataRetryTimer = null;
     void refreshActiveIncrementally();
@@ -429,8 +429,8 @@ async function loadActive({ patch = false } = {}) {
     if (error.message !== "unauthorized") {
       const timeout = error.message === "request_timeout";
       setNotice(timeout
-        ? "Dashboard data timed out. Retrying automatically…"
-        : "Dashboard data is temporarily unavailable. Retrying automatically…", true);
+        ? "Dashboard data timed out. Retrying automatically\u2026"
+        : "Dashboard data is temporarily unavailable. Retrying automatically\u2026", true);
       scheduleDataRetry();
     }
     return false;
@@ -608,10 +608,10 @@ function resetErrorPaging() {
 function paginationMarkup(kind, paging, hasMore) {
   const page = paging.stack.length + 1;
   return '<div class="pagination-bar" data-live-key="' + kind + '-pagination">' +
-    '<span class="pagination-summary">Page ' + page + ' Â· up to ' + PAGE_SIZE + ' rows</span>' +
+    '<span class="pagination-summary">Page ' + page + ' \u00b7 up to ' + PAGE_SIZE + ' rows</span>' +
     '<div class="pagination-actions">' +
-      '<button class="button small" type="button" data-page-newer="' + kind + '"' + (page === 1 ? " disabled" : "") + '>â† Newer</button>' +
-      '<button class="button small" type="button" data-page-older="' + kind + '"' + (!hasMore ? " disabled" : "") + '>Older â†’</button>' +
+      '<button class="button small" type="button" data-page-newer="' + kind + '"' + (page === 1 ? " disabled" : "") + '>\u2190 Newer</button>' +
+      '<button class="button small" type="button" data-page-older="' + kind + '"' + (!hasMore ? " disabled" : "") + '>Older \u2192</button>' +
     "</div></div>";
 }
 function bindPaging(kind, paging, load) {
@@ -642,11 +642,11 @@ function chartMarkup(buckets = []) {
     const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
     const start = bkkHourMinute(bucket.from);
     const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
-    const label = start + "â€“" + end;
+    const label = start + "\u2013" + end;
     const current = index === buckets.length - 1 ? " current" : "";
     return '<button class="chart-bar' + current + '" style="--bar-height:' + height + '%" data-chart-from="' + esc(bucket.from) + '" data-chart-to="' + esc(bucket.to) + '"' +
       ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
-      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations Â· ' + fmtNum(errors) + ' operational errors</span><small>Open filtered tool calls</small></span>' +
+      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations \u00b7 ' + fmtNum(errors) + ' operational errors</span><small>Open filtered tool calls</small></span>' +
       '<span class="bar-fill"></span>' +
       "</button>";
   }).join("");
@@ -665,9 +665,9 @@ async function loadOverview({ patch = false } = {}) {
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
   dashboardRange = dashboardPeriod.range || dashboardRange;
   const m = data.usage || {};
-  const exactMeta = data.bounded ? "partial â€” safety bound reached" : "today";
+  const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : "today";
   const cards = [
-    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only Â· excludes Worker HTTP requests"),
+    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
     metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
     metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), m.p95Approximate ? "p95 is approximate" : exactMeta),
     metricCard(
@@ -786,7 +786,7 @@ function callFilterMarkup() {
   const statusOptions = [["", "All statuses"], ["running", "Running"], ["success", "Success"], ["error", "Error"]]
     .map(([value, label]) => '<option value="' + value + '"' + (callFilters.status === value ? " selected" : "") + ">" + label + "</option>").join("");
   const windowLabel = callFilters.drilldown && callFilters.from
-    ? bkkHourMinute(callFilters.from) + "â€“" + bkkHourMinute(new Date(Date.parse(callFilters.to) + 1).toISOString())
+    ? bkkHourMinute(callFilters.from) + "\u2013" + bkkHourMinute(new Date(Date.parse(callFilters.to) + 1).toISOString())
     : "Today";
   const related = callFilters.activityId
     ? '<button id="clearActivity" class="button subtle activity-filter-chip" type="button">' + icon("activity") + esc(activityLabel(callFilters.activityId)) + ' ' + icon("x") + "</button>"
@@ -805,7 +805,7 @@ function rememberAgentName(event) {
   if (event?.agentId && event?.agentName) agentNameCache.set(String(event.agentId), String(event.agentName));
 }
 function callAgentName(event) {
-  return event?.agentName || (event?.agentId ? agentNameCache.get(String(event.agentId)) : "") || "Resolvingâ€¦";
+  return event?.agentName || (event?.agentId ? agentNameCache.get(String(event.agentId)) : "") || "Resolving\u2026";
 }
 function userDisplayName(userId) {
   const id = String(userId || "");
@@ -970,7 +970,7 @@ async function loadUsers({ patch = false } = {}) {
   const data = await api("/admin/api/users?limit=100");
   adminUsersCache = Array.isArray(data.items) ? data.items : adminUsersCache;
   const rows = (data.items || []).map((user) => {
-    const agentMeta = fmtNum(user.agentCount) + " assigned Â· " + fmtNum(user.onlineAgentCount) + " online";
+    const agentMeta = fmtNum(user.agentCount) + " assigned \u00b7 " + fmtNum(user.onlineAgentCount) + " online";
     const assignedAgents = Array.isArray(user.assignedAgents) ? user.assignedAgents : [];
     const agentMarkup = assignedAgents.length
       ? '<div class="agent-assignment-list">' + assignedAgents.map((agent) =>
@@ -1024,7 +1024,7 @@ function diagnosticStageLabel(stage) {
 function diagnosticResult(event) {
   if (event.exitCode !== null && event.exitCode !== undefined) return "Exit " + event.exitCode;
   if (event.statusCode !== null && event.statusCode !== undefined) return "HTTP " + event.statusCode;
-  return "â€”";
+  return "\u2014";
 }
 async function loadErrors({ patch = false } = {}) {
   detailRecords.clear();
@@ -1053,9 +1053,9 @@ async function loadErrors({ patch = false } = {}) {
     const rowKey = event.toolCallId || [event.timestamp, event.userId, event.tool, event.agentId].join(":");
     return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Error diagnostic">' +
       '<td class="time-cell"><strong>' + esc(bkkTime(event.timestamp)) + "</strong></td>" +
-      '<td><div class="error-cell"><span class="error-icon ' + esc(event.severity || "warning") + '">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(category + " Â· " + retry) + "</span></div></div></td>" +
+      '<td><div class="error-cell"><span class="error-icon ' + esc(event.severity || "warning") + '">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(category + " \u00b7 " + retry) + "</span></div></div></td>" +
       '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + '</span></td><td>' + esc(event.tool) + "</td>" +
-      '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolvingâ€¦") + "</strong></div></td>" +
+      '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving\u2026") + "</strong></div></td>" +
       "<td>" + esc(fmtMs(event.durationMs)) + "</td>" +
       '<td><span class="diagnostic-result">' + esc(diagnosticResult(event)) + '</span></td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
   }).join("") : '<tr><td colspan="8"><div class="table-empty">' + icon("check") + '<strong>' + (errorMode === "attention" ? "No operational errors today" : "No failures today") + '</strong><span>' + (errorMode === "attention" ? "Handled tool failures are hidden from this view." : "Safe diagnostics will appear here if a tool invocation fails.") + '</span></div></td></tr>';
@@ -1114,7 +1114,7 @@ $("closeDetail").onclick = () => $("detailDialog").close();
     currentUser = data.user;
     $("loginView").hidden = true;
     $("appView").hidden = false;
-    $("who").textContent = (currentUser.name || currentUser.login) + " Â· " + (isAdmin() ? "Admin" : "User");
+    $("who").textContent = (currentUser.name || currentUser.login) + " \u00b7 " + (isAdmin() ? "Admin" : "User");
     $("roleBadge").innerHTML = icon(isAdmin() ? "server" : "users") + (isAdmin() ? "Admin workspace" : "User workspace");
     renderNav();
     showLoading();

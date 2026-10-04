@@ -4,6 +4,8 @@ import vm from "node:vm";
 
 // Execute the production scheduling functions with deterministic browser timers.
 const source = readFileSync(new URL("../dashboard/app.js", import.meta.url), "utf8");
+assert.equal(/[\u00c2\u00c3\ufffd]/.test(source), false, "dashboard source must not contain mojibake markers");
+assert.equal(/\u00e2(?:\u2020|\u20ac)/.test(source), false, "dashboard source must not contain double-decoded UTF-8 sequences");
 const names = ["dashboardAvailable", "scheduleDataRetry", "refreshActiveIncrementally", "queueLiveRefresh", "stopFallbackPolling", "scheduleFallbackPolling", "scheduleReconnect", "stopLiveChannel", "connectLiveChannel", "updateDashboardAvailability"];
 const functions = names.map(name => {
   const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
