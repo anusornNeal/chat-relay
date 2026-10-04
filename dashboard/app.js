@@ -866,6 +866,11 @@ function callEventMatchesFilters(event) {
   if (isAdmin() && callFilters.userId && event.userId !== callFilters.userId) return false;
   if (callFilters.activityId && event.activityId !== callFilters.activityId) return false;
   if (callFilters.status && event.status !== callFilters.status) return false;
+  const q = String(callFilters.query || "").trim().toLowerCase();
+  if (q) {
+    const searchable = [event.tool, event.agentId, event.agentName].filter(Boolean).join(" ").toLowerCase();
+    if (!searchable.includes(q)) return false;
+  }
   return true;
 }
 function callRowMarkup(event) {
@@ -884,13 +889,6 @@ function callRowMarkup(event) {
     "<td>" + duration + "</td>" +
     "<td>" + statusBadge(event.status || (event.ok ? "success" : "error")) + "</td>" +
     '<td class="row-chevron">' + icon("chevron") + "</td></tr>";
-}
-function applyCallSearchFilter() {
-  const search = $("toolSearch");
-  const q = String(search?.value || callFilters.query || "").trim().toLowerCase();
-  document.querySelectorAll("[data-filter-row]").forEach((row) => {
-    row.hidden = Boolean(q && !row.textContent.toLowerCase().includes(q));
-  });
 }
 function lifecycleCallEvent(data) {
   const started = data.startedAt || data.timestamp;
@@ -932,7 +930,6 @@ function applyToolLifecycle(data) {
   const rows = [...tbody.querySelectorAll("[data-filter-row]")];
   for (const row of rows.slice(PAGE_SIZE)) row.remove();
   bindDetailRows();
-  applyCallSearchFilter();
   ensureRunningClock();
   touchFreshness();
 }
@@ -956,9 +953,13 @@ async function loadCalls({ patch = false } = {}) {
   const data = await api("/admin/api/tool-calls?" + params);
   callPaging.nextCursor = data.nextCursor || null;
   const rawItems = Array.isArray(data.items) ? data.items : [];
+  const q = String(callFilters.query || "").trim().toLowerCase();
   const terminalItems = (!callPaging.cursor && (!callFilters.status || callFilters.status === "running")
     ? activeTerminalRows(data.terminals || [])
-    : []).filter((item) => !isAdmin() || !callFilters.userId || item.userId === callFilters.userId);
+    : []).filter((item) =>
+      (!isAdmin() || !callFilters.userId || item.userId === callFilters.userId) &&
+      (!q || [item.tool, item.agentId, item.agentName].filter(Boolean).join(" ").toLowerCase().includes(q))
+    );
   const seen = new Set(rawItems.map((item) => item.toolCallId).filter(Boolean));
   const items = [...terminalItems.filter((item) => !item.toolCallId || !seen.has(item.toolCallId)), ...rawItems]
     .sort((a, b) => Date.parse(b.timestamp || b.startedAt || "") - Date.parse(a.timestamp || a.startedAt || ""));
@@ -982,14 +983,12 @@ async function loadCalls({ patch = false } = {}) {
   if (search) {
     search.oninput = () => {
       callFilters.query = search.value;
-      applyCallSearchFilter();
       clearTimeout(callSearchTimer);
       callSearchTimer = setTimeout(async () => {
         resetCallPaging();
         await loadCalls({ patch: true });
       }, 250);
     };
-    applyCallSearchFilter();
   }
   if ($("callUser")) $("callUser").onchange = async () => {
     callFilters.userId = $("callUser").value;
