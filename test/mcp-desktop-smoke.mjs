@@ -15,6 +15,7 @@ const vars = fs.existsSync(".dev.vars")
 
 const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8807").replace(/\/$/, "");
 const adminToken = process.env.TEST_ADMIN_TOKEN || vars.ADMIN_TOKEN || "test-admin";
+const nativeJpeg = Buffer.alloc(1_900_000, 0x41).toString("base64");
 const tinyJpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/EB//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EB//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EB//2Q==";
 
 function assert(condition, message) {
@@ -237,10 +238,12 @@ async function mcpTests() {
     const action = message.payload?.action;
     let payload;
     if (action === "desktop.screenshot") {
+      const native = message.payload?.native === true;
+      const data = native ? nativeJpeg : tinyJpeg;
       payload = {
         ok: true,
         mimeType: "image/jpeg",
-        data: tinyJpeg,
+        data,
         width: 1,
         height: 1,
         desktopOriginX: 0,
@@ -255,7 +258,8 @@ async function mcpTests() {
         virtualDesktopHeight: 1080,
         monitorCount: 2,
         jpegQuality: message.payload?.quality ?? 58,
-        byteLength: Buffer.from(tinyJpeg, "base64").byteLength,
+        byteLength: Buffer.from(data, "base64").byteLength,
+        native,
       };
     } else if (action === "desktop.step") {
       if (message.payload?.captureAfter !== true) {
@@ -343,6 +347,20 @@ async function mcpTests() {
   assert(tempShot.headers.get("content-type") === "image/jpeg", "temporary screenshot mime type invalid");
   const tempBytes = Buffer.from(await tempShot.arrayBuffer());
   assert(tempBytes.equals(Buffer.from(tinyJpeg, "base64")), "temporary screenshot bytes mismatch");
+
+  const nativeShot = await rpc(reader.token, 29, "tools/call", {
+    name: "screenshot",
+    arguments: { agentId, native: true },
+  });
+  assert(!nativeShot.result?.isError, "native screenshot failed");
+  assert(!nativeShot.result?.content?.some((item) => item.type === "image"), "native screenshot unexpectedly embedded image bytes");
+  const nativeMeta = JSON.parse(nativeShot.result?.content?.find((item) => item.type === "text")?.text || "{}");
+  assert(nativeMeta.native === true && nativeMeta.byteLength === 1_900_000, "native screenshot metadata invalid");
+  const nativePath = nativeMeta.tempUrl.startsWith("http") ? new URL(nativeMeta.tempUrl).pathname : nativeMeta.tempUrl;
+  const nativeResponse = await fetch(base + nativePath);
+  assert(nativeResponse.ok, "chunked native screenshot URL was not readable");
+  const nativeBytes = Buffer.from(await nativeResponse.arrayBuffer());
+  assert(nativeBytes.length === 1_900_000 && nativeBytes.equals(Buffer.from(nativeJpeg, "base64")), "chunked native screenshot bytes mismatch");
 
   const readerClipboard = await rpc(reader.token, 30, "tools/call", { name: "clipboard_read", arguments: { agentId } });
   assert(!readerClipboard.result?.isError && JSON.parse(readerClipboard.result?.content?.[0]?.text || "{}").payload?.text === "mock clipboard", "desktop_read clipboard failed");

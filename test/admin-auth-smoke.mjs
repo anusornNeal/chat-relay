@@ -104,12 +104,18 @@ if (!browserUsers.response.ok) throw new Error(`browser admin API read failed: $
 
 const managedLogin = `managed-${suffix}`;
 const managedPassword = `Managed-${suffix}-Password!`;
-const managedCreate = await browser("/admin/api/users", {
-  method: "POST", cookie, csrf, origin: base,
-  body: { name: "Managed User", login: managedLogin, password: managedPassword, admin: false },
+const managedCreate = await admin("/admin/users", "POST", {
+  name: "Managed User",
+  id: `managed-${suffix}`,
 });
-if (!managedCreate.response.ok || managedCreate.data.user?.admin !== false) throw new Error(`dashboard user create failed: ${managedCreate.text}`);
+if (!managedCreate.response.ok || !managedCreate.data.user?.id) throw new Error(`managed user create failed: ${managedCreate.text}`);
 const managedId = managedCreate.data.user.id;
+const managedCreds = await admin("/admin/users/login", "POST", {
+  userId: managedId,
+  login: managedLogin,
+  password: managedPassword,
+});
+if (!managedCreds.response.ok) throw new Error(`managed user credentials failed: ${managedCreds.text}`);
 const managedAuth = await browser("/admin/session/login", { method: "POST", body: { login: managedLogin, password: managedPassword } });
 if (!managedAuth.response.ok) throw new Error("new user could not login");
 const managedCookie = (managedAuth.response.headers.get("set-cookie") || "").split(";")[0];

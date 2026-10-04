@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import WebSocket from "ws";
 
 const vars = fs.existsSync(".dev.vars")
   ? Object.fromEntries(
@@ -13,6 +14,7 @@ const vars = fs.existsSync(".dev.vars")
 
 const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8804").replace(/\/$/, "");
 const adminToken = process.env.TEST_ADMIN_TOKEN || vars.ADMIN_TOKEN || "test-admin";
+const quotaAgentId = "quota-smoke-" + Date.now().toString(36);
 
 async function request(path, options = {}) {
   const response = await fetch(base + path, options);
@@ -51,7 +53,7 @@ async function createReader(label) {
   }
   const grant = await admin("/admin/grants", "POST", {
     userId: created.data.user.id,
-    agentId: "default",
+    agentId: quotaAgentId,
     scopes: ["read"],
   });
   if (!grant.response.ok) throw new Error("grant failed: " + grant.text);
@@ -69,13 +71,13 @@ async function mcpTool(user, id, name = "ping_agent") {
       jsonrpc: "2.0",
       id,
       method: "tools/call",
-      params: { name, arguments: name === "ping_agent" ? { agentId: "default" } : {} },
+      params: { name, arguments: name === "ping_agent" ? { agentId: quotaAgentId } : {} },
     }),
   });
 }
 
 async function recentCalls(user) {
-  const result = await request("/relay?agentId=default", {
+  const result = await request("/relay?agentId=" + encodeURIComponent(quotaAgentId), {
     method: "POST",
     headers: {
       authorization: "Bearer " + user.token,
@@ -92,6 +94,38 @@ async function recentCalls(user) {
 function pingCount(items) {
   return items.filter((item) => item.action === "ping").length;
 }
+
+const createdAgent = await admin("/admin/agents", "POST", {
+  name: "Quota Test Agent",
+  id: quotaAgentId,
+});
+if (!createdAgent.response.ok || !createdAgent.data.token) {
+  throw new Error("quota agent creation failed: " + createdAgent.text);
+}
+
+const recentAgentCalls = [];
+const agentSocket = new WebSocket(
+  base.replace(/^http/, "ws") + "/agent?agentId=" + encodeURIComponent(quotaAgentId),
+  { headers: { authorization: "Bearer " + createdAgent.data.token } },
+);
+await new Promise((resolve, reject) => {
+  agentSocket.once("open", resolve);
+  agentSocket.once("error", reject);
+});
+agentSocket.on("message", (raw) => {
+  const message = JSON.parse(String(raw));
+  const action = message.payload?.action;
+  let payload;
+  if (action === "agent.recentCalls") {
+    payload = recentAgentCalls.slice(-100);
+  } else if (action === "ping") {
+    recentAgentCalls.push({ action: "ping", at: Date.now() });
+    payload = { ok: true, action: "pong" };
+  } else {
+    payload = { ok: true, action };
+  }
+  agentSocket.send(JSON.stringify({ requestId: message.requestId, payload }));
+});
 
 await setPolicy({ rateLimit: 2, rateWindowSeconds: 1, dailyCallQuota: 0 });
 const rateUser = await createReader("Rate Limit Test");
@@ -168,10 +202,10 @@ if (!limits.response.ok ||
     limits.data.source !== "admin") {
   throw new Error("admin quota status invalid: " + limits.text);
 }
-const rejectionKinds = new Set((limits.data.recentRejections || []).map((event) => event.errorClass));
-if (!rejectionKinds.has("rate_limited") || !rejectionKinds.has("quota_exceeded")) {
-  throw new Error("quota rejections missing from admin observability: " + limits.text);
+if ("recentRejections" in limits.data) {
+  throw new Error("removed quota rejection history is still exposed");
 }
 
 await setPolicy({ resetToDefaults: true });
+try { agentSocket.close(); } catch {}
 console.log("quota/rate-limit smoke test passed");

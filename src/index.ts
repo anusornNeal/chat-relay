@@ -22,10 +22,10 @@ const TIMEOUT_MS = 30_000;
 const AGENT_DIAGNOSTICS_KEY = "agent:diagnostics";
 const TEMP_ARTIFACT_DEFAULT_TTL_SECONDS = 300;
 const TEMP_ARTIFACT_MAX_TTL_SECONDS = 900;
-const TEMP_ARTIFACT_EXPIRED_TOMBSTONE_MS = 60_000;
 const MAX_NATIVE_SCREENSHOT_BYTES = 2 * 1024 * 1024;
 const MAX_NATIVE_SCREENSHOT_RESPONSE_BYTES = 3 * 1024 * 1024;
-const TEMP_SHOT_CHUNK_BYTES = 48 * 1024;
+const TEMP_ARTIFACT_TABLE = "relay_temp_artifact_v3";
+const TEMP_ARTIFACT_SQL_CHUNK_BYTES = 1_850_000;
 const TEMP_ARTIFACT_MIME_TYPES = new Set([
   "text/plain; charset=utf-8",
   "text/markdown; charset=utf-8",
@@ -50,6 +50,22 @@ export class Relay extends DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.relayEnv = env;
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS ${TEMP_ARTIFACT_TABLE} (
+        token TEXT NOT NULL,
+        part INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        data BLOB NOT NULL,
+        filename TEXT,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY (token, part)
+      ) WITHOUT ROWID
+    `);
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS relay_temp_artifact_v3_expires
+      ON ${TEMP_ARTIFACT_TABLE}(expires_at)
+    `);
     this.agent = this.recoverAgentSocket();
   }
 
@@ -138,11 +154,7 @@ export class Relay extends DurableObject {
     screenshotOnly = false,
   ): Promise<Response> {
     if (request.method !== "POST") return error(405, "method_not_allowed");
-
-    let body: any;
-    try { body = await request.json(); }
-    catch { return error(400, "invalid_json"); }
-
+    const body = await request.json<any>().catch(() => null);
     const mimeType = typeof body?.mimeType === "string" ? body.mimeType : "";
     if (typeof body?.data !== "string" ||
         (screenshotOnly ? mimeType !== "image/jpeg" : !TEMP_ARTIFACT_MIME_TYPES.has(mimeType))) {
@@ -166,28 +178,27 @@ export class Relay extends DurableObject {
     const token = crypto.randomUUID().replaceAll("-", "");
     const expiresAt = Date.now() + ttlSeconds * 1000;
     const filename = screenshotOnly ? null : safeArtifactFilename(body?.filename);
-    if (screenshotOnly && bytes.byteLength > MAX_BYTES) {
-      const chunkCount = Math.ceil(bytes.byteLength / TEMP_SHOT_CHUNK_BYTES);
-      for (let index = 0; index < chunkCount; index += 1) {
-        const start = index * TEMP_SHOT_CHUNK_BYTES;
-        const end = Math.min(bytes.byteLength, start + TEMP_SHOT_CHUNK_BYTES);
-        await this.ctx.storage.put(`temp-shot-chunk:${token}:${index}`, bytes.slice(start, end));
-      }
-      await this.ctx.storage.put(prefix + token, {
-        mimeType,
-        chunked: true,
-        chunkCount,
-        byteLength: bytes.byteLength,
-        expiresAt,
-      });
-    } else {
-      await this.ctx.storage.put(prefix + token, {
-        mimeType,
-        data: body.data,
-        expiresAt,
-        ...(filename ? { filename } : {}),
-      });
+    const kind = prefix === "temp-shot:" ? "shot" : "artifact";
+    const chunks: ArrayBuffer[] = [];
+    for (let offset = 0; offset < bytes.byteLength; offset += TEMP_ARTIFACT_SQL_CHUNK_BYTES) {
+      const end = Math.min(bytes.byteLength, offset + TEMP_ARTIFACT_SQL_CHUNK_BYTES);
+      chunks.push(bytes.buffer.slice(bytes.byteOffset + offset, bytes.byteOffset + end) as ArrayBuffer);
     }
+
+    // Normal captures/artifacts are one WITHOUT ROWID SQL row. A native JPEG
+    // above Cloudflare's 2 MB row ceiling is split into only two rows instead
+    // of the old dozens of 48 KiB KV writes.
+    const values = chunks.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const bindings: Array<string | number | ArrayBuffer | null> = [];
+    chunks.forEach((chunk, part) => {
+      bindings.push(token, part, kind, mimeType, chunk, filename, expiresAt);
+    });
+    this.ctx.storage.sql.exec(
+      `INSERT INTO ${TEMP_ARTIFACT_TABLE}
+       (token, part, kind, mime_type, data, filename, expires_at)
+       VALUES ${values}`,
+      ...bindings,
+    );
 
     const currentAlarm = await this.ctx.storage.getAlarm();
     if (currentAlarm === null || currentAlarm > expiresAt) {
@@ -208,11 +219,55 @@ export class Relay extends DurableObject {
   ): Promise<Response> {
     if (!/^[a-f0-9]{32}$/.test(token)) return error(404, "not_found");
 
+    const kind = prefix === "temp-shot:" ? "shot" : "artifact";
+    const rows = this.ctx.storage.sql.exec<{
+      part: number;
+      mime_type: string;
+      data: ArrayBuffer;
+      filename: string | null;
+      expires_at: number;
+    }>(
+      `SELECT part, mime_type, data, filename, expires_at
+       FROM ${TEMP_ARTIFACT_TABLE}
+       WHERE token = ? AND kind = ?
+       ORDER BY part`,
+      token,
+      kind,
+    ).toArray();
+    const row = rows[0];
+    if (row) {
+      if (Date.now() >= Number(row.expires_at)) {
+        this.ctx.storage.sql.exec(`DELETE FROM ${TEMP_ARTIFACT_TABLE} WHERE token = ?`, token);
+        return error(410, "expired");
+      }
+      const parts = rows.map((entry) => new Uint8Array(entry.data as ArrayBuffer));
+      const totalBytes = parts.reduce((sum, part) => sum + part.byteLength, 0);
+      const bytes = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const part of parts) {
+        bytes.set(part, offset);
+        offset += part.byteLength;
+      }
+      const filename = safeArtifactFilename(row.filename);
+      return new Response(bytes, {
+        headers: {
+          "content-type": row.mime_type || "application/octet-stream",
+          "cache-control": "private, no-store, max-age=0",
+          "content-disposition": filename ? `inline; filename="${filename}"` : "inline",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    }
+
+    // Rolling-deploy compatibility for artifacts created by the old KV/chunk path.
     const key = prefix + token;
     const artifact = await this.ctx.storage.get<any>(key);
     if (!artifact) return error(404, "not_found");
-
     if (artifact.expired === true || typeof artifact.expiresAt !== "number" || Date.now() >= artifact.expiresAt) {
+      if (artifact.chunked === true && prefix === "temp-shot:" && Number.isInteger(artifact.chunkCount)) {
+        const chunkKeys = Array.from({ length: artifact.chunkCount }, (_, index) => `temp-shot-chunk:${token}:${index}`);
+        if (chunkKeys.length) await this.ctx.storage.delete(chunkKeys);
+      }
       await this.ctx.storage.delete(key);
       return error(410, "expired");
     }
@@ -220,19 +275,16 @@ export class Relay extends DurableObject {
     let bytes: Uint8Array;
     try {
       if (artifact.chunked === true && prefix === "temp-shot:" && Number.isInteger(artifact.chunkCount)) {
-        const chunks: Uint8Array[] = [];
-        let totalBytes = 0;
-        for (let index = 0; index < artifact.chunkCount; index += 1) {
-          const chunk = await this.ctx.storage.get<Uint8Array>(`temp-shot-chunk:${token}:${index}`);
-          if (!(chunk instanceof Uint8Array)) throw new Error("missing_screenshot_chunk");
-          chunks.push(chunk);
-          totalBytes += chunk.byteLength;
-        }
+        const chunkKeys = Array.from({ length: artifact.chunkCount }, (_, index) => `temp-shot-chunk:${token}:${index}`);
+        const chunks = await this.ctx.storage.get<Uint8Array>(chunkKeys);
+        const ordered = chunkKeys.map((chunkKey) => chunks.get(chunkKey));
+        if (ordered.some((chunk) => !(chunk instanceof Uint8Array))) throw new Error("missing_screenshot_chunk");
+        const totalBytes = ordered.reduce((sum, chunk) => sum + chunk!.byteLength, 0);
         bytes = new Uint8Array(totalBytes);
         let offset = 0;
-        for (const chunk of chunks) {
-          bytes.set(chunk, offset);
-          offset += chunk.byteLength;
+        for (const chunk of ordered) {
+          bytes.set(chunk!, offset);
+          offset += chunk!.byteLength;
         }
       } else {
         bytes = Uint8Array.from(atob(artifact.data), (c) => c.charCodeAt(0));
@@ -254,35 +306,33 @@ export class Relay extends DurableObject {
   }
 
   private async cleanupTempArtifacts(): Promise<void> {
+    const now = Date.now();
+
+    this.ctx.storage.sql.exec(
+      `DELETE FROM ${TEMP_ARTIFACT_TABLE} WHERE expires_at <= ?`,
+      now,
+    );
+    const sqlNext = this.ctx.storage.sql.exec<{ expires_at: number | null }>(
+      `SELECT MIN(expires_at) AS expires_at FROM ${TEMP_ARTIFACT_TABLE}`,
+    ).toArray()[0]?.expires_at;
+    let nextExpiry = sqlNext === null || sqlNext === undefined ? null : Number(sqlNext);
+
+    // Clean up legacy KV artifacts during rolling upgrades. New artifacts never
+    // enter these prefixes.
     const [shots, artifacts] = await Promise.all([
       this.ctx.storage.list<any>({ prefix: "temp-shot:" }),
       this.ctx.storage.list<any>({ prefix: "temp-artifact:" }),
     ]);
-    const now = Date.now();
-    let nextExpiry: number | null = null;
-
-    for (const entries of [shots, artifacts]) {
+    for (const [entries, isShot] of [[shots, true], [artifacts, false]] as const) {
       for (const [key, artifact] of entries) {
         const expiresAt = typeof artifact?.expiresAt === "number" ? artifact.expiresAt : 0;
-        const deleteAfter = artifact?.expired === true && typeof artifact?.deleteAfter === "number"
-          ? artifact.deleteAfter
-          : null;
-        if (deleteAfter !== null) {
-          if (deleteAfter <= now) {
-            await this.ctx.storage.delete(key);
-          } else if (nextExpiry === null || deleteAfter < nextExpiry) {
-            nextExpiry = deleteAfter;
-          }
-          continue;
-        }
         if (expiresAt <= now) {
-          const tombstoneUntil = now + TEMP_ARTIFACT_EXPIRED_TOMBSTONE_MS;
-          await this.ctx.storage.put(key, {
-            expired: true,
-            expiresAt,
-            deleteAfter: tombstoneUntil,
-          });
-          if (nextExpiry === null || tombstoneUntil < nextExpiry) nextExpiry = tombstoneUntil;
+          if (isShot && artifact?.chunked === true && Number.isInteger(artifact.chunkCount)) {
+            const token = key.slice("temp-shot:".length);
+            const chunkKeys = Array.from({ length: artifact.chunkCount }, (_, index) => `temp-shot-chunk:${token}:${index}`);
+            if (chunkKeys.length) await this.ctx.storage.delete(chunkKeys);
+          }
+          await this.ctx.storage.delete(key);
         } else if (nextExpiry === null || expiresAt < nextExpiry) {
           nextExpiry = expiresAt;
         }
