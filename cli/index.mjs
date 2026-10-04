@@ -11,6 +11,8 @@ function parseOptions(args) {
     else if (arg === "--force") options.force = true;
     else if (arg === "--desktop") options.desktopEnabled = true;
     else if (arg === "--no-desktop") options.desktopEnabled = false;
+    else if (arg === "--plain") options.tuiEnabled = false;
+    else if (arg === "--tui") options.tuiEnabled = true;
     else if (arg === "--relay") options.relayUrl = args[++index];
     else if (arg.startsWith("--relay=")) options.relayUrl = arg.slice(8);
     else if (arg === "--root") options.allowedRoot = args[++index];
@@ -44,6 +46,8 @@ Options:
   --agent-id <id>               Stable agent identifier
   --desktop                     Enable Windows desktop screenshot/input access
   --no-desktop                  Disable desktop access (default)
+  --plain                       Use legacy line-by-line logs
+  --tui                         Force interactive terminal UI
   --no-open                     Do not open the browser automatically
   --force                       Force a new login
 

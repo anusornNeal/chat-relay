@@ -4,6 +4,8 @@ import path from "node:path";
 import { loadConfig, saveConfig } from "./config.mjs";
 import { login, requestJson } from "./device-login.mjs";
 import { acquireRunnerOwnership, RunnerAlreadyActiveError } from "./runner-ownership.mjs";
+import { getAgentVersion } from "../agent/protocol.mjs";
+import { RemoteTui, shouldUseTui } from "./tui.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let stopping = false;
@@ -55,10 +57,11 @@ function printSummary(config) {
   console.log("");
 }
 
-function spawnAgent(config) {
+function spawnAgent(config, { tui = null } = {}) {
   const agentPath = path.join(packageRoot, "agent", "local-agent.mjs");
   const cwd = String(config.allowedRoots || process.cwd()).split(";")[0] || process.cwd();
-  return spawn(process.execPath, [agentPath], {
+  const useTui = Boolean(tui);
+  const child = spawn(process.execPath, [agentPath], {
     cwd,
     env: {
       ...process.env,
@@ -69,10 +72,13 @@ function spawnAgent(config) {
       TERMINAL_ENABLED: config.terminalEnabled === false ? "0" : "1",
       DESKTOP_ENABLED: config.desktopEnabled === true ? "1" : "0",
       ALLOWED_ROOTS: config.allowedRoots,
+      CHAT_RELAY_UI: useTui ? "ipc" : "plain",
     },
-    stdio: "inherit",
+    stdio: useTui ? ["inherit", "inherit", "inherit", "ipc"] : "inherit",
     windowsHide: false,
   });
+  if (useTui) child.on("message", (message) => tui.handleMessage(message));
+  return child;
 }
 
 export async function remote(options = {}) {
@@ -91,6 +97,7 @@ export async function remote(options = {}) {
     console.error(error.message);
     return 1;
   }
+  let tui = null;
   try {
     if (options.allowedRoot && options.allowedRoot !== config.allowedRoots) {
       config = { ...config, allowedRoots: options.allowedRoot };
@@ -101,10 +108,13 @@ export async function remote(options = {}) {
       saveConfig(config);
     }
 
-    printSummary(config);
+    const useTui = shouldUseTui(options);
+    tui = useTui ? new RemoteTui({ config, version: getAgentVersion() }) : null;
+    if (tui) tui.start();
+    else printSummary(config);
 
     while (!stopping) {
-      const child = spawnAgent(config);
+      const child = spawnAgent(config, { tui });
 
       const stop = () => {
         stopping = true;
@@ -145,6 +155,7 @@ export async function remote(options = {}) {
       }
     }
   } finally {
+    try { tui?.stop?.(); } catch {}
     await ownership.release();
   }
 }

@@ -7,6 +7,7 @@ import { CapabilityScheduler } from "./capability-scheduler.mjs";
 import { AgentConnectionState } from "./connection-state.mjs";
 import { buildAgentHello } from "./protocol.mjs";
 import { AgentLifecycle, AGENT_RESTART_EXIT_CODE } from "./lifecycle.mjs";
+import { humanizeToolCall } from "./toolcall-summary.mjs";
 import {
   HeartbeatAckWatchdog,
   HEARTBEAT_ACK_TIMEOUT_REASON,
@@ -19,6 +20,24 @@ const agentName = process.env.AGENT_NAME || agentId;
 const reconnectMs = Number(process.env.RECONNECT_MS ?? 2000);
 const terminalEnabled = process.env.TERMINAL_ENABLED === "1";
 const desktopEnabled = process.env.DESKTOP_ENABLED === "1";
+const ipcUiEnabled = process.env.CHAT_RELAY_UI === "ipc";
+
+function emitUi(event, payload = {}) {
+  if (!ipcUiEnabled || typeof process.send !== "function") return;
+  try { process.send({ type: "chat-relay-ui", event, at: new Date().toISOString(), ...payload }); } catch {}
+}
+
+function plainLog(...args) {
+  if (!ipcUiEnabled) console.log(...args);
+}
+
+function plainError(...args) {
+  if (!ipcUiEnabled) {
+    console.error(...args);
+    return;
+  }
+  emitUi("system", { level: "error", message: args.map((item) => String(item)).join(" ") });
+}
 const desktopAdapter = createDesktopPlatformAdapter({ platform: process.platform });
 const agentHello = buildAgentHello({
   platform: desktopAdapter.platform,
@@ -104,7 +123,7 @@ function currentWorkSummary() {
 const lifecycle = new AgentLifecycle({ workSummary: currentWorkSummary });
 
 if (!relayUrl || !agentToken) {
-  console.error("RELAY_URL and AGENT_TOKEN are required");
+  plainError("RELAY_URL and AGENT_TOKEN are required");
   process.exit(1);
 }
 
@@ -358,8 +377,15 @@ function scheduleReconnect(code, reason) {
   const isTransientAbnormalClose = Number(code) === 1006 && stableConnectionMs >= FAST_RECONNECT_STABLE_MS;
   const delay = isTransientAbnormalClose ? FAST_RECONNECT_MS : connectionState.nextDelay();
   connectionState.scheduleReconnect(delay);
+  emitUi("connection", {
+    state: "reconnecting",
+    reconnects: connectionState.snapshot().reconnectCount,
+    delayMs: delay,
+    closeCode: code ?? null,
+    reason: reason || "socket_closed",
+  });
   clearReconnectTimer();
-  console.log(`Reconnect scheduled in ${delay}ms`);
+  plainLog(`Reconnect scheduled in ${delay}ms`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -380,7 +406,7 @@ function requireProtocolUpdate(details = {}) {
   desktop.close();
   const expected = details.expectedProtocolVersion ?? "current";
   const received = details.receivedProtocolVersion ?? agentHello.protocolVersion;
-  console.error(`Agent protocol is incompatible (local=${received}, relay=${expected}). Update Chat Relay, then reconnect.`);
+  plainError(`Agent protocol is incompatible (local=${received}, relay=${expected}). Update Chat Relay, then reconnect.`);
   setImmediate(() => process.exit(3));
 }
 
@@ -395,8 +421,8 @@ function requireReauthorization(reason = "credential_revoked") {
   try { socket?.terminate(); } catch {}
   terminals.close();
   desktop.close();
-  console.error("Agent credential was revoked or rejected.");
-  console.error('Recovery: run "chat-relay login --force", then "chat-relay remote".');
+  plainError("Agent credential was revoked or rejected.");
+  plainError('Recovery: run "chat-relay login --force", then "chat-relay remote".');
   setImmediate(() => process.exit(2));
 }
 
@@ -404,10 +430,14 @@ function connect() {
   if (stopping || reauthorizationRequired) return;
   clearReconnectTimer();
   connectionState.markConnecting();
-  console.log(`Connecting to ${wsUrl}`);
-  console.log(`Terminal access: ${terminalEnabled ? "enabled" : "disabled"}`);
+  emitUi("connection", {
+    state: connectionState.snapshot().reconnectCount > 0 ? "reconnecting" : "connecting",
+    reconnects: connectionState.snapshot().reconnectCount,
+  });
+  plainLog(`Connecting to ${wsUrl}`);
+  plainLog(`Terminal access: ${terminalEnabled ? "enabled" : "disabled"}`);
   const desktopConfig = desktop.getConfig();
-  console.log("Desktop access: " + (!desktopEnabled ? "disabled" : desktopConfig.supported ? "enabled" : `unsupported (${desktopConfig.platform})`));
+  plainLog("Desktop access: " + (!desktopEnabled ? "disabled" : desktopConfig.supported ? "enabled" : `unsupported (${desktopConfig.platform})`));
 
   const socket = new WebSocket(wsUrl, {
     headers: { Authorization: `Bearer ${agentToken}` },
@@ -418,8 +448,9 @@ function connect() {
     if (socket !== activeSocket) return;
     socket.send(JSON.stringify(agentHello));
     connectionState.markConnected();
+    emitUi("connection", { state: "connected", reconnects: connectionState.snapshot().reconnectCount });
     startHeartbeat(socket);
-    console.log("Agent connected");
+    plainLog("Agent connected");
   });
 
   socket.on("pong", () => {
@@ -458,6 +489,8 @@ function connect() {
     const action = message.payload && typeof message.payload === "object"
       ? String(message.payload.action ?? "unknown")
       : "unknown";
+    const callSummary = humanizeToolCall(message.payload);
+    emitUi("tool:start", { requestId: message.requestId, action, summary: callSummary });
     let scheduleMeta = { lane: "unknown", queueWaitMs: 0, queueDepthAtStart: 0, activeAtStart: 0 };
     let handlerDurationMs = 0;
     try {
@@ -474,6 +507,7 @@ function connect() {
       recentCalls.push({
         at: new Date().toISOString(),
         action,
+        summary: callSummary,
         durationMs: Date.now() - startedAt,
         queueWaitMs: scheduleMeta.queueWaitMs,
         handlerDurationMs,
@@ -483,6 +517,14 @@ function connect() {
         ok: !(result && typeof result === "object" && result.ok === false),
       });
       if (recentCalls.length > 100) recentCalls.shift();
+      emitUi("tool:end", {
+        requestId: message.requestId,
+        action,
+        summary: callSummary,
+        ok: !(result && typeof result === "object" && result.ok === false),
+        durationMs: Date.now() - startedAt,
+        ...(result && typeof result === "object" && result.ok === false && result.error ? { error: String(result.error) } : {}),
+      });
       sendSocketResponse(socket, message.requestId, result, {
         agentQueueWaitMs: scheduleMeta.queueWaitMs,
         agentHandlerMs: handlerDurationMs,
@@ -492,6 +534,7 @@ function connect() {
       recentCalls.push({
         at: new Date().toISOString(),
         action,
+        summary: callSummary,
         durationMs: Date.now() - startedAt,
         queueWaitMs: scheduleMeta.queueWaitMs,
         handlerDurationMs,
@@ -500,6 +543,14 @@ function connect() {
         error: error instanceof Error ? error.message : "agent_error",
       });
       if (recentCalls.length > 100) recentCalls.shift();
+      emitUi("tool:end", {
+        requestId: message.requestId,
+        action,
+        summary: callSummary,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : "agent_error",
+      });
       sendSocketResponse(socket, message.requestId, {
         ok: false,
         error: error instanceof Error ? error.message : "agent_error",
@@ -527,7 +578,7 @@ function connect() {
     activeSocket = null;
     stopHeartbeat();
     const reasonText = reason.toString();
-    console.log("Agent disconnected (" + code + ") " + reasonText);
+    plainLog("Agent disconnected (" + code + ") " + reasonText);
     if (code === 4001 || reasonText === "credential_revoked") {
       requireReauthorization("credential_revoked");
       return;
@@ -542,7 +593,7 @@ function connect() {
   socket.on("error", (error) => {
     if (socket === activeSocket && !stopping && !reauthorizationRequired) {
       connectionState.markSocketError(error.message);
-      console.error("WebSocket error:", error.message);
+      plainError("WebSocket error:", error.message);
     }
   });
 }
