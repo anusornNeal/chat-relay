@@ -149,6 +149,37 @@ const window = (from, to, filter = {}) =>
   "/window?" + new URLSearchParams({ from, to, ...filter });
 {
   const f = fixture();
+  f.reset();
+  const disabled = await f.call("/quota/check", {
+    userId: "alice",
+    defaultPolicy: { rateLimit: 0, rateWindowSeconds: 60, dailyCallQuota: 0 },
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.allowed, true);
+  assert.equal(f.stats.puts, 0);
+  assert.equal([...f.records.keys()].some((key) => key.startsWith("quota:user:")), false);
+
+  f.reset();
+  const success = await f.call("/record", event("2026-10-04T08:00:00.000Z"));
+  assert.equal(success.status, 200);
+  assert.equal(f.stats.puts, 3);
+  assert.equal([...f.records.keys()].some((key) => key.startsWith("day:")), false);
+  assert.equal([...f.records.keys()].some((key) => key.startsWith("event:")), false);
+  assert.equal((await f.call("/query?day=2026-10-04")).metric.calls, 1);
+  assert.equal((await f.call("/query?from=2026-10-04&to=2026-10-04")).days[0].metric.calls, 1);
+
+  f.reset();
+  const failure = await f.call("/record", event("2026-10-04T08:01:00.000Z", {
+    ok: false,
+    errorCode: "agent_offline",
+  }));
+  assert.equal(failure.status, 200);
+  assert.equal(f.stats.puts, 4);
+  assert.equal([...f.records.keys()].filter((key) => key.startsWith("event:")).length, 1);
+  console.log("PASS disabled quota zero writes; success 3 aggregate writes; failure adds one raw error row");
+}
+{
+  const f = fixture();
   const from = "2026-09-01T17:00:00.000Z",
     to = "2026-10-01T16:59:59.999Z";
   // >20k legacy records are migrated without safety truncation; all filter intersections survive.

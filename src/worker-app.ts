@@ -106,6 +106,7 @@ type ToolActivityContext = {
 const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
 
 const REQUEST_CACHE_TTL_MS = 10_000;
+const QUOTA_DISABLED_CACHE_TTL_MS = 60_000;
 const REQUEST_CACHE_MAX_ENTRIES = 512;
 
 type TimedCacheEntry<T> = { value: T; expiresAt: number };
@@ -212,7 +213,7 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
   if (!response.ok) return error(503, "quota_unavailable");
   const decision = await response.json<QuotaDecision>();
   if (decision.policy?.rateLimit === 0 && decision.policy?.dailyCallQuota === 0) {
-    quotaDisabledUntil = Date.now() + REQUEST_CACHE_TTL_MS;
+    quotaDisabledUntil = Date.now() + QUOTA_DISABLED_CACHE_TTL_MS;
   }
   if (decision.allowed) return null;
 

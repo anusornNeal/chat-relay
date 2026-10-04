@@ -1,7 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DashboardTopic } from "./dashboard-hub";
 import { UsageAggregates } from "./usage-aggregates";
-import { UsageQueryIndex } from "./usage-query";
 
 type UsageEnv = { DASHBOARD: DurableObjectNamespace };
 
@@ -57,16 +56,6 @@ export type QuotaPolicy = {
   dailyCallQuota: number;
 };
 
-type Metric = {
-  calls: number;
-  errors: number;
-  durationMs: number;
-  requestBytes: number;
-  responseBytes: number;
-  minDurationMs: number;
-  maxDurationMs: number;
-};
-
 type QuotaState = {
   rateWindowStartMs: number;
   rateCount: number;
@@ -98,44 +87,6 @@ export function normalizeQuotaPolicy(
     rateWindowSeconds: boundedInt(value?.rateWindowSeconds, fallback.rateWindowSeconds, 1, 3600),
     dailyCallQuota: boundedInt(value?.dailyCallQuota, fallback.dailyCallQuota, 0, 10000000),
   };
-}
-
-const emptyMetric = (): Metric => ({
-  calls: 0,
-  errors: 0,
-  durationMs: 0,
-  requestBytes: 0,
-  responseBytes: 0,
-  minDurationMs: Number.MAX_SAFE_INTEGER,
-  maxDurationMs: 0,
-});
-
-function addMetric(metric: Metric | undefined, event: UsageEvent): Metric {
-  const next = metric ?? emptyMetric();
-  next.calls += 1;
-  next.errors += event.ok ? 0 : 1;
-  next.durationMs += Math.max(0, Math.round(event.durationMs));
-  next.requestBytes += Math.max(0, Math.round(event.requestBytes));
-  next.responseBytes += Math.max(0, Math.round(event.responseBytes));
-  next.minDurationMs = Math.min(next.minDurationMs, Math.max(0, Math.round(event.durationMs)));
-  next.maxDurationMs = Math.max(next.maxDurationMs, Math.max(0, Math.round(event.durationMs)));
-  return next;
-}
-
-function publicMetric(metric: Metric | undefined) {
-  if (!metric) return null;
-  return {
-    ...metric,
-    minDurationMs: metric.calls ? metric.minDurationMs : 0,
-    avgDurationMs: metric.calls ? metric.durationMs / metric.calls : 0,
-    errorRate: metric.calls ? metric.errors / metric.calls : 0,
-  };
-}
-
-function percentile95(values: number[]) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * 0.95) - 1))];
 }
 
 function safePart(value: string) {
@@ -276,28 +227,12 @@ function nextUtcDay(nowMs: number) {
 export class Usage extends DurableObject {
   private readonly usageEnv: UsageEnv;
   private readonly aggregates: UsageAggregates;
-  private readonly queryIndex: UsageQueryIndex;
   private readonly lastOverviewPublishAt = new Map<string, number>();
 
   constructor(ctx: DurableObjectState, env: UsageEnv) {
     super(ctx, env);
     this.usageEnv = env;
     this.aggregates = new UsageAggregates(ctx.storage, event => !event.ok && classifyFailure(event).operational);
-    this.queryIndex = new UsageQueryIndex(ctx.storage, event => classifyFailure(event).operational);
-  }
-
-  private async continueQueryIndexBackfill() {
-    if (!this.queryIndex.available) return;
-    try {
-      const done = await this.queryIndex.backfillStep();
-      if (!done) await this.ctx.storage.setAlarm(Date.now() + 1000);
-    } catch {
-      await this.ctx.storage.setAlarm(Date.now() + 5000).catch(() => {});
-    }
-  }
-
-  async alarm(): Promise<void> {
-    await this.continueQueryIndexBackfill();
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -334,13 +269,27 @@ export class Usage extends DurableObject {
 
       const nowMs = Number.isFinite(Number(body?.nowMs)) ? Number(body.nowMs) : Date.now();
       const defaultPolicy = normalizeQuotaPolicy(body?.defaultPolicy);
-      const key = "quota:user:" + safePart(userId);
+      const override = await this.ctx.storage.get<QuotaPolicy>("quota:policy");
+      const policy = normalizeQuotaPolicy(override ?? defaultPolicy, defaultPolicy);
+      const windowMs = policy.rateWindowSeconds * 1000;
+      const rateWindowStartMs = Math.floor(nowMs / windowMs) * windowMs;
+      const rateResetAt = new Date(rateWindowStartMs + windowMs).toISOString();
+      const dailyResetAt = new Date(nextUtcDay(nowMs)).toISOString();
 
+      if (policy.rateLimit === 0 && policy.dailyCallQuota === 0) {
+        return Response.json({
+          allowed: true,
+          policy,
+          source: override ? "admin" : "environment",
+          rateRemaining: null,
+          dailyRemaining: null,
+          rateResetAt,
+          dailyResetAt,
+        });
+      }
+
+      const key = "quota:user:" + safePart(userId);
       const decision = await this.ctx.storage.transaction(async (txn) => {
-        const override = await txn.get<QuotaPolicy>("quota:policy");
-        const policy = normalizeQuotaPolicy(override ?? defaultPolicy, defaultPolicy);
-        const windowMs = policy.rateWindowSeconds * 1000;
-        const rateWindowStartMs = Math.floor(nowMs / windowMs) * windowMs;
         const day = new Date(nowMs).toISOString().slice(0, 10);
         const existing = await txn.get<QuotaState>(key);
         const state: QuotaState = {
@@ -350,11 +299,8 @@ export class Usage extends DurableObject {
           dayCount: existing?.day === day ? existing.dayCount : 0,
           updatedAt: new Date(nowMs).toISOString(),
         };
-        const rateResetAt = new Date(rateWindowStartMs + windowMs).toISOString();
-        const dailyResetAt = new Date(nextUtcDay(nowMs)).toISOString();
 
         if (policy.rateLimit > 0 && state.rateCount >= policy.rateLimit) {
-          await txn.put(key, state);
           return {
             allowed: false,
             code: "rate_limited",
@@ -367,14 +313,14 @@ export class Usage extends DurableObject {
         }
 
         if (policy.dailyCallQuota > 0 && state.dayCount >= policy.dailyCallQuota) {
-          await txn.put(key, state);
           return {
             allowed: false,
             code: "quota_exceeded",
             policy,
             source: override ? "admin" : "environment",
             retryAt: dailyResetAt,
-            resetAt: dailyResetAt,            remaining: 0,
+            resetAt: dailyResetAt,
+            remaining: 0,
           };
         }
 
@@ -430,32 +376,11 @@ export class Usage extends DurableObject {
         responseBytes: Number.isFinite(Number(body.responseBytes)) ? Number(body.responseBytes) : 0,
       };
       if (!event.ok) Object.assign(event, normalizeFailureDiagnostics(event));
-      const day = event.timestamp.slice(0, 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-        return Response.json({ error: "invalid_usage_timestamp" }, { status: 400 });
-      }
-
-      const metricKeys = [
-        `day:${day}:total`,
-        `day:${day}:user:${safePart(event.userId)}`,
-        `day:${day}:tool:${safePart(event.tool)}`,
-        ...(event.agentId ? [`day:${day}:agent:${safePart(event.agentId)}`] : []),
-      ];
       const eventKey = !event.ok ? `event:${event.timestamp}:${crypto.randomUUID()}` : undefined;
       await this.ctx.storage.transaction(async txn => {
         await this.aggregates.record(txn, event);
-        const writes: Record<string, Metric> = {};
-        for (const key of metricKeys) writes[key] = addMetric(await txn.get<Metric>(key), event);
-        await txn.put(writes);
         if (eventKey) await txn.put(eventKey, event);
       });
-      if (eventKey) {
-        try {
-          this.queryIndex.upsert(eventKey, event);
-        } catch {
-          await this.queryIndex.markDirty().catch(() => {});
-        }
-      }
       this.aggregates.invalidate(event);
       if (!event.ok) {
         await publishDashboard(this.usageEnv, ["overview", "errors"], event.userId);
@@ -491,11 +416,6 @@ export class Usage extends DurableObject {
         for (const key of keys) if (await this.aggregates.preserve(txn, records.get(key)!)) preserved.push(key);
         for (let offset = 0; offset < preserved.length; offset += 128) await txn.delete(preserved.slice(offset,offset+128));
       });
-      try {
-        this.queryIndex.delete(preserved);
-      } catch {
-        await this.queryIndex.markDirty().catch(() => {});
-      }
       this.aggregates.invalidate();
       const status = {
         ranAt: new Date().toISOString(),
@@ -577,59 +497,8 @@ export class Usage extends DurableObject {
           (!legacy || olderThanCursor(event, legacy));
       };
 
-      const canUseQueryIndex = this.queryIndex.available && !legacy;
-      const queryIndexReady = canUseQueryIndex && await this.queryIndex.isReady();
-      if (canUseQueryIndex && !queryIndexReady) {
-        this.ctx.waitUntil(this.continueQueryIndexBackfill());
-      }
-
-      if (queryIndexReady) {
-        const indexed = this.queryIndex.query({
-          errors,
-          limit,
-          before: scan?.before,
-          fromMs: Number.isFinite(fromMs) ? fromMs : undefined,
-          toMs: Number.isFinite(toMs) ? toMs : undefined,
-          userId,
-          tool,
-          agentId,
-          activityId,
-          status,
-          errorClass,
-          operational,
-          q,
-        });
-        if (indexed) {
-          const history = indexed.rows.map(({ key, event }) => ({
-            key,
-            event: errors ? { ...event, ...classifyFailure(event) } : {
-              ...event,
-              activityId: event.activityId || (event.toolCallId ? fallbackActivityId(event.toolCallId) : undefined),
-              status: event.ok ? "success" : "error",
-            },
-          }));
-          const items = history
-            .sort((a,b) => a.key < b.key ? 1 : a.key > b.key ? -1 : 0)
-            .map(row => row.event);
-          const nextCursor = indexed.hasMore && indexed.nextBefore
-            ? encodeScanCursor({ v: 2, before: indexed.nextBefore })
-            : null;
-          return Response.json({
-            items,
-            pageSize: items.length,
-            matchedTotal: items.length,
-            matchedTotalLowerBound: indexed.hasMore,
-            hasMore: Boolean(nextCursor),
-            nextCursor,
-            bounded: false,
-            scanned: indexed.rowsReadUpperBound,
-            scanLimit: limit + 1,
-            queryMode: "sql-indexed",
-          });
-        }
-      }
-
-      // Serve KV immediately while the SQL index is unavailable, rebuilding, or handling a legacy cursor.
+      // Failure history is deliberately served from bounded raw storage. This avoids
+      // SQL index writes/backfills while retaining pagination and filters.
       const toEnd = errors && Number.isFinite(toMs) ? "event:" + new Date(toMs).toISOString() + ":\uffff" : undefined;
       const end = scan?.before && toEnd ? (scan.before < toEnd ? scan.before : toEnd) : scan?.before || toEnd;
       const start = errors && Number.isFinite(fromMs) ? "event:" + new Date(fromMs).toISOString() : undefined;
@@ -657,17 +526,12 @@ export class Usage extends DurableObject {
 
     if (url.pathname === "/query" && request.method === "GET") {
       const day = url.searchParams.get("day") || new Date().toISOString().slice(0, 10);
-      const from = url.searchParams.get("from");      const to = url.searchParams.get("to");
+      const from = url.searchParams.get("from");
+      const to = url.searchParams.get("to");
       const userId = url.searchParams.get("userId");
       const tool = url.searchParams.get("tool");
       const agentId = url.searchParams.get("agentId");
-      const key = userId
-        ? `day:${day}:user:${safePart(userId)}`
-        : tool
-          ? `day:${day}:tool:${safePart(tool)}`
-          : agentId
-            ? `day:${day}:agent:${safePart(agentId)}`
-            : `day:${day}:total`;
+      const filters = { userId, tool, agentId };
 
       if (from && to && /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)) {
         const start = Date.parse(from + "T00:00:00.000Z");
@@ -678,19 +542,17 @@ export class Usage extends DurableObject {
         const days = [];
         for (let ts = start; ts <= end; ts += 86400000) {
           const rangeDay = new Date(ts).toISOString().slice(0, 10);
-          const rangeKey = userId
-            ? "day:" + rangeDay + ":user:" + safePart(userId)
-            : tool
-              ? "day:" + rangeDay + ":tool:" + safePart(tool)
-              : agentId
-                ? "day:" + rangeDay + ":agent:" + safePart(agentId)
-                : "day:" + rangeDay + ":total";
-          days.push({ day: rangeDay, metric: publicMetric(await this.ctx.storage.get<Metric>(rangeKey)) });
+          const summary = await this.aggregates.window(ts, ts + 86400000 - 1, filters, false);
+          days.push({ day: rangeDay, metric: summary.metric });
         }
         return Response.json({ from, to, days });
       }
 
-      const metric = await this.ctx.storage.get<Metric>(key);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        return Response.json({ error: "invalid_usage_day" }, { status: 400 });
+      }
+      const start = Date.parse(day + "T00:00:00.000Z");
+      const summary = await this.aggregates.window(start, start + 86400000 - 1, filters, false);
       const recentLimit = Math.max(0, Math.min(1000, Number(url.searchParams.get("recentLimit")) || 0));
       let recent: UsageEvent[] = [];
       if (recentLimit > 0) {
@@ -701,7 +563,7 @@ export class Usage extends DurableObject {
           (!agentId || event.agentId === agentId)
         ).slice(0, recentLimit);
       }
-      return Response.json({ day, metric: publicMetric(metric), recent });
+      return Response.json({ day, metric: summary.metric, recent });
     }
 
     return Response.json({ error: "not_found" }, { status: 404 });

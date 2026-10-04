@@ -242,12 +242,10 @@ export class UsageAggregates {
   }
   async record(store: Store, event: UsageEvent) {
     for (const spec of bucketSpecs(Date.parse(event.timestamp))) {
-      const bucket = await this.ensure(store, spec.start, spec.size);
+      const key = bucketKey(spec.start, spec.size);
+      const bucket = await store.get<RichBucket>(key) ?? emptyBucket(spec.start, spec.size);
       addRichEvent(bucket, event, this.operational(event));
-      await store.put(
-        bucketKey(spec.start, spec.size),
-        boundRichBucket(bucket),
-      );
+      await store.put(key, boundRichBucket(bucket));
     }
   }
   async preserve(store: Store, event: UsageEvent) {
