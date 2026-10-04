@@ -11,6 +11,9 @@ import { AGENT_PROTOCOL_VERSION } from "./agent-state";
 import { handleStatusRequest } from "./status-route.mjs";
 import { error, hasPayload, readJson } from "./http-utils";
 import type { AuthUser, Env } from "./env";
+import packageMetadata from "../package.json";
+
+const SERVICE_VERSION = String(packageMetadata.version || "0.0.0");
 
 function registryStub(env: Env) {
   return env.REGISTRY.get(env.REGISTRY.idFromName("global"));
@@ -640,7 +643,7 @@ function oauthToolSecurity() {
 const SCREENSHOT_UI_URI = "ui://chat-relay/screenshot-v3.html";
 
 function createMcpServer(env: Env, user: AuthUser) {
-  const server = new McpServer({ name: "chat-relay", version: "0.7.0" });
+  const server = new McpServer({ name: "chat-relay", version: SERVICE_VERSION });
 
   server.registerTool(
     "whoami",
@@ -1376,7 +1379,7 @@ export default {
         ? Response.json({
           status: "ok",
           service: "chat-relay",
-          version: "0.7.0",
+          version: SERVICE_VERSION,
           optionalUsageBudget: usageRecordBudget.snapshot(env.USAGE_RECORD_DAILY_BUDGET),
         })
         : error(405, "method_not_allowed");

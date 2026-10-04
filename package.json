@@ -1,6 +1,6 @@
 {
     "name": "@anusornneal/chat-relay",
-    "version": "0.11.2",
+    "version": "0.12.0",
     "description": "Zero-checkout remote MCP agent for ChatGPT with terminal, filesystem, process, multi-user, and multi-agent support.",
     "type": "module",
     "bin": {
@@ -50,6 +50,12 @@
         "test:device-management": "node test/device-management-smoke.mjs",
         "test:submission": "node test/submission-smoke.mjs",
         "test:agent-state": "node --experimental-strip-types --test test/agent-state.test.mjs",
+        "test:tui": "node --test test/cli-tui.test.mjs",
+        "test:config-security": "node --test test/config-security.test.mjs",
+        "test:self-update": "node --test test/self-update.test.mjs test/agent-lifecycle-upgrade.test.mjs",
+        "test:budget": "node --test test/relay-health.test.mjs test/usage-budget.test.mjs",
+        "test:soak": "node test/soak-smoke.mjs",
+        "test:hardening": "npm run test:tui && npm run test:config-security && npm run test:self-update && npm run test:budget && node --test test/connection-generation.test.mjs && npm run test:agent-state && node test/heartbeat-ack-watchdog.test.mjs && npm run test:usage-storage && npm run test:soak",
         "verify:review": "node scripts/verify-review-artifacts.mjs"
     },
     "dependencies": {

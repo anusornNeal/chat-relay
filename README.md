@@ -37,7 +37,7 @@ npx @anusornneal/chat-relay@latest remote
 
 On the first run, Chat Relay opens browser-based device authorization. Choose **Continue with Google and authorize computer**, sign in with the same Google account used for the ChatGPT connector, then return to the terminal. Device sign-in requires configured Google OAuth and does not accept a local username/password.
 
-The CLI saves the device credentials in your user profile, so later you can reconnect with the same command:
+The CLI saves the device credentials in your user profile using Windows DPAPI or macOS Keychain when available (with a permission-restricted file fallback), so later you can reconnect with the same command:
 
 ```bash
 npx @anusornneal/chat-relay@latest remote
@@ -67,6 +67,7 @@ npx @anusornneal/chat-relay@latest remote --root "C:\Users\you\Projects"
 | `npx @anusornneal/chat-relay@latest drain` | Stops accepting new long-running work so active work can finish before a restart. |
 | `npx @anusornneal/chat-relay@latest resume` | Cancels drain mode and resumes normal work admission. |
 | `npx @anusornneal/chat-relay@latest restart` | Restarts the local agent after drain has completed and the agent is ready to restart. |
+| `npx @anusornneal/chat-relay@latest upgrade` | After drain has completed, hands off the local agent to `@anusornneal/chat-relay@latest` and reconnects with the saved configuration. |
 | `npx @anusornneal/chat-relay@latest logout` | Revokes this computer login and removes its local credentials. |
 | `npx @anusornneal/chat-relay@latest help` | Shows CLI usage and available options. |
 
@@ -128,6 +129,7 @@ ChatGPT talks only to the cloud MCP endpoint. The local computer opens the outbo
 - Access is scope-based: read, write, terminal, process, desktop read, and desktop control can be granted separately.
 - Desktop access is disabled by default.
 - Stored credentials are hashed server-side where applicable.
+- Local user and agent tokens are kept outside `config.json`; Windows uses user-bound DPAPI and macOS uses Keychain when available.
 - Persisted usage/audit telemetry is metadata-only and excludes commands, file contents, screenshots, clipboard contents, and credentials.
 
 Chat Relay is currently intended for small trusted teams rather than an enterprise zero-trust control plane.
@@ -139,7 +141,7 @@ Default CLI config locations:
 - Windows: `%LOCALAPPDATA%\chat-relay\config.json`
 - macOS/Linux: `$XDG_CONFIG_HOME/chat-relay/config.json` or `~/.config/chat-relay/config.json`
 
-Set `CHAT_RELAY_HOME` to override the config directory.
+Set `CHAT_RELAY_HOME` to override the config directory. `config.json` stores non-secret settings plus the credential storage type; authentication tokens are stored separately. Linux and CI environments use a mode-`0600` secret-file fallback unless another store is explicitly selected.
 
 A single account can own multiple computers. Each computer keeps its own agent identity and credential.
 
@@ -153,7 +155,21 @@ Common development commands:
 npm install
 npm start
 npm run dev
+npm run test:hardening
+npm run test:soak
 npm run verify:publish
+```
+
+The default soak test runs 2,000 deterministic reconnect/telemetry/TUI iterations without a live cloud relay. For a longer local run:
+
+```bash
+CHAT_RELAY_SOAK_ITERATIONS=100000 npm run test:soak
+```
+
+PowerShell:
+
+```powershell
+$env:CHAT_RELAY_SOAK_ITERATIONS=100000; npm run test:soak
 ```
 
 `npm run verify:publish` checks the publish file set, CLI entrypoint, Worker dry-run build, review artifacts, and production dependency audit.
@@ -169,6 +185,8 @@ npm run admin -- <command>
 ```
 
 Keep `ADMIN_TOKEN` and other deployment secrets out of client configuration and source control.
+
+Optional Cloudflare-pressure circuit breakers can be configured with `USAGE_RECORD_DAILY_BUDGET` (skip optional usage-record DO calls after the per-isolate budget) and `USAGE_DASHBOARD_PUBLISH_DAILY_BUDGET` (cap optional dashboard publish calls from the Usage Durable Object). Both default to disabled and are safeguards, not exact Cloudflare billing meters. The local TUI health monitor also backs off automatically after Cloudflare 1027/429/resource errors.
 
 ## Platform notes
 
