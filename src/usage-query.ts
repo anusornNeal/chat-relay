@@ -36,8 +36,10 @@ export type IndexedUsageRow = {
 };
 
 const READY_KEY = "usage-query-index:v1:ready";
+const BACKFILL_CURSOR_KEY = "usage-query-index:v1:cursor";
+const BACKFILL_STARTED_KEY = "usage-query-index:v1:started";
 const TABLE = "usage_event_query_v1";
-const BACKFILL_PAGE_SIZE = 1000;
+const BACKFILL_PAGE_SIZE = 250;
 const INSERT_BATCH_SIZE = 50;
 
 function statusOf(event: UsageEvent) {
@@ -50,7 +52,8 @@ function sqlLike(value: string) {
 
 export class UsageQueryIndex {
   private readonly sql: SqlStorage | null;
-  private backfill?: Promise<void>;
+  private ready = false;
+  private backfillStepPromise?: Promise<boolean>;
 
   constructor(
     private readonly storage: Storage,
@@ -134,32 +137,59 @@ export class UsageQueryIndex {
     }
   }
 
-  async ensureBackfilled() {
-    if (!this.sql) return;
-    if (await this.storage.get<boolean>(READY_KEY)) return;
-    await (this.backfill ||= (async () => {
-      if (await this.storage.get<boolean>(READY_KEY)) return;
-      this.sql!.exec(`DELETE FROM ${TABLE}`);
-      let startAfter: string | undefined;
-      for (;;) {
-        const page = await this.storage.list<UsageEvent>({
-          prefix: "event:",
-          limit: BACKFILL_PAGE_SIZE,
-          ...(startAfter ? { startAfter } : {}),
-        });
-        this.upsertBatch([...page.entries()]);
-        if (page.size < BACKFILL_PAGE_SIZE) break;
-        startAfter = [...page.keys()].at(-1)!;
-      }
-      await this.storage.put(READY_KEY, true);
-    })().catch((error) => {
-      this.backfill = undefined;
-      throw error;
-    }));
+  async isReady() {
+    if (!this.sql) return false;
+    if (this.ready) return true;
+    this.ready = Boolean(await this.storage.get<boolean>(READY_KEY));
+    return this.ready;
   }
 
-  markDirty() {
-    return this.storage.delete(READY_KEY);
+  async backfillStep(pageSize = BACKFILL_PAGE_SIZE): Promise<boolean> {
+    if (!this.sql) return true;
+    if (await this.isReady()) return true;
+    if (this.backfillStepPromise) return this.backfillStepPromise;
+
+    this.backfillStepPromise = (async () => {
+      if (await this.isReady()) return true;
+
+      const started = await this.storage.get<boolean>(BACKFILL_STARTED_KEY);
+      if (!started) {
+        this.sql!.exec(`DELETE FROM ${TABLE}`);
+        await this.storage.put(BACKFILL_STARTED_KEY, true);
+      }
+
+      const startAfter = await this.storage.get<string>(BACKFILL_CURSOR_KEY);
+      const page = await this.storage.list<UsageEvent>({
+        prefix: "event:",
+        limit: Math.max(1, Math.min(1000, pageSize)),
+        ...(startAfter ? { startAfter } : {}),
+      });
+      this.upsertBatch([...page.entries()]);
+
+      if (page.size < Math.max(1, Math.min(1000, pageSize))) {
+        await this.storage.put(READY_KEY, true);
+        await this.storage.delete([BACKFILL_CURSOR_KEY, BACKFILL_STARTED_KEY]);
+        this.ready = true;
+        return true;
+      }
+
+      const nextCursor = [...page.keys()].at(-1)!;
+      await this.storage.put(BACKFILL_CURSOR_KEY, nextCursor);
+      return false;
+    })().finally(() => {
+      this.backfillStepPromise = undefined;
+    });
+
+    return this.backfillStepPromise;
+  }
+
+  async ensureBackfilled() {
+    while (!(await this.backfillStep())) {}
+  }
+
+  async markDirty() {
+    this.ready = false;
+    await this.storage.delete([READY_KEY, BACKFILL_CURSOR_KEY, BACKFILL_STARTED_KEY]);
   }
 
   delete(keys: string[]) {

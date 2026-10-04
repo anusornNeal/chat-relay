@@ -324,6 +324,21 @@ export class Usage extends DurableObject {
     this.aggregates = new UsageAggregates(ctx.storage, event => !event.ok && classifyFailure(event).operational);
     this.queryIndex = new UsageQueryIndex(ctx.storage, event => classifyFailure(event).operational);
   }
+
+  private async continueQueryIndexBackfill() {
+    if (!this.queryIndex.available) return;
+    try {
+      const done = await this.queryIndex.backfillStep();
+      if (!done) await this.ctx.storage.setAlarm(Date.now() + 1000);
+    } catch {
+      await this.ctx.storage.setAlarm(Date.now() + 5000).catch(() => {});
+    }
+  }
+
+  async alarm(): Promise<void> {
+    await this.continueQueryIndexBackfill();
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -657,8 +672,13 @@ export class Usage extends DurableObject {
           (!legacy || olderThanCursor(event, legacy));
       };
 
-      if (this.queryIndex.available && !legacy && state !== "active") {
-        await this.queryIndex.ensureBackfilled();
+      const canUseQueryIndex = this.queryIndex.available && !legacy && state !== "active";
+      const queryIndexReady = canUseQueryIndex && await this.queryIndex.isReady();
+      if (canUseQueryIndex && !queryIndexReady) {
+        this.ctx.waitUntil(this.continueQueryIndexBackfill());
+      }
+
+      if (queryIndexReady) {
         const indexed = this.queryIndex.query({
           errors,
           limit,
@@ -718,7 +738,7 @@ export class Usage extends DurableObject {
         }
       }
 
-      // Test/legacy fallback for hosts without Durable Object SQL and legacy cursors.
+      // Serve KV immediately while the SQL index is unavailable, rebuilding, or handling a legacy cursor.
       const toEnd = errors && Number.isFinite(toMs) ? "event:" + new Date(toMs).toISOString() + ":\uffff" : undefined;
       const end = scan?.before && toEnd ? (scan.before < toEnd ? scan.before : toEnd) : scan?.before || toEnd;
       const start = errors && Number.isFinite(fromMs) ? "event:" + new Date(fromMs).toISOString() : undefined;
