@@ -2,21 +2,54 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { humanizeToolCall } from "../agent/toolcall-summary.mjs";
-import { RemoteTui, formatTransactionRow, formatTwoColumnHeader, shouldUseTui } from "../cli/tui.mjs";
+import { RemoteTui, formatTransactionRow, formatTransactionRows, formatTwoColumnHeader, shouldUseTui } from "../cli/tui.mjs";
 
 test("humanizes filesystem and terminal calls without file contents", () => {
   assert.equal(
     humanizeToolCall({ action: "fs.read", path: "C:\\Users\\tatar\\Projects\\chat-relay\\cli\\remote.mjs", offset: 0, length: 153 }),
-    "Read C:/Users/tatar/Projects/chat-relay/cli/remote.mjs · lines 1–153",
+    "Read cli/remote.mjs · lines 1–153",
   );
 
   const write = humanizeToolCall({ action: "fs.write", path: "dashboard/app.js", mode: "rewrite", content: "secret body" });
-  assert.equal(write, "Write dashboard/app.js · rewrite · 11 B");
+  assert.equal(write, "Write dashboard/app.js · replace file · 11 B");
   assert.ok(!write.includes("secret body"));
 
   const command = humanizeToolCall({ action: "terminal.exec", command: "curl -H 'Authorization: Bearer abc123' https://example.com", cwd: "C:\\repo" });
   assert.ok(command.includes("[redacted]"));
   assert.ok(!command.includes("abc123"));
+  assert.equal(
+    humanizeToolCall({
+      action: "terminal.exec",
+      command: "git status --short; git branch --show-current; git log -3 --oneline",
+      cwd: "C:\\Users\\tatar\\Projects\\chat-relay",
+    }),
+    "Check Git status, current branch, and recent commits · in chat-relay",
+  );
+
+  assert.equal(
+    humanizeToolCall({
+      action: "fs.edit",
+      path: "C:\\Users\\tatar\\Projects\\chat-relay\\cli\\tui.mjs",
+      expectedReplacements: 1,
+    }),
+    "Edit cli/tui.mjs · 1 change",
+  );
+});
+
+test("wraps long transaction summaries onto continuation lines", () => {
+  const rows = formatTransactionRows({
+    at: "2026-10-04T02:15:35.000Z",
+    summary: "Run a very long command that should continue on another line instead of being truncated at the terminal edge",
+    status: "done",
+    ok: true,
+    durationMs: 378,
+  }, 72);
+
+  assert.ok(rows.length > 1);
+  assert.ok(rows.length <= 3);
+  assert.ok(rows.every((line) => line.length <= 72));
+  assert.match(rows[0], /378ms$/);
+  assert.match(rows[1], /^\s{13,}/);
 });
 
 test("formats remote header as two columns", () => {

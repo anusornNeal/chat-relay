@@ -74,14 +74,54 @@ function clock(value) {
   return date.toLocaleTimeString("en-GB", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-export function formatTransactionRow(item, width = 110) {
+function wrapText(value, width, maxLines = 3) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  const usable = Math.max(1, Number(width) || 1);
+  if (!text) return [""];
+  const lines = [];
+  let remaining = text;
+
+  while (remaining && lines.length < maxLines) {
+    if (remaining.length <= usable) {
+      lines.push(remaining);
+      remaining = "";
+      break;
+    }
+
+    let cut = remaining.lastIndexOf(" ", usable);
+    if (cut < Math.floor(usable * 0.45)) cut = usable;
+    lines.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+
+  if (remaining && lines.length) {
+    const index = lines.length - 1;
+    lines[index] = truncate(lines[index] + " " + remaining, usable);
+  }
+
+  return lines.length ? lines : [""];
+}
+
+export function formatTransactionRows(item, width = 110) {
   const usable = clamp(Number(width) || 110, 60, 180);
   const status = item.status === "running" ? "●" : item.ok === false ? "✕" : "✓";
   const prefix = `${clock(item.at)}  ${status}  `;
+  const continuationPrefix = " ".repeat(prefix.length);
   const duration = formatDuration(item.durationMs, item.status);
   const suffix = "  " + duration.padStart(8);
-  const summaryWidth = Math.max(12, usable - prefix.length - suffix.length);
-  return prefix + truncate(item.summary || item.action || "Tool call", summaryWidth).padEnd(summaryWidth) + suffix;
+  const summaryWidth = Math.max(18, usable - prefix.length - suffix.length);
+  const summaryLines = wrapText(item.summary || item.action || "Tool call", summaryWidth, 3);
+
+  return summaryLines.map((line, index) => {
+    if (index === 0) {
+      return prefix + line.padEnd(summaryWidth) + suffix;
+    }
+    return continuationPrefix + line;
+  });
+}
+
+export function formatTransactionRow(item, width = 110) {
+  return formatTransactionRows(item, width).join("\n");
 }
 
 function normalizeRelay(value) {
@@ -195,7 +235,18 @@ export class RemoteTui {
     // Fixed frame content occupies 11 rows. Leave one spare row at the
     // bottom so Windows Terminal never scrolls the screen while repainting.
     const availableRows = Math.max(1, height - FRAME_FIXED_ROWS - FRAME_BOTTOM_MARGIN);
-    const rows = this.transactions.slice(-availableRows).map((item) => formatTransactionRow(item, width));
+    const rows = [];
+    for (let index = this.transactions.length - 1; index >= 0 && rows.length < availableRows; index--) {
+      const group = formatTransactionRows(this.transactions[index], width);
+      const remaining = availableRows - rows.length;
+      if (group.length <= remaining) {
+        rows.unshift(...group);
+      } else if (rows.length === 0) {
+        rows.unshift(...group.slice(0, remaining));
+      } else {
+        break;
+      }
+    }
     while (rows.length < Math.min(availableRows, 4)) rows.unshift("");
 
     const screen = [
