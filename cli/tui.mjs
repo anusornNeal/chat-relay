@@ -31,6 +31,60 @@ function truncate(value, width) {
   return text.slice(0, width - 1) + "…";
 }
 
+function codePointCellWidth(codePoint) {
+  if (codePoint === 0) return 0;
+  if (codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) return 0;
+  if (
+    (codePoint >= 0x0300 && codePoint <= 0x036f)
+    || (codePoint >= 0x1ab0 && codePoint <= 0x1aff)
+    || (codePoint >= 0x1dc0 && codePoint <= 0x1dff)
+    || (codePoint >= 0x20d0 && codePoint <= 0x20ff)
+    || (codePoint >= 0xfe20 && codePoint <= 0xfe2f)
+    || codePoint === 0xfe0f
+    || codePoint === 0x200d
+  ) return 0;
+  if (
+    codePoint >= 0x1100 && (
+      codePoint <= 0x115f
+      || codePoint === 0x2329
+      || codePoint === 0x232a
+      || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+      || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+      || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+      || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+      || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+      || (codePoint >= 0xff00 && codePoint <= 0xff60)
+      || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+      || (codePoint >= 0x1f000 && codePoint <= 0x1faff)
+      || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+    )
+  ) return 2;
+  return 1;
+}
+
+export function terminalCellWidth(value) {
+  let width = 0;
+  for (const char of String(value ?? "")) width += codePointCellWidth(char.codePointAt(0));
+  return width;
+}
+
+function truncateCells(value, width) {
+  const text = String(value ?? "");
+  const limit = Math.max(0, Number(width) || 0);
+  if (limit === 0) return "";
+  if (terminalCellWidth(text) <= limit) return text;
+  if (limit === 1) return "…";
+  let output = "";
+  let used = 0;
+  for (const char of text) {
+    const cells = codePointCellWidth(char.codePointAt(0));
+    if (used + cells > limit - 1) break;
+    output += char;
+    used += cells;
+  }
+  return output + "…";
+}
+
 function paint(value, ...styles) {
   if (!styles.length) return String(value ?? "");
   return styles.join("") + String(value ?? "") + RESET;
@@ -182,13 +236,20 @@ function wrapText(value, width, maxLines = 3) {
 }
 
 export function formatTransactionRows(item, width = 110, { color = false } = {}) {
-  const usable = clamp(Number(width) || 110, 60, 180);
+  const requested = Number(width) || 110;
+  const usable = clamp(requested, Math.min(60, Math.max(1, requested)), 180);
   const status = item.status === "running" ? "●" : item.ok === false ? "✕" : "✓";
+  if (usable < 32) {
+    const compact = truncateCells(`${clock(item.at)} ${status} ${item.summary || item.action || "Tool call"}`, usable);
+    if (!color) return [compact];
+    const glyphStyle = item.status === "running" ? STYLE.yellow : item.ok === false ? STYLE.red : STYLE.green;
+    return [paint(compact, glyphStyle)];
+  }
   const prefix = `${clock(item.at)}  ${status}  `;
   const continuationPrefix = " ".repeat(prefix.length);
   const duration = formatDuration(item.durationMs, item.status);
   const suffix = "  " + duration.padStart(8);
-  const summaryWidth = Math.max(18, usable - prefix.length - suffix.length);
+  const summaryWidth = Math.max(4, usable - prefix.length - suffix.length);
   const summaryLines = wrapText(item.summary || item.action || "Tool call", summaryWidth, 3);
 
   return summaryLines.map((line, index) => {
@@ -233,9 +294,17 @@ export function shouldUseColor(stdout = process.stdout, env = process.env) {
 }
 
 export class RemoteTui {
-  constructor({ config, version, output = process.stdout, input = process.stdin, env = process.env }) {
+  constructor({
+    config,
+    version,
+    output = process.stdout,
+    input = process.stdin,
+    env = process.env,
+    onInterrupt = () => process.emit("SIGINT"),
+  }) {
     this.output = output;
     this.input = input;
+    this.onInterrupt = onInterrupt;
     this.startedAt = Date.now();
     this.state = {
       account: config.user?.name || config.user?.login || "signed in",
@@ -256,28 +325,36 @@ export class RemoteTui {
     this.scrollOffset = 0;
     this.unseenTransactions = 0;
     this.inputWasRaw = false;
+    this.inputWasPaused = false;
+    this.mouseEnabled = false;
     this.onInput = (chunk) => this.handleInput(chunk);
   }
 
   start() {
     if (this.closed) return;
     // Use the terminal's alternate screen so periodic redraws never accumulate
-    // in scrollback. Mouse reporting lets the transaction viewport scroll while
-    // the header remains fixed in place.
+    // in scrollback. Mouse reporting is enabled only when stdin can actually
+    // consume the events, otherwise ordinary terminal scrollback remains usable.
+    const interactiveInput = Boolean(this.input?.isTTY && typeof this.input.setRawMode === "function");
+    if (interactiveInput) {
+      this.inputWasRaw = Boolean(this.input.isRaw);
+      this.inputWasPaused = Boolean(this.input.isPaused?.());
+      try {
+        this.input.setRawMode(true);
+        this.input.resume?.();
+        this.input.on?.("data", this.onInput);
+        this.mouseEnabled = true;
+      } catch {
+        this.mouseEnabled = false;
+      }
+    }
     this.output.write(
       ESC + "?1049h"
       + ESC + "?25l"
-      + ESC + "?1000h"
-      + ESC + "?1006h"
+      + (this.mouseEnabled ? ESC + "?1000h" + ESC + "?1006h" : "")
       + ESC + "2J"
       + ESC + "H",
     );
-    if (this.input?.isTTY && typeof this.input.setRawMode === "function") {
-      this.inputWasRaw = Boolean(this.input.isRaw);
-      this.input.setRawMode(true);
-      this.input.resume?.();
-      this.input.on?.("data", this.onInput);
-    }
     this.render();
     this.timer = setInterval(() => this.render(), 1000);
     this.timer.unref?.();
@@ -290,22 +367,26 @@ export class RemoteTui {
     this.timer = null;
     this.input?.removeListener?.("data", this.onInput);
     if (this.input?.isTTY && typeof this.input.setRawMode === "function" && !this.inputWasRaw) {
-      this.input.setRawMode(false);
+      try { this.input.setRawMode(false); } catch {}
     }
+    if (this.inputWasPaused) this.input?.pause?.();
     this.output.write(
-      ESC + "?1000l"
-      + ESC + "?1006l"
+      (this.mouseEnabled ? ESC + "?1000l" + ESC + "?1006l" : "")
       + ESC + "?25h"
       + ESC + "?1049l",
     );
+    this.mouseEnabled = false;
   }
 
   viewportMetrics() {
     const terminalWidth = Number(this.output.columns) || 110;
-    const width = clamp(terminalWidth - 1, MIN_FRAME_WIDTH, MAX_FRAME_WIDTH);
-    const height = Math.max(16, Number(this.output.rows) || 30);
-    const availableRows = Math.max(1, height - FRAME_FIXED_ROWS - FRAME_BOTTOM_MARGIN);
-    return { width, height, availableRows };
+    const width = clamp(terminalWidth - 1, Math.min(MIN_FRAME_WIDTH, Math.max(1, terminalWidth - 1)), MAX_FRAME_WIDTH);
+    const height = Math.max(1, Number(this.output.rows) || 30);
+    const compact = height < 14;
+    const headerRows = compact ? Math.max(1, Math.min(2, height - 3)) : 5;
+    const fixedRows = compact ? 2 + headerRows : FRAME_FIXED_ROWS;
+    const availableRows = Math.max(1, height - fixedRows - FRAME_BOTTOM_MARGIN);
+    return { width, height, availableRows, compact, headerRows };
   }
 
   transactionRows(width) {
@@ -332,7 +413,7 @@ export class RemoteTui {
     // Raw mode turns Ctrl+C into input data, so forward it to the existing
     // shutdown handler instead of swallowing it.
     if (data.includes("\x03")) {
-      process.emit("SIGINT");
+      this.onInterrupt?.();
       return;
     }
 
@@ -426,12 +507,23 @@ export class RemoteTui {
 
   render() {
     if (this.closed) return;
-    const { width, availableRows } = this.viewportMetrics();
+    const { width, height, availableRows, compact, headerRows } = this.viewportMetrics();
     const separator = "─".repeat(width);
-    const header = formatTwoColumnHeader({
+    const headerState = {
       ...this.state,
       uptimeMs: Date.now() - this.startedAt,
-    }, width, { color: this.colorEnabled });
+    };
+    let headerLines;
+    if (width < MIN_FRAME_WIDTH) {
+      const compactHeader = [
+        truncateCells(`👤 ${headerState.account || "-"} · 💻 ${headerState.agent || "-"}`, width),
+        truncateCells(`🔗 ${statusText(headerState.status)} · ${relayHealthText(headerState.relayHealth)}`, width),
+      ];
+      headerLines = compactHeader.map((line) => this.colorEnabled ? paint(line, STYLE.gray) : line);
+    } else {
+      headerLines = formatTwoColumnHeader(headerState, width, { color: this.colorEnabled }).split("\n");
+    }
+    if (compact) headerLines = headerLines.slice(0, headerRows);
 
     const allRows = this.transactionRows(width);
     const maxOffset = Math.max(0, allRows.length - availableRows);
@@ -441,29 +533,25 @@ export class RemoteTui {
     const rows = allRows.slice(start, end);
     while (rows.length < Math.min(availableRows, 4)) rows.unshift("");
 
-    const title = this.colorEnabled
-      ? paint("🚀 Chat Relay", STYLE.bold, STYLE.cyan) + paint(`  v${this.version}`, STYLE.gray)
-      : `🚀 Chat Relay  v${this.version}`;
+    const titleText = truncateCells(`🚀 Chat Relay  v${this.version}`, width);
+    const title = this.colorEnabled ? paint(titleText, STYLE.bold, STYLE.cyan) : titleText;
     const divider = this.colorEnabled ? paint(separator, STYLE.gray) : separator;
     const mode = this.scrollOffset === 0
       ? "🟢 LIVE"
       : this.unseenTransactions > 0
         ? `📬 +${this.unseenTransactions} new`
         : "📜 HISTORY";
-    const sectionText = `📜 Transactions  ${mode}  ·  wheel/↑↓ scroll  ·  End = live`;
+    const sectionText = truncateCells(
+      `📜 Transactions  ${mode}  ·  wheel/↑↓ scroll  ·  End = live`,
+      width,
+    );
     const section = this.colorEnabled ? paint(sectionText, STYLE.bold, STYLE.cyan) : sectionText;
 
-    const screen = [
-      title,
-      divider,
-      "",
-      header,
-      "",
-      divider,
-      section,
-      "",
-      ...rows,
-    ].join("\n");
+    const screenLines = compact
+      ? [title, ...headerLines, section, ...rows]
+      : [title, divider, "", ...headerLines, "", divider, section, "", ...rows];
+    const maxLines = Math.max(1, height - FRAME_BOTTOM_MARGIN);
+    const screen = screenLines.slice(0, maxLines).join("\n");
 
     this.output.write(ESC + "2J" + ESC + "H" + screen);
   }

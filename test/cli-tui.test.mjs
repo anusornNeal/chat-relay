@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { humanizeToolCall } from "../agent/toolcall-summary.mjs";
-import { RemoteTui, formatTransactionRow, formatTransactionRows, formatTwoColumnHeader, shouldUseColor, shouldUseTui } from "../cli/tui.mjs";
+import { RemoteTui, formatTransactionRow, formatTransactionRows, formatTwoColumnHeader, shouldUseColor, shouldUseTui, terminalCellWidth } from "../cli/tui.mjs";
 
 test("humanizes filesystem and terminal calls without file contents", () => {
   assert.equal(
@@ -170,4 +171,134 @@ test("TUI keeps agent socket state separate from Worker HTTP health", () => {
   assert.match(header, /Agent link\s+● WebSocket open/);
   assert.match(header, /Relay API\s+✕ Cloudflare 1027/);
   assert.match(header, /Checked\s+just now/);
+});
+
+test("TUI scrolls with mouse and keyboard and restores interactive stdin", () => {
+  class FakeInput extends EventEmitter {
+    constructor() {
+      super();
+      this.isTTY = true;
+      this.isRaw = false;
+      this.paused = true;
+      this.rawModes = [];
+    }
+    setRawMode(value) {
+      this.isRaw = Boolean(value);
+      this.rawModes.push(Boolean(value));
+    }
+    isPaused() { return this.paused; }
+    resume() { this.paused = false; }
+    pause() { this.paused = true; }
+  }
+
+  const writes = [];
+  const output = {
+    isTTY: true,
+    columns: 80,
+    rows: 16,
+    write(value) {
+      writes.push(String(value));
+      return true;
+    },
+  };
+  const input = new FakeInput();
+  let interrupted = 0;
+  const tui = new RemoteTui({
+    config: {
+      user: { name: "Anusorn" },
+      agentName: "DESKTOP",
+      relayUrl: "https://relay.example",
+      terminalEnabled: true,
+    },
+    version: "test",
+    output,
+    input,
+    env: { NO_COLOR: "1" },
+    onInterrupt: () => { interrupted += 1; },
+  });
+
+  tui.start();
+  for (let index = 0; index < 12; index += 1) {
+    tui.handleMessage({
+      type: "chat-relay-ui",
+      event: "system",
+      at: "2026-10-04T10:00:00.000Z",
+      message: "Event " + index,
+    });
+  }
+
+  assert.match(writes[0], /\x1b\[\?1000h/);
+  assert.deepEqual(input.rawModes, [true]);
+  assert.equal(input.paused, false);
+
+  input.emit("data", Buffer.from("\x1b[<64;10;10M"));
+  assert.ok(tui.scrollOffset > 0);
+  const afterWheelUp = tui.scrollOffset;
+
+  input.emit("data", Buffer.from("\x1b[<65;10;10M"));
+  assert.ok(tui.scrollOffset < afterWheelUp);
+
+  input.emit("data", Buffer.from("\x1b[5~"));
+  assert.ok(tui.scrollOffset > 0);
+  input.emit("data", Buffer.from("\x1b[F"));
+  assert.equal(tui.scrollOffset, 0);
+
+  input.emit("data", Buffer.from("\x03"));
+  assert.equal(interrupted, 1);
+
+  tui.stop();
+  assert.deepEqual(input.rawModes, [true, false]);
+  assert.equal(input.paused, true);
+  assert.match(writes.at(-1), /\x1b\[\?1000l/);
+  assert.match(writes.at(-1), /\x1b\[\?1049l/);
+});
+
+test("TUI compact layout respects tiny terminal rows and cell width", () => {
+  const writes = [];
+  const output = {
+    isTTY: true,
+    columns: 28,
+    rows: 7,
+    write(value) {
+      writes.push(String(value));
+      return true;
+    },
+  };
+  const input = { isTTY: false };
+  const tui = new RemoteTui({
+    config: {
+      user: { name: "Anusorn Hankasemsak" },
+      agentName: "DESKTOP-5IQPSSC",
+      relayUrl: "https://chat-relay.example.workers.dev",
+      terminalEnabled: true,
+    },
+    version: "0.11.3-test",
+    output,
+    input,
+    env: { NO_COLOR: "1" },
+  });
+
+  tui.start();
+  tui.handleMessage({
+    type: "chat-relay-ui",
+    event: "system",
+    at: "2026-10-04T10:00:00.000Z",
+    message: "A long transaction summary that must fit inside a very narrow terminal",
+  });
+  tui.render();
+
+  assert.doesNotMatch(writes[0], /\x1b\[\?1000h/);
+  const frame = writes.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
+  const lines = frame.split("\n");
+  assert.ok(lines.length <= output.rows - 1);
+  assert.ok(lines.every((line) => terminalCellWidth(line) <= output.columns - 1));
+  assert.match(frame, /🚀 Chat Relay/);
+  assert.match(frame, /📜/);
+  tui.stop();
+});
+
+test("terminalCellWidth treats relay emoji as wide glyphs", () => {
+  assert.equal(terminalCellWidth("abc"), 3);
+  assert.equal(terminalCellWidth("🚀"), 2);
+  assert.equal(terminalCellWidth("📜 Transactions"), 15);
 });
