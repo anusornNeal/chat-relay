@@ -314,7 +314,8 @@ export class UsageAggregates {
   ) {
     const total = emptyRichMetric(),
       tools = new Map<string, number>(),
-      users = new Map<string, { calls: number; errors: number; operationalErrors: number }>();
+      users = new Map<string, { calls: number; errors: number; operationalErrors: number }>(),
+      agents = new Map<string, { userId: string; agentId: string; calls: number }>();
     const daily = to - from + 1 > 48 * HOUR,
       chartSize = daily ? DAY : HOUR;
     const origin = from;
@@ -340,7 +341,7 @@ export class UsageAggregates {
       (!filters.userId || filters.userId === group.userId) &&
       (!filters.tool || filters.tool === group.tool) &&
       (!filters.agentId || filters.agentId === group.agentId);
-    const consume = (metric: RichMetric, tool: string, userId: string, time: number) => {
+    const consume = (metric: RichMetric, tool: string, userId: string, agentId: string, time: number) => {
       mergeRichMetric(total, metric);
       tools.set(tool, (tools.get(tool) || 0) + metric.calls);
       const user = users.get(userId) || { calls: 0, errors: 0, operationalErrors: 0 };
@@ -348,6 +349,12 @@ export class UsageAggregates {
       user.errors += metric.errors;
       user.operationalErrors += metric.operationalErrors;
       users.set(userId, user);
+      if (agentId) {
+        const agentKey = JSON.stringify([userId, agentId]);
+        const agent = agents.get(agentKey) || { userId, agentId, calls: 0 };
+        agent.calls += metric.calls;
+        agents.set(agentKey, agent);
+      }
       if (!includeBuckets) return;
       const chart = buckets[Math.floor((time - origin) / chartSize)];
       chart.calls += metric.calls;
@@ -403,6 +410,7 @@ export class UsageAggregates {
             Object.values(single.groups)[0].metric,
             event.tool,
             event.userId,
+            event.agentId || "",
             Date.parse(event.timestamp),
           );
         };
@@ -410,7 +418,7 @@ export class UsageAggregates {
         else await this.raw(this.storage, cursor, end, consumeRaw);
       } else
         for (const group of Object.values(bucket.groups))
-          if (matches(group)) consume(group.metric, group.tool, group.userId, cursor);
+          if (matches(group)) consume(group.metric, group.tool, group.userId, group.agentId, cursor);
       cursor = end + 1;
     }
     return {
@@ -426,6 +434,9 @@ export class UsageAggregates {
         .sort((a, b) => b[1].calls - a[1].calls || a[0].localeCompare(b[0]))
         .slice(0, 100)
         .map(([userId, metric]) => ({ userId, ...metric })),
+      agents: [...agents.values()]
+        .sort((a, b) => b.calls - a.calls || a.userId.localeCompare(b.userId) || a.agentId.localeCompare(b.agentId))
+        .slice(0, 500),
       sampleSize: total.calls,
       bounded: incomplete,
       coverage: incomplete ? "retained-history" : "complete",

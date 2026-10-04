@@ -213,33 +213,15 @@ await Promise.all([
   tool(ownerToken, 61, "whoami", {}, false, "concurrent-chat-b"),
 ]);
 const aggregateAfterConcurrent = await admin("/admin/api/overview");
-const ownerAggregate = (aggregateAfterConcurrent.data.accountUsage || []).find((item) => item.userId === "owner");
+const ownerAggregate = (aggregateAfterConcurrent.data.accounts || []).find((item) => item.userId === "owner");
 if (!aggregateAfterConcurrent.response.ok || !ownerAggregate || ownerAggregate.calls < 1) throw new Error("owner aggregate usage missing");
 const correlated = await admin("/admin/usage?day=" + day + "&recentLimit=100");
-for (const event of correlated.data.recent || []) {
-  if (event.ok !== false) throw new Error("successful raw usage event persisted");
-  if (!event.toolCallId || !String(event.toolCallId).startsWith("tc_")) throw new Error("missing toolCallId in retained error event");
-}
-
-const errors = await admin("/admin/api/errors?limit=100");
-const syntheticError = (errors.data.items || []).find((event) => event.tool === "read_file" && event.errorCode === "synthetic_failure");
-if (!syntheticError || syntheticError.errorSource !== "agent" || syntheticError.failureStage !== "agent" || syntheticError.retryable !== false || syntheticError.failureCategory !== "tool" || syntheticError.operational !== false || !syntheticError.diagnosticLabel || !syntheticError.agentName || syntheticError.agentName === syntheticError.agentId) {
-  throw new Error(`safe structured error metadata missing: ${errors.text}`);
-}
-const operationalErrors = await admin("/admin/api/errors?operational=true&limit=100");
-if (!operationalErrors.response.ok || (operationalErrors.data.items || []).some((event) => event.operational !== true || event.failureCategory !== "infrastructure")) {
-  throw new Error(`operational error filtering failed: ${operationalErrors.text}`);
-}
-const handledErrors = await admin("/admin/api/errors?operational=false&limit=100");
-if (!handledErrors.response.ok || !(handledErrors.data.items || []).some((event) => event.errorCode === "synthetic_failure" && event.operational === false)) {
-  throw new Error(`handled error filtering failed: ${handledErrors.text}`);
-}
+if (Array.isArray(correlated.data.recent)) throw new Error("raw recent usage history is still exposed");
+const removedErrors = await admin("/admin/api/errors?limit=100");
+if (removedErrors.response.status !== 404) throw new Error("removed Errors API is still exposed");
 
 const removedHistory = await admin("/admin/api/tool-calls?state=history&limit=2");
 if (removedHistory.response.status !== 404) throw new Error("removed tool-call history API is still exposed");
-
-const errorPage = await admin("/admin/api/errors?limit=1");
-if (!errorPage.response.ok || errorPage.data.items?.length !== 1 || !errorPage.data.nextCursor) throw new Error(`error cursor page failed: ${errorPage.text}`);
 
 const serialized = JSON.stringify(total.data.recent || []);
 for (const forbidden of [
@@ -267,14 +249,12 @@ const todayOverview = await admin("/admin/api/overview");
 if (!todayOverview.response.ok || todayOverview.data.period?.timezoneLabel !== "BKK · UTC+7") {
   throw new Error(`Bangkok Today overview contract missing: ${todayOverview.text}`);
 }
-if ((todayOverview.data.usage?.calls || 0) <= 1000) {
+if (((todayOverview.data.accounts || []).find((item) => item.userId === "owner")?.calls || 0) <= 1000) {
   throw new Error(`Today overview silently capped at 1,000 calls: ${todayOverview.text}`);
 }
-if (todayOverview.data.bounded === true) {
-  throw new Error(`Today overview unexpectedly bounded near 1,000 calls: ${todayOverview.text}`);
-}
-if (!Array.isArray(todayOverview.data.buckets) || !Array.isArray(todayOverview.data.topTools)) {
-  throw new Error("Today overview missing chart data");
+const ownerToday = (todayOverview.data.accounts || []).find((item) => item.userId === "owner");
+if (!ownerToday || !Array.isArray(ownerToday.agents) || !ownerToday.agents.some((agent) => agent.agentId === usageAgentId && agent.calls > 0)) {
+  throw new Error("Today overview missing account-agent usage");
 }
 
 dashboardSocket.terminate();

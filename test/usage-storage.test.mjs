@@ -174,9 +174,9 @@ const window = (from, to, filter = {}) =>
     errorCode: "agent_offline",
   }));
   assert.equal(failure.status, 200);
-  assert.equal(f.stats.puts, 4);
-  assert.equal([...f.records.keys()].filter((key) => key.startsWith("event:")).length, 1);
-  console.log("PASS disabled quota zero writes; success 3 aggregate writes; failure adds one raw error row");
+  assert.equal(f.stats.puts, 3);
+  assert.equal([...f.records.keys()].filter((key) => key.startsWith("event:")).length, 0);
+  console.log("PASS disabled quota zero writes; success/failure both use aggregate rows only");
 }
 {
   const f = fixture();
@@ -195,7 +195,7 @@ const window = (from, to, filter = {}) =>
   f.records.set("day:2026-09-02:total", { calls: 21001 });
   const migrated = await f.call(window(from, to));
   assert.equal(migrated.metric.calls, 21001);
-  assert.equal(migrated.metric.operationalErrors, 7001);
+  assert.equal(migrated.metric.operationalErrors, 0);
   assert.equal(migrated.bounded, false);
   f.evict();
   f.reset();
@@ -276,6 +276,7 @@ const window = (from, to, filter = {}) =>
   assert.equal([...f.records.keys()].some((key) => key.startsWith("event:") && f.records.get(key)?.toolCallId === "active1"), false);
   const accountWindow = await f.call(window(new Date(Date.parse(now) - 1000).toISOString(), new Date(Date.parse(now) + 1000).toISOString()));
   assert.equal(accountWindow.users.find((user) => user.userId === "alice")?.calls, 1);
+  assert.equal(accountWindow.agents.find((agent) => agent.userId === "alice" && agent.agentId === "laptop")?.calls, 1);
   // Atomic handlers remain correct under simultaneous record calls.
   await Promise.all(
     Array.from({ length: 10 }, () =>
@@ -567,7 +568,7 @@ const window = (from, to, filter = {}) =>
   const metric = data.metric;
   assert.equal(metric.calls, 100);
   assert.equal(metric.errors, 5);
-  assert.equal(metric.operationalErrors, 5);
+  assert.equal(metric.operationalErrors, 0);
   assert.equal(metric.durationMs, 10500);
   assert.equal(metric.avgDurationMs, 105);
   assert.equal(metric.minDurationMs, 100);
@@ -621,26 +622,9 @@ const window = (from, to, filter = {}) =>
 
 {
   const f = fixture();
-  const timestamp = "2026-10-04T12:00:00.000Z";
-  for (let i = 0; i < 1201; i++) f.records.set(`event:${timestamp}:${String(i).padStart(6,"0")}`,
-    event(timestamp, { toolCallId: `tc_${i}`, ok: i !== 0, startedAt: "2026-10-03T00:00:00.000Z" }));
   assert.equal((await f.call("/activity/query")).status, 404);
-  let cursor = "";
-  const failures = [];
-  do {
-    f.reset();
-    const page = await f.call("/errors/query?cursor=" + cursor);
-    assert.ok(f.stats.rows <= 500);
-    failures.push(...page.items);
-    cursor = page.nextCursor || "";
-  } while (cursor);
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0].toolCallId, "tc_0");
-  const invalid = Buffer.from(JSON.stringify({v:2,before:"event:2026-99-99T12:00:00.000Z:x"})).toString("base64url");
-  assert.equal((await f.call("/errors/query?cursor="+invalid)).status,400);
-  assert.equal((await f.call("/errors/query?tool=missing")).items.length,0);
-  assert.equal((await f.call("/errors/query?operational=true")).items.length,0);
-  console.log("PASS errors-only bounded history; activity history endpoint removed");
+  assert.equal((await f.call("/errors/query")).status, 404);
+  console.log("PASS detailed activity and error history endpoints removed");
 }
 {
   let sockets=[];
@@ -665,10 +649,10 @@ const window = (from, to, filter = {}) =>
   const call=path=>handleAdmin(new Request("https://internal"+path,{headers:{authorization:"Bearer test"}}),env);
   assert.equal((await call("/admin/api/overview")).status,200);
   assert.equal(calls.filter(x=>x==="registry/state").length,1);
-  assert.ok(!calls.includes("offline/relay"));assert.ok(calls.includes("online/relay"));
+  assert.ok(!calls.some(x=>x.endsWith("/relay")), JSON.stringify(calls));
   calls.length=0;assert.equal((await call("/admin/api/tool-calls")).status,404);
   assert.equal(calls.filter(x=>x==="registry/state").length,0);
-  console.log("PASS admin overview reuses state, suppresses offline probes, and removes tool-call history API");
+  console.log("PASS admin overview returns aggregate usage without Relay probes or tool-call history API");
 }
 
 {
@@ -690,6 +674,6 @@ const window = (from, to, filter = {}) =>
 {
   const f=fixture();
   assert.equal((await f.call("/activity/query?state=active&limit=1")).status,404);
-  assert.equal((await f.call("/errors/query?from=2026-10-05&to=2026-10-04")).status,400);
-  console.log("PASS activity query removal and reversed error-window validation");
+  assert.equal((await f.call("/errors/query?from=2026-10-05&to=2026-10-04")).status,404);
+  console.log("PASS detailed activity/error query removal");
 }

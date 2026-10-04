@@ -98,127 +98,6 @@ function fallbackActivityId(toolCallId: string) {
   return "call_" + (clean.slice(0, 12) || "unknown");
 }
 
-function normalizeFailureDiagnostics(event: UsageEvent): Pick<UsageEvent, "errorCode" | "failureStage" | "retryable"> {
-  if (event.ok) return {};
-  let errorCode = String(event.errorCode || event.errorClass || "tool_error").toLowerCase().slice(0, 80);
-  let failureStage = "tool";
-
-  if (errorCode === "path_not_allowed" || errorCode === "permission_denied" || errorCode.startsWith("invalid_")) {
-    failureStage = "validation";
-  } else if (errorCode === "rate_limited" || errorCode === "quota_exceeded" || event.statusCode === 429) {
-    failureStage = "policy";
-  } else if (event.exitCode !== null && event.exitCode !== undefined && Number(event.exitCode) !== 0) {
-    failureStage = "process";
-    if (!errorCode || errorCode === "tool_error") errorCode = "process_exit_nonzero";
-  } else if (String(event.errorSource || "").toLowerCase() === "worker") {
-    failureStage = "worker";
-  } else if (String(event.errorSource || "").toLowerCase() === "relay") {
-    failureStage = "relay";
-  } else if (String(event.errorSource || "").toLowerCase() === "agent") {
-    failureStage = "agent";
-  }
-
-  if (/timeout|timed_out/.test(errorCode)) failureStage = "timeout";
-  if (/agent_(offline|stale|unavailable)|http_5\d\d/.test(errorCode)) failureStage = "relay";
-
-  const retryable =
-    event.statusCode === 429 ||
-    Number(event.statusCode || 0) >= 500 ||
-    failureStage === "timeout" ||
-    failureStage === "relay" ||
-    /temporar|busy|rate_limited/.test(errorCode);
-
-  return { errorCode, failureStage, retryable };
-}
-
-function humanizeErrorCode(value: string) {
-  return value
-    .replace(/:.*/, "")
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function classifyFailure(event: UsageEvent) {
-  const normalized = normalizeFailureDiagnostics(event);
-  const errorCode = String(normalized.errorCode || event.errorCode || event.errorClass || "tool_error").toLowerCase();
-  const failureStage = String(normalized.failureStage || "tool");
-
-  if (errorCode === "command_blocked") {
-    return { ...normalized, failureCategory: "handled", severity: "info", operational: false, diagnosticLabel: "Blocked by policy" };
-  }
-  if (errorCode.startsWith("replacement_count_mismatch")) {
-    return { ...normalized, failureCategory: "handled", severity: "info", operational: false, diagnosticLabel: "Edit target changed" };
-  }
-  if (failureStage === "validation" || failureStage === "policy") {
-    return { ...normalized, failureCategory: "handled", severity: "info", operational: false, diagnosticLabel: humanizeErrorCode(errorCode) };
-  }
-  if (failureStage === "process" || errorCode === "process_exit_nonzero") {
-    return { ...normalized, failureCategory: "tool", severity: "warning", operational: false, diagnosticLabel: "Command failed" };
-  }
-  if (failureStage === "timeout" || failureStage === "relay" || failureStage === "worker") {
-    const diagnosticLabel =
-      /agent_.*timeout|agent_timeout/.test(errorCode) ? "Agent timed out" :
-      /agent_(offline|stale|unavailable)/.test(errorCode) ? "Agent offline" :
-      humanizeErrorCode(errorCode);
-    return { ...normalized, failureCategory: "infrastructure", severity: "error", operational: true, diagnosticLabel };
-  }
-  return { ...normalized, failureCategory: "tool", severity: "warning", operational: false, diagnosticLabel: humanizeErrorCode(errorCode) };
-}
-
-type ActivityCursor = { timestamp: string; id: string };
-type ScanCursor = { v: 2; before: string; legacy?: ActivityCursor };
-const RAW_QUERY_SCAN_LIMIT = 500;
-
-function encodeScanCursor(cursor: ScanCursor) {
-  return btoa(JSON.stringify(cursor)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function decodeScanCursor(value: string | null): ScanCursor | ActivityCursor | null {
-  if (!value || value.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
-  try {
-    const parsed = JSON.parse(atob(value.replace(/-/g, "+").replace(/_/g, "/")));
-    if (parsed.v !== undefined) {
-      if (parsed.v !== 2 || typeof parsed.before !== "string" || parsed.before.length > 1024 ||
-          !/^event:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z:/.test(parsed.before)) return null;
-      const timestamp = parsed.before.slice(6,30);
-      if (!Number.isFinite(Date.parse(timestamp)) || new Date(timestamp).toISOString() !== timestamp ||
-          !/^[A-Za-z0-9%_.:~-]+$/.test(parsed.before.slice(31))) return null;
-      if (parsed.legacy && (typeof parsed.legacy.timestamp !== "string" || !Number.isFinite(Date.parse(parsed.legacy.timestamp)) ||
-          typeof parsed.legacy.id !== "string" || parsed.legacy.id.length > 200)) return null;
-      return { v: 2, before: parsed.before, ...(parsed.legacy ? { legacy: parsed.legacy } : {}) };
-    }
-    return decodeActivityCursor(value);
-  } catch { return null; }
-}
-
-function activityTimestamp(event: any) {
-  return String(event.timestamp || event.startedAt || "");
-}
-
-function activityStableId(event: any) {
-  return String(event.toolCallId || event.activityId || [event.userId, event.tool, event.agentId || "", activityTimestamp(event)].join(":"));
-}
-
-function decodeActivityCursor(value: string | null): ActivityCursor | null {
-  if (!value || value.length > 512) return null;
-  try {
-    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
-    const parsed = JSON.parse(atob(padded));
-    if (typeof parsed?.timestamp !== "string" || typeof parsed?.id !== "string" || !Number.isFinite(Date.parse(parsed.timestamp))) return null;
-    return { timestamp: parsed.timestamp, id: parsed.id.slice(0, 200) };
-  } catch {
-    return null;
-  }
-}
-
-function olderThanCursor(event: any, cursor: ActivityCursor) {
-  const eventTime = Date.parse(activityTimestamp(event));
-  const cursorTime = Date.parse(cursor.timestamp);
-  if (eventTime !== cursorTime) return eventTime < cursorTime;
-  return activityStableId(event).localeCompare(cursor.id) < 0;
-}
-
 function nextUtcDay(nowMs: number) {
   const now = new Date(nowMs);
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
@@ -232,7 +111,7 @@ export class Usage extends DurableObject {
   constructor(ctx: DurableObjectState, env: UsageEnv) {
     super(ctx, env);
     this.usageEnv = env;
-    this.aggregates = new UsageAggregates(ctx.storage, event => !event.ok && classifyFailure(event).operational);
+    this.aggregates = new UsageAggregates(ctx.storage, () => false);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -375,22 +254,15 @@ export class Usage extends DurableObject {
         requestBytes: Number.isFinite(Number(body.requestBytes)) ? Number(body.requestBytes) : 0,
         responseBytes: Number.isFinite(Number(body.responseBytes)) ? Number(body.responseBytes) : 0,
       };
-      if (!event.ok) Object.assign(event, normalizeFailureDiagnostics(event));
-      const eventKey = !event.ok ? `event:${event.timestamp}:${crypto.randomUUID()}` : undefined;
       await this.ctx.storage.transaction(async txn => {
         await this.aggregates.record(txn, event);
-        if (eventKey) await txn.put(eventKey, event);
       });
       this.aggregates.invalidate(event);
-      if (!event.ok) {
-        await publishDashboard(this.usageEnv, ["overview", "errors"], event.userId);
-      } else {
-        const now = Date.now();
-        const lastPublishedAt = this.lastOverviewPublishAt.get(event.userId) || 0;
-        if (now - lastPublishedAt >= 60_000) {
-          this.lastOverviewPublishAt.set(event.userId, now);
-          await publishDashboard(this.usageEnv, ["overview"], event.userId);
-        }
+      const now = Date.now();
+      const lastPublishedAt = this.lastOverviewPublishAt.get(event.userId) || 0;
+      if (now - lastPublishedAt >= 60_000) {
+        this.lastOverviewPublishAt.set(event.userId, now);
+        await publishDashboard(this.usageEnv, ["overview"], event.userId);
       }
       return Response.json({ ok: true });
     }
@@ -457,73 +329,6 @@ export class Usage extends DurableObject {
         bounded: summary.bounded, coverage: summary.coverage, p95Approximate: true });
     }
 
-    if (url.pathname === "/errors/query" && request.method === "GET") {
-      const errors = true;
-      const limit = boundedInt(url.searchParams.get("limit"), 20, 1, 100);
-      const cursorValue = url.searchParams.get("cursor");
-      const cursor = decodeScanCursor(cursorValue);
-      if (cursorValue && !cursor) return Response.json({ error: "invalid_cursor" }, { status: 400 });
-      const scan = cursor && "v" in cursor ? cursor : null;
-      const legacy = scan?.legacy || (cursor && !("v" in cursor) ? cursor : null);
-      const fromMs = Date.parse(url.searchParams.get("from") || "");
-      const toMs = Date.parse(url.searchParams.get("to") || "");
-      if (Number.isFinite(fromMs) && Number.isFinite(toMs) && fromMs > toMs) {
-        return Response.json({ error: "invalid_usage_window" }, { status: 400 });
-      }
-
-      const userId = url.searchParams.get("userId");
-      const tool = url.searchParams.get("tool");
-      const agentId = url.searchParams.get("agentId");
-      const activityId = url.searchParams.get("activityId");
-      const status = url.searchParams.get("status");
-      const errorClass = url.searchParams.get("errorClass");
-      const operational = url.searchParams.get("operational");
-      const q = url.searchParams.get("q");
-      const matches = (event: any) => {
-        const when = Date.parse(errors ? event.timestamp : event.startedAt || event.timestamp);
-        const search = String(q || "").trim().toLowerCase();
-        const searchable = (String(event.tool || "") + " " + String(event.agentId || "")).toLowerCase();
-        return (!errors || event.ok === false) &&
-          (!userId || event.userId === userId) &&
-          (!tool || event.tool === tool) &&
-          (!agentId || event.agentId === agentId) &&
-          (!activityId || event.activityId === activityId) &&
-          (!status || event.status === status) &&
-          (!errorClass || event.errorClass === errorClass) &&
-          (!errors || operational === null || String(event.operational) === operational) &&
-          (!search || searchable.includes(search)) &&
-          (!Number.isFinite(fromMs) || when >= fromMs) &&
-          (!Number.isFinite(toMs) || when <= toMs) &&
-          (!legacy || olderThanCursor(event, legacy));
-      };
-
-      // Failure history is deliberately served from bounded raw storage. This avoids
-      // SQL index writes/backfills while retaining pagination and filters.
-      const toEnd = errors && Number.isFinite(toMs) ? "event:" + new Date(toMs).toISOString() + ":\uffff" : undefined;
-      const end = scan?.before && toEnd ? (scan.before < toEnd ? scan.before : toEnd) : scan?.before || toEnd;
-      const start = errors && Number.isFinite(fromMs) ? "event:" + new Date(fromMs).toISOString() : undefined;
-      const records = start && end && end <= start ? new Map<string, UsageEvent>() : await this.ctx.storage.list<UsageEvent>({
-        prefix: "event:", reverse: true, limit: RAW_QUERY_SCAN_LIMIT,
-        ...(end ? { end } : {}),
-        ...(start ? { start } : {}),
-      });
-      const history = [...records].map(([key, event]) => ({ key, event: errors ? { ...event, ...classifyFailure(event) } : {
-        ...event, activityId: event.activityId || (event.toolCallId ? fallbackActivityId(event.toolCallId) : undefined),
-        status: event.ok ? "success" : "error",
-      } }));
-      const frontier = [...records.keys()].at(-1);
-      const storageHasMore = records.size === RAW_QUERY_SCAN_LIMIT;
-      const matched = history.filter(row => matches(row.event))
-        .sort((a,b) => a.key < b.key ? 1 : a.key > b.key ? -1 : 0);
-      const page = matched.slice(0, limit);
-      const hasMore = matched.length > limit || storageHasMore;
-      const before = matched.length > limit ? page.at(-1)!.key : frontier;
-      const nextCursor = hasMore && before ? encodeScanCursor({ v: 2, before, ...(legacy ? { legacy } : {}) }) : null;
-      return Response.json({ items: page.map(row => row.event), pageSize: page.length,
-        matchedTotal: matched.length, matchedTotalLowerBound: hasMore, hasMore: Boolean(nextCursor), nextCursor,
-        bounded: storageHasMore, scanned: records.size, scanLimit: RAW_QUERY_SCAN_LIMIT, queryMode: "kv-fallback" });
-    }
-
     if (url.pathname === "/query" && request.method === "GET") {
       const day = url.searchParams.get("day") || new Date().toISOString().slice(0, 10);
       const from = url.searchParams.get("from");
@@ -553,17 +358,7 @@ export class Usage extends DurableObject {
       }
       const start = Date.parse(day + "T00:00:00.000Z");
       const summary = await this.aggregates.window(start, start + 86400000 - 1, filters, false);
-      const recentLimit = Math.max(0, Math.min(1000, Number(url.searchParams.get("recentLimit")) || 0));
-      let recent: UsageEvent[] = [];
-      if (recentLimit > 0) {
-        const events = await this.ctx.storage.list<UsageEvent>({ prefix: "event:", reverse: true, limit: recentLimit });
-        recent = [...events.values()].filter((event) =>
-          (!userId || event.userId === userId) &&
-          (!tool || event.tool === tool) &&
-          (!agentId || event.agentId === agentId)
-        ).slice(0, recentLimit);
-      }
-      return Response.json({ day, metric: summary.metric, recent });
+      return Response.json({ day, metric: summary.metric });
     }
 
     return Response.json({ error: "not_found" }, { status: 404 });

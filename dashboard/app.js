@@ -15,15 +15,8 @@ let refreshQueued = false;
 let dataRetryTimer = null;
 let dataRetryAttempt = 0;
 const pendingLiveTopics = new Set();
-const agentNameCache = new Map();
-let pendingDeleteUser = null;
 let dashboardPeriod = null;
 let dashboardRange = "today";
-let adminUsersCache = [];
-const PAGE_SIZE = 20;
-const errorPaging = { cursor: "", stack: [], nextCursor: null };
-let errorMode = "attention";
-let userMode = "active";
 
 const BKK_TZ = "Asia/Bangkok";
 const API_TIMEOUT_MS = 12000;
@@ -33,8 +26,6 @@ function dashboardAvailable() { return !document.hidden && navigator.onLine !== 
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtNum = (v) => new Intl.NumberFormat("en-US").format(Number(v || 0));
-const fmtMs = (v) => Number(v || 0) >= 1000 ? (Number(v) / 1000).toFixed(1) + "s" : Math.round(Number(v || 0)) + " ms";
-const fmtPct = (v) => ((Number(v || 0)) * 100).toFixed(1) + "%";
 const bkkTime = (iso) => new Intl.DateTimeFormat("en-GB", {
   timeZone: BKK_TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
 }).format(new Date(iso));
@@ -68,88 +59,6 @@ const ICONS = {
 };
 function icon(name, cls = "") {
   return '<svg class="icon ' + cls + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' + (ICONS[name] || ICONS.info) + "</svg>";
-}
-
-const toolIconName = (tool) => {
-  const name = String(tool || "");
-  if (name.startsWith("terminal")) return "terminal";
-  if (name === "screenshot") return "monitor";
-  if (["desktop_step", "mouse_click", "keyboard_input", "focus_window"].includes(name)) return "mouse";
-  return "activity";
-};
-
-const humanTool = (tool) => ({
-  terminal_exec: "One-shot command",
-  terminal_start: "Command session",
-  terminal_start_shell: "Interactive shell",
-  terminal_batch_start: "Terminal batch",
-  terminal_read: "Session output",
-  terminal_write: "Session input",
-  terminal_kill: "End session",
-  read_file: "Read source file",
-  read_multiple_files: "Read source files",
-  list_directory: "List directory",
-  start_search: "Search files",
-  write_file: "Write file",
-  edit_block: "Edit file",
-  screenshot: "Capture desktop",
-  keyboard_input: "Keyboard input",
-  mouse_click: "Mouse input",
-}[tool] || String(tool || "").replaceAll("_", " "));
-
-const detailRecords = new Map();
-let detailSeq = 0;
-const SAFE_DETAIL_KEYS = [
-  "userId", "tool", "agentId", "activityId", "toolCallId", "timestamp", "startedAt",
-  "durationMs", "status", "statusCode", "exitCode", "errorClass", "errorSource", "errorCode",
-  "failureStage", "retryable", "agentName", "requestBytes", "responseBytes", "ok",
-  "workerOverheadMs", "relayRoundTripMs", "transportMs", "agentQueueWaitMs", "agentHandlerMs",
-];
-function registerDetail(event) {
-  const safe = {};
-  for (const key of SAFE_DETAIL_KEYS) if (event?.[key] !== undefined) safe[key] = event[key];
-  const id = "detail-" + (++detailSeq);
-  detailRecords.set(id, safe);
-  return id;
-}
-function activityLabel(value) {
-  return value ? "Related calls" : "Single call";
-}
-function showDetail(id, title = "Safe metadata") {
-  const data = detailRecords.get(id);
-  if (!data) return;
-  $("detailTitle").textContent = title;
-  const rows = Object.entries(data).map(([key, value]) =>
-    '<div class="detail-row"><span class="detail-key">' + esc(key) + '</span><strong class="' + (key.endsWith("Id") ? "mono" : "") + '">' + esc(value) + "</strong></div>"
-  ).join("");
-  $("detailBody").innerHTML = rows;
-  $("detailDialog").showModal();
-}
-function bindDetailRows() {
-  document.querySelectorAll("[data-detail-id]").forEach((row) => {
-    row.tabIndex = 0;
-    row.onclick = (event) => {
-      if (event.target.closest("button,select,input,a")) return;
-      showDetail(row.dataset.detailId, row.dataset.detailTitle || "Safe metadata");
-    };
-    row.onkeydown = (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        showDetail(row.dataset.detailId, row.dataset.detailTitle || "Safe metadata");
-      }
-    };
-  });
-}
-function bindTableFilter(inputId) {
-  const input = $(inputId);
-  if (!input) return;
-  input.oninput = () => {
-    const q = input.value.trim().toLowerCase();
-    document.querySelectorAll("[data-filter-row]").forEach((row) => {
-      row.hidden = Boolean(q && !row.textContent.toLowerCase().includes(q));
-    });
-  };
-  input.oninput();
 }
 
 function liveNodeKey(node) {
@@ -353,9 +262,7 @@ function setLiveState(state) {
 function isAdmin() { return currentUser?.admin === true; }
 
 function navItems() {
-  return isAdmin()
-    ? [["overview", "Overview", "overview"], ["users", "Users", "users"], ["errors", "Errors", "alert"]]
-    : [["overview", "My Overview", "overview"]];
+  return [["overview", isAdmin() ? "Usage" : "My usage", "overview"]];
 }
 function renderNav() {
   $("nav").innerHTML = navItems().map(([id, label, glyph]) =>
@@ -389,8 +296,6 @@ async function loadActive({ patch = false } = {}) {
   setNotice("");
   try {
     if (activeView === "overview") await loadOverview({ patch });
-    else if (activeView === "users") await loadUsers({ patch });
-    else if (activeView === "errors") await loadErrors({ patch });
     clearDataRetry();
     touchFreshness();
     return true;
@@ -426,11 +331,7 @@ async function refreshActiveIncrementally({ initial = false } = {}) {
   }
 }
 function topicsTouchActiveView(topics) {
-  const set = new Set(topics);
-  if (activeView === "overview") return ["overview", "users", "errors", "agents"].some((topic) => set.has(topic));
-  if (activeView === "users") return set.has("users") || set.has("agents");
-  if (activeView === "errors") return errorPaging.stack.length === 0 && set.has("errors");
-  return false;
+  return topics.includes("overview") || topics.includes("users") || topics.includes("agents");
 }
 function queueLiveRefresh(topics = []) {
   for (const topic of topics) pendingLiveTopics.add(topic);
@@ -514,7 +415,7 @@ function connectLiveChannel() {
       socket.send(JSON.stringify({ type: "ping" }));
     }, 50000);
     setLiveState("live");
-    if (reconnect && !dataRetryTimer) queueLiveRefresh(["overview", "users", "errors", "agents"]);
+    if (reconnect && !dataRetryTimer) queueLiveRefresh(["overview", "users", "agents"]);
   };
   socket.onmessage = (event) => {
     if (liveSocket !== socket || typeof event.data !== "string") return;
@@ -544,308 +445,57 @@ function startLiveChannel() {
   setLiveState("connecting");
   connectLiveChannel();
 }
-function metricCard(label, value, meta = "", tone = "") {
-  return '<div class="metric ' + esc(tone) + '"><div class="metric-label">' + esc(label) + '</div>' +
-    '<div class="metric-value">' + esc(value) + '</div><div class="metric-meta">' + esc(meta) + "</div></div>";
-}
 function periodChips(period) {
-  const current = period?.range || dashboardRange || "today";
-  const ranges = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]];
-  return '<div class="period-chips">' + ranges.map(([value, label]) =>
-    '<button type="button" class="period-chip' + (current === value ? ' primary' : '') + '" data-overview-range="' + value + '">' +
-      (current === value ? icon("clock") : "") + esc(label) + "</button>"
-  ).join("") + "</div>";
+  const selected = period?.range || dashboardRange;
+  return '<div class="period-tabs" role="group" aria-label="Usage period">' +
+    [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]].map(([value, label]) =>
+      '<button type="button" class="period-tab ' + (selected === value ? "active" : "") + '" data-overview-range="' + value + '">' + esc(label) + "</button>"
+    ).join("") + "</div>";
 }
 function periodDisplayLabel(range = dashboardRange) {
-  return range === "30d" ? "Last 30 days" : range === "7d" ? "Last 7 days" : "Today";
-}
-
-function resetErrorPaging() {
-  errorPaging.cursor = "";
-  errorPaging.stack = [];
-  errorPaging.nextCursor = null;
-}
-function paginationMarkup(kind, paging, hasMore) {
-  const page = paging.stack.length + 1;
-  return '<div class="pagination-bar" data-live-key="' + kind + '-pagination">' +
-    '<span class="pagination-summary">Page ' + page + ' \u00b7 up to ' + PAGE_SIZE + ' rows</span>' +
-    '<div class="pagination-actions">' +
-      '<button class="button small" type="button" data-page-newer="' + kind + '"' + (page === 1 ? " disabled" : "") + '>\u2190 Newer</button>' +
-      '<button class="button small" type="button" data-page-older="' + kind + '"' + (!hasMore ? " disabled" : "") + '>Older \u2192</button>' +
-    "</div></div>";
-}
-function bindPaging(kind, paging, load) {
-  const newer = document.querySelector('[data-page-newer="' + kind + '"]');
-  const older = document.querySelector('[data-page-older="' + kind + '"]');
-  if (newer) newer.onclick = async () => {
-    if (!paging.stack.length) return;
-    paging.cursor = paging.stack.pop() || "";
-    await load({ patch: true });
-  };
-  if (older) older.onclick = async () => {
-    if (!paging.nextCursor) return;
-    paging.stack.push(paging.cursor);
-    paging.cursor = paging.nextCursor;
-    await load({ patch: true });
-  };
-}
-
-function chartMarkup(buckets = [], period = dashboardPeriod) {
-  const byDay = period?.range === "7d" || period?.range === "30d";
-  const max = Math.max(1, ...buckets.map((bucket) => Number(bucket.calls || 0)));
-  const yTicks = [1, .75, .5, .25, 0].map((ratio) => Math.round(max * ratio));
-  const yLabels = '<div class="chart-y-axis" aria-hidden="true">' +
-    yTicks.map((value) => '<span>' + fmtNum(value) + "</span>").join("") +
-    "</div>";
-  const bars = buckets.map((bucket, index) => {
-    const calls = Number(bucket.calls || 0);
-    const errors = Number(bucket.operationalErrors ?? bucket.errors ?? 0);
-    const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
-    const start = bkkHourMinute(bucket.from);
-    const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
-    const label = byDay ? bkkDayLabel(bucket.from) : start + "\u2013" + end;
-    const current = index === buckets.length - 1 ? " current" : "";
-    return '<div class="chart-bar' + current + '" style="--bar-height:' + height + '%" tabindex="0" role="img"' +
-      ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
-      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations \u00b7 ' + fmtNum(errors) + ' operational errors</span><small>Aggregate usage</small></span>' +
-      '<span class="bar-fill"></span>' +
-      "</div>";
-  }).join("");
-  const labelEvery = byDay ? (buckets.length > 14 ? 5 : 1) : 3;
-  const xLabels = buckets.map((bucket, index) => {
-    const show = index % labelEvery === 0 || index === buckets.length - 1;
-    const label = byDay ? bkkDayLabel(bucket.from) : bkkHourMinute(bucket.from);
-    return '<span class="' + (show ? "" : "muted") + '">' + (show ? esc(label) : "") + "</span>";
-  }).join("");
-  return '<div class="chart-frame">' + yLabels +
-    '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div><div class="chart-bars">' + bars +
-    '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
+  return range === "7d" ? "7 days" : range === "30d" ? "30 days" : "Today";
 }
 
 async function loadOverview({ patch = false } = {}) {
-  const requestedPeriodLabel = periodDisplayLabel(dashboardRange);
-  setHeader(
-    isAdmin() ? "System overview" : "My overview",
-    isAdmin() ? requestedPeriodLabel + " across Chat Relay" : requestedPeriodLabel + " \u00b7 your activity",
-  );
+  setHeader(isAdmin() ? "Usage" : "My usage", "Tool calls by account and agent");
   const data = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange));
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
   dashboardRange = dashboardPeriod.range || dashboardRange;
-  const periodLabel = periodDisplayLabel(dashboardRange);
-  const chartUnit = dashboardRange === "today" ? "hour" : "day";
-  const m = data.usage || {};
-  const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : periodLabel.toLowerCase();
-  const cards = [
-    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
-    metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
-    metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), m.p95Approximate ? "p95 is approximate" : exactMeta),
-    metricCard(
-      isAdmin() ? "Operational error rate" : "My operational error rate",
-      fmtPct(m.operationalErrorRate ?? m.errorRate),
-      fmtNum(m.operationalErrors ?? m.errors) + " infrastructure failures",
-      Number(m.operationalErrors ?? m.errors ?? 0) ? "metric-alert" : "",
-    ),
-  ];
-  if (isAdmin()) {
-    cards.push(metricCard("Online agents", (data.agents?.online || 0) + " / " + (data.agents?.total || 0), "connected agents"));
-    cards.push(metricCard("Active users", fmtNum(data.activeUsers ?? data.users?.enabled), "enabled users"));
-  }
-  const top = Array.isArray(data.topTools) ? data.topTools : [];
-  const boundedNotice = data.bounded
-    ? '<div class="data-warning">' + icon("alert") + '<span>Some detailed history is unavailable. Counts cover retained history.</span></div>'
-    : "";
-  const liveMarkup =
+  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+
+  const accountMarkup = accounts.length ? accounts.map((account) => {
+    const agents = Array.isArray(account.agents) ? account.agents : [];
+    const agentRows = agents.length ? agents.map((agent) =>
+      '<div class="agent-usage-row" data-live-key="' + esc(account.userId + ":" + agent.agentId) + '">' +
+        '<div class="agent-usage-name"><span class="agent-dot"></span><div><strong>' + esc(agent.name || agent.agentId) +
+        '</strong><small>' + esc(agent.agentId) + '</small></div></div>' +
+        '<strong class="agent-usage-count">' + fmtNum(agent.calls) + '</strong>' +
+      '</div>'
+    ).join("") : '<div class="empty-inline">No agents for this account.</div>';
+
+    return '<section class="panel account-agent-panel" data-live-key="' + esc(account.userId) + '">' +
+      '<div class="panel-heading"><div><div class="panel-kicker">Account</div><h2>' + esc(account.name || account.userId) +
+      '</h2><div class="secondary-text">' + esc(account.login || account.userId) + '</div></div>' +
+      '<div class="account-total"><strong>' + fmtNum(account.calls) + '</strong><span>tool calls</span></div></div>' +
+      '<div class="agent-usage-list">' + agentRows + '</div></section>';
+  }).join("") : '<section class="panel"><div class="empty-inline">No usage in this period.</div></section>';
+
+  renderContent(
     '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +
-      '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
-    boundedNotice +
-    '<div class="metric-grid">' + cards.join("") + "</div>" +
-    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by ' + chartUnit + '</h2></div><span class="panel-meta">Aggregate invocations</span></div>' +
-      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>" +
-    '<section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Breakdown</div><h2>Top tools</h2></div></div><div class="list top-tools">' +
-      (top.length ? top.map((item, index) =>
-        '<div class="list-row"><div class="tool-rank">' + (index + 1) + '</div><div class="list-copy"><div class="primary-text">' + esc(item.tool) +
-        '</div><div class="secondary-text">' + esc(humanTool(item.tool)) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + "</strong></div>"
-      ).join("") : '<div class="empty-inline">No tool invocations in this period.</div>') +
-    "</div></section></div>" +
-    (isAdmin() ? '<section class="panel account-usage-panel"><div class="panel-heading"><div><div class="panel-kicker">Accounts</div><h2>Tool invocations by account</h2></div><span class="panel-meta">' + esc(periodLabel) + '</span></div><div class="list account-usage">' +
-      ((data.accountUsage || []).length ? data.accountUsage.map((item) =>
-        '<div class="list-row"><div class="list-copy"><div class="primary-text">' + esc(item.name || item.userId) + '</div><div class="secondary-text">' + esc(item.login || item.userId) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + '</strong></div>'
-      ).join("") : '<div class="empty-inline">No account usage in this period.</div>') +
-    "</div></section>" : "");
-  renderContent(liveMarkup, patch);
+      '<span class="privacy-chip">' + icon("info") + periodDisplayLabel(dashboardRange) + "</span></div>" +
+    '<div class="account-agent-grid">' + accountMarkup + "</div>",
+    patch,
+  );
+
   document.querySelectorAll("[data-overview-range]").forEach((button) => {
     button.onclick = async () => {
       const nextRange = button.dataset.overviewRange || "today";
       if (nextRange === dashboardRange) return;
       dashboardRange = nextRange;
       dashboardPeriod = null;
-      await loadOverview();
+      await loadOverview({ patch: true });
     };
   });
-}
-
-function statusBadge(status) {
-  const normalized = String(status || "").toLowerCase();
-  const tone = normalized === "success" ? "ok" : normalized === "running" ? "running" : normalized === "error" ? "bad" : "";
-  const glyph = normalized === "success" ? "check" : normalized === "error" ? "x" : normalized === "running" ? "activity" : "info";
-  const label = normalized ? normalized[0].toUpperCase() + normalized.slice(1) : "Unknown";
-  return '<span class="status-pill ' + tone + '">' + icon(glyph) + esc(label) + "</span>";
-}
-async function ensureCallPeriod() {
-  if (dashboardPeriod?.range === dashboardRange && dashboardPeriod?.from && dashboardPeriod?.to) return;
-  const overview = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange));
-  dashboardPeriod = overview.period;
-}
-function bindPeriodRange(loader) {
-  document.querySelectorAll("[data-overview-range]").forEach((button) => {
-    button.onclick = async () => {
-      const nextRange = button.dataset.overviewRange || "today";
-      if (nextRange === dashboardRange) return;
-      dashboardRange = nextRange;
-      dashboardPeriod = null;
-      resetErrorPaging();
-      await loader({ patch: true });
-    };
-  });
-}
-async function loadAdminUsersForFilter() {
-  if (!isAdmin() || adminUsersCache.length) return;
-  const data = await api("/admin/api/users?limit=100");
-  adminUsersCache = Array.isArray(data.items) ? data.items : [];
-}
-function userDisplayName(userId) {
-  const id = String(userId || "");
-  if (!id) return "-";
-  const user = adminUsersCache.find((item) => item.id === id);
-  return user?.name || user?.login || id;
-}
-
-async function loadUsers({ patch = false } = {}) {
-  if (!isAdmin()) return switchView("overview");
-  setHeader("Users", "Access, roles, and connected agents");
-  const deleted = userMode === "deleted";
-  const data = await api("/admin/api/users?limit=100&deleted=" + deleted);
-  const rows = (data.items || []).map((user) => {
-    const agentMeta = fmtNum(user.agentCount) + " assigned \u00b7 " + fmtNum(user.onlineAgentCount) + " online";
-    const assignedAgents = Array.isArray(user.assignedAgents) ? user.assignedAgents : [];
-    const agentMarkup = assignedAgents.length
-      ? '<div class="agent-assignment-list">' + assignedAgents.map((agent) =>
-          '<span class="agent-assignment" title="' + esc(agent.id) + '"><i class="agent-dot ' + (agent.online ? 'online' : '') + '"></i>' + esc(agent.name || agent.id) + '</span>'
-        ).join('') + '</div><span class="agent-summary">' + esc(agentMeta) + '</span>'
-      : '<span class="agent-summary">No assigned agents</span>';
-    return '<tr data-filter-row data-live-key="' + esc(user.id) + '"><td><div class="identity-stack"><span class="avatar">' + esc((user.name || user.login || "?").slice(0, 1).toUpperCase()) + '</span><div><div class="primary-text">' + esc(user.name) + '</div><div class="secondary-text">' + esc(user.login || user.id) + "</div></div></div></td>" +
-      '<td><span class="role-tag">' + esc(user.admin ? "Admin" : "User") + "</span></td>" +
-      '<td>' + statusBadge(user.deletedAt ? "error" : user.enabled ? "success" : "disabled").replace("Success", "Enabled").replace("Error", "Deleted") + "</td>" +
-      '<td><div class="agent-count">' + agentMarkup + "</div></td>" +
-      '<td>' + esc(user.createdAt ? new Intl.DateTimeFormat("en-GB", { timeZone: BKK_TZ, day: "2-digit", month: "short", year: "numeric" }).format(new Date(user.createdAt)) : "-") + "</td>" +
-      '<td>' + (user.id === currentUser.id
-        ? '<span class="current-user-label">Current user</span>'
-        : user.deletedAt
-          ? '<button class="button small" data-restore="' + esc(user.id) + '">' + icon("refresh") + "Restore</button>"
-          : '<button class="button small danger" data-delete="' + esc(user.id) + '" data-name="' + esc(user.name) + '">' + icon("trash") + "Soft delete</button>") +
-      "</td></tr>";
-  }).join("");
-
-  const liveMarkup =
-    '<div class="filters-panel compact"><div class="filters-row"><div class="error-mode-toggle"><button type="button" class="button small ' + (userMode === "active" ? "primary" : "") + '" data-user-mode="active">Active</button><button type="button" class="button small ' + (userMode === "deleted" ? "primary" : "") + '" data-user-mode="deleted">Deleted</button></div><label class="filter-control grow"><span>Search users</span><div class="input-with-icon">' +
-      icon("search") + '<input id="userSearch" placeholder="Name, login, role, agent"></div></label></div></div>' +
-    '<div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Agents</th><th>Created</th><th>Action</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="6"><div class="table-empty">' + (deleted ? "No deleted users." : "No active users.") + '</div></td></tr>') + "</tbody></table></div>";
-  renderContent(liveMarkup, patch);
-
-  bindTableFilter("userSearch");
-  document.querySelectorAll("[data-user-mode]").forEach((button) => button.onclick = async () => {
-    const nextMode = button.dataset.userMode === "deleted" ? "deleted" : "active";
-    if (nextMode === userMode) return;
-    userMode = nextMode;
-    await loadUsers({ patch: true });
-  });
-  document.querySelectorAll("[data-delete]").forEach((button) => button.onclick = () => {
-    pendingDeleteUser = button.dataset.delete;
-    $("confirmCopy").textContent = "Disable dashboard and relay access for " + button.dataset.name + "?";
-    $("confirmDialog").showModal();
-  });
-  document.querySelectorAll("[data-restore]").forEach((button) => button.onclick = async () => {
-    await api("/admin/api/users/restore", { method: "POST", body: JSON.stringify({ userId: button.dataset.restore }) });
-    await loadUsers({ patch: true });
-  });
-}
-
-function diagnosticStageLabel(stage) {
-  return ({
-    validation: "Validation",
-    policy: "Policy",
-    process: "Command execution",
-    worker: "Worker",
-    relay: "Relay",
-    agent: "Agent",
-    timeout: "Timeout",
-    tool: "Tool",
-  })[stage] || "Tool";
-}
-function diagnosticResult(event) {
-  if (event.exitCode !== null && event.exitCode !== undefined) return "Exit " + event.exitCode;
-  if (event.statusCode !== null && event.statusCode !== undefined) return "HTTP " + event.statusCode;
-  return "\u2014";
-}
-async function loadErrors({ patch = false } = {}) {
-  detailRecords.clear();
-  detailSeq = 0;
-  if (!isAdmin()) return switchView("overview");
-  setHeader("Errors", "Safe diagnostics for failed tool invocations");
-  await ensureCallPeriod();
-  await loadAdminUsersForFilter();
-  const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
-  if (dashboardPeriod?.from) params.set("from", dashboardPeriod.from);
-  params.set("to", new Date().toISOString());
-  if (errorPaging.cursor) params.set("cursor", errorPaging.cursor);
-  if (errorMode === "attention") params.set("operational", "true");
-  const data = await api("/admin/api/errors?" + params);
-  errorPaging.nextCursor = data.nextCursor || null;
-  const items = data.items || [];
-  const rows = items.length ? items.map((event) => {
-    const detailId = registerDetail(event);
-    const code = event.diagnosticLabel || event.errorCode || event.errorClass || "Tool failure";
-    const category = event.failureCategory === "infrastructure"
-      ? "Infrastructure"
-      : event.failureCategory === "handled"
-        ? "Expected"
-        : "Tool failure";
-    const retry = event.retryable ? "Retryable" : event.operational ? "Needs attention" : "Handled";
-    const rowKey = event.toolCallId || [event.timestamp, event.userId, event.tool, event.agentId].join(":");
-    return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Error diagnostic">' +
-      '<td class="time-cell"><strong>' + esc(bkkTime(event.timestamp)) + "</strong></td>" +
-      '<td><div class="error-cell"><span class="error-icon ' + esc(event.severity || "warning") + '">' + icon("alert") + '</span><div><strong>' + esc(code) + '</strong><span>' + esc(category + " \u00b7 " + retry) + "</span></div></div></td>" +
-      '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + '</span></td><td>' + esc(event.tool) + "</td>" +
-      '<td><div class="agent-cell"><strong>' + esc(event.agentName || event.agentId || "Resolving\u2026") + "</strong></div></td>" +
-      "<td>" + esc(fmtMs(event.durationMs)) + "</td>" +
-      '<td><span class="diagnostic-result">' + esc(diagnosticResult(event)) + '</span></td><td class="row-chevron">' + icon("chevron") + "</td></tr>";
-  }).join("") : '<tr><td colspan="8"><div class="table-empty">' + icon("check") + '<strong>' + (errorMode === "attention" ? "No operational errors today" : "No failures today") + '</strong><span>' + (errorMode === "attention" ? "Handled tool failures are hidden from this view." : "Safe diagnostics will appear here if a tool invocation fails.") + '</span></div></td></tr>';
-
-  const liveMarkup =
-    '<div class="section-toolbar">' + periodChips(dashboardPeriod) + '<span class="privacy-chip">' + icon("info") + "No commands, args, payloads, or output stored</span></div>" +
-    (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>This page scanned up to 500 history rows. Use Older to continue; totals are a lower bound.</span></div>" : "") +
-    '<div class="filters-panel compact"><div class="filters-row"><div class="error-mode-toggle"><button type="button" class="button small ' + (errorMode === "attention" ? "primary" : "") + '" data-error-mode="attention">Needs attention</button><button type="button" class="button small ' + (errorMode === "all" ? "primary" : "") + '" data-error-mode="all">All failures</button></div><label class="filter-control grow"><span>Search errors</span><div class="input-with-icon">' + icon("search") +
-      '<input id="errorSearch" placeholder="Code, category, user, tool, agent"></div></label></div></div>' +
-    '<div class="table-wrap error-table"><table><thead><tr><th>Time</th><th>Diagnostic</th><th>User</th><th>Tool</th><th>Agent</th><th>Duration</th><th>Result</th><th></th></tr></thead><tbody>' +
-      rows + "</tbody></table></div>" +
-    paginationMarkup("errors", errorPaging, Boolean(data.hasMore));
-  renderContent(liveMarkup, patch);
-  bindPeriodRange(loadErrors);
-  bindDetailRows();
-  bindTableFilter("errorSearch");
-  document.querySelectorAll("[data-error-mode]").forEach((button) => {
-    button.onclick = async () => {
-      const nextMode = button.dataset.errorMode === "all" ? "all" : "attention";
-      if (nextMode === errorMode) return;
-      errorMode = nextMode;
-      errorPaging.cursor = "";
-      errorPaging.stack.length = 0;
-      errorPaging.nextCursor = null;
-      await loadErrors({ patch: true });
-    };
-  });
-  bindPaging("errors", errorPaging, loadErrors);
 }
 
 $("logout").onclick = async () => {
@@ -859,32 +509,7 @@ $("refresh").onclick = () => {
   void refreshActiveIncrementally();
 };
 $("logout").insertAdjacentHTML("afterbegin", icon("logout"));
-document.querySelectorAll("[data-close-dialog]").forEach((button) => button.onclick = () => button.closest("dialog").close());
-$("cancelDelete").onclick = () => { $("confirmDialog").close(); pendingDeleteUser = null; };
-$("confirmDelete").onclick = async () => {
-  if (!pendingDeleteUser) return;
-  const button = $("confirmDelete");
-  const userId = pendingDeleteUser;
-  button.disabled = true;
-  button.textContent = "Deleting...";
-  setNotice("");
-  try {
-    await api("/admin/api/users/soft-delete", { method: "POST", body: JSON.stringify({ userId }) });
-    pendingDeleteUser = null;
-    adminUsersCache = [];
-    $("confirmDialog").close();
-    await loadUsers({ patch: true });
-    setNotice("User soft deleted.");
-  } catch (error) {
-    const message = error?.message || "request_failed";
-    $("confirmCopy").textContent = "Soft delete failed: " + message;
-    setNotice("Soft delete failed: " + message, true);
-  } finally {
-    button.disabled = false;
-    button.textContent = "Soft delete";
-  }
-};
-$("closeDetail").onclick = () => $("detailDialog").close();
+
 
 (async () => {
   try {

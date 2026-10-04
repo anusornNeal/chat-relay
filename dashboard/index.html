@@ -56,28 +56,6 @@
     </main>
   </div>
 
-  <dialog id="confirmDialog" class="dialog">
-    <div class="dialog-head">
-      <div><h2>Soft delete user?</h2><p id="confirmCopy"></p></div>
-    </div>
-    <div class="privacy-note">Login and access are blocked; active sessions are revoked. Usage and audit history remain available.</div>
-    <div class="dialog-actions">
-      <button id="cancelDelete" class="button" type="button">Cancel</button>
-      <button id="confirmDelete" class="button danger" type="button">Soft delete</button>
-    </div>
-  </dialog>
-
-  <dialog id="detailDialog" class="dialog">
-    <div class="dialog-head">
-      <div>
-        <h2 id="detailTitle">Safe detail</h2>
-        <p>Metadata only. Commands, arguments, payloads, output, and credentials are never shown.</p>
-      </div>
-      <button id="closeDetail" class="button small" type="button">Close</button>
-    </div>
-    <div id="detailBody" class="detail-list"></div>
-  </dialog>
-
   <script type="module" src="/dashboard/app.js"></script>
 </body>
 </html>

@@ -555,13 +555,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   if (path === "/admin/api/limits" && request.method === "GET") {
-    const current = await quotaPolicy(env);
-    const recentResponse = await usageStub(env).fetch("https://usage.internal/query?recentLimit=100");
-    const recentData = await recentResponse.json<any>();
-    const recentRejections = (Array.isArray(recentData.recent) ? recentData.recent : [])
-      .filter((event: any) => event?.errorClass === "rate_limited" || event?.errorClass === "quota_exceeded")
-      .slice(0, 20);
-    return Response.json({ ...current, recentRejections });
+    return Response.json(await quotaPolicy(env));
   }
 
   if (path === "/admin/api/limits" && request.method === "POST") {
@@ -597,99 +591,66 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const requestedRange = url.searchParams.get("range");
     const range: DashboardRange = requestedRange === "7d" || requestedRange === "30d" ? requestedRange : "today";
     const period = dashboardPeriod(range);
+    const usage = await usageWindow(env, period, adminAuthorized ? undefined : selfUserId);
+
     if (!adminAuthorized) {
-      const [usage, terminals] = await Promise.all([
-        usageWindow(env, period, selfUserId),
-        terminalActivity(env, selfUserId),
-      ]);
-      const activeTerminals = terminals.reduce((count, agent) => count +
-        agent.sessions.filter((session: any) => session.status === "running").length +
-        agent.batches.reduce((sum: number, batch: any) => sum + Number(batch.counts?.running || 0), 0), 0);
+      const agentUsage = (usage.agents ?? [])
+        .filter((entry: any) => entry.userId === selfUserId)
+        .map((entry: any) => ({
+          agentId: entry.agentId,
+          name: entry.agentId,
+          calls: Number(entry.calls || 0),
+        }))
+        .sort((a: any, b: any) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
       return Response.json({
         role: "user",
         user: sessionUser,
         period,
-        usage: usage.metric ?? null,
-        buckets: usage.buckets ?? [],
-        topTools: usage.topTools ?? [],
-        accountUsage: usage.users ?? [],
-        bounded: usage.bounded === true,
-        coverage: usage.coverage,
-        sampleSize: Number(usage.sampleSize || 0),
-        activeTerminals,
+        accounts: [{
+          userId: selfUserId,
+          name: sessionUser?.name || sessionUser?.login || selfUserId,
+          login: sessionUser?.login || "",
+          calls: Number(usage.metric?.calls || 0),
+          agents: agentUsage,
+        }],
       });
     }
 
     const state = await registryState(env);
-    const [agents, usage] = await Promise.all([
-      onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []),
-      usageWindow(env, period),
-    ]);
-    const terminals = await terminalActivity(env, undefined, state, agents);
-    const activeTerminals = terminals.reduce((count, agent) => count +
-      agent.sessions.filter((session: any) => session.status === "running").length +
-      agent.batches.reduce((sum: number, batch: any) => sum + Number(batch.counts?.running || 0), 0), 0);
-    const users = state.users ?? [];
-    const activeUsers = new Set(users.filter((u: any) => u.enabled && !u.deletedAt).map((u: any) => u.id));
-    const usageByUserId = new Map((usage.users ?? []).map((entry: any) => [entry.userId, entry]));
-    const accountUsage = users
-      .filter((user: any) => !user.deletedAt)
-      .map((user: any) => {
-        const metric: any = usageByUserId.get(user.id);
+    const users = (state.users ?? []).filter((user: any) => !user.deletedAt);
+    const agents = state.agents ?? [];
+    const grants = state.grants ?? [];
+    const agentById = new Map(agents.map((agent: any) => [agent.id, agent]));
+    const usageByUserAgent = new Map(
+      (usage.agents ?? []).map((entry: any) => [JSON.stringify([entry.userId, entry.agentId]), Number(entry.calls || 0)]),
+    );
+    const userTotals = new Map((usage.users ?? []).map((entry: any) => [entry.userId, Number(entry.calls || 0)]));
+
+    const accounts = users.map((user: any) => {
+      const ids = new Set<string>();
+      for (const agent of agents) if (agent.ownerUserId === user.id && !agent.retiredAt) ids.add(agent.id);
+      for (const grant of grants) if (grant.userId === user.id) ids.add(grant.agentId);
+      for (const entry of usage.agents ?? []) if (entry.userId === user.id) ids.add(entry.agentId);
+
+      const accountAgents = [...ids].map((agentId) => {
+        const agent: any = agentById.get(agentId);
         return {
-          userId: user.id,
-          calls: Number(metric?.calls || 0),
-          errors: Number(metric?.errors || 0),
-          operationalErrors: Number(metric?.operationalErrors || 0),
-          name: user.name || user.login || user.id,
-          login: user.login || "",
-          enabled: user.enabled === true,
+          agentId,
+          name: agent?.name || agentId,
+          calls: Number(usageByUserAgent.get(JSON.stringify([user.id, agentId])) || 0),
         };
-      })
-      .sort((a: any, b: any) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
-    const agentHealth = agents.reduce((summary: any, agent: any) => {
-      const health = agent.runtime?.health;
-      const queues = health?.queues && typeof health.queues === "object" ? Object.values(health.queues) as any[] : [];
-      summary.active += queues.reduce((sum, lane) => sum + Number(lane?.active || 0), 0);
-      summary.queued += queues.reduce((sum, lane) => sum + Number(lane?.queued || 0), 0);
-      summary.reconnectCount += Number(health?.reconnectCount || 0);
-      const disconnectedAt = health?.lastDisconnectedAt ? Date.parse(String(health.lastDisconnectedAt)) : NaN;
-      const currentLast = summary.lastDisconnectedAt ? Date.parse(String(summary.lastDisconnectedAt)) : NaN;
-      if (Number.isFinite(disconnectedAt) && (!Number.isFinite(currentLast) || disconnectedAt >= currentLast)) {
-        summary.lastDisconnectedAt = String(health.lastDisconnectedAt).slice(0, 64);
-        summary.lastCloseCode = Number.isInteger(Number(health.lastCloseCode)) ? Number(health.lastCloseCode) : null;
-        summary.lastConnectionDurationMs = Number.isFinite(Number(health.lastConnectionDurationMs)) ? Number(health.lastConnectionDurationMs) : null;
-      }
-      if (agent.runtime?.agentVersion) summary.versions.add(String(agent.runtime.agentVersion));
-      for (const capability of agent.runtime?.capabilities || []) summary.capabilities.add(String(capability));
-      return summary;
-    }, { active: 0, queued: 0, reconnectCount: 0, lastDisconnectedAt: null, lastCloseCode: null, lastConnectionDurationMs: null, versions: new Set<string>(), capabilities: new Set<string>() });
-    return Response.json({
-      role: "admin",
-      period,
-      users: { total: (state.users ?? []).length, enabled: activeUsers.size },
-      agents: { total: agents.length, online: agents.filter((a: any) => a.online).length },
-      agentHealth: {
-        active: agentHealth.active,
-        queued: agentHealth.queued,
-        reconnectCount: agentHealth.reconnectCount,
-        lastDisconnectedAt: agentHealth.lastDisconnectedAt,
-        lastCloseCode: agentHealth.lastCloseCode,
-        lastConnectionDurationMs: agentHealth.lastConnectionDurationMs,
-        versions: [...agentHealth.versions].slice(0, 8),
-        capabilities: [...agentHealth.capabilities].slice(0, 32),
-      },
-      grants: { total: (state.grants ?? []).length },
-      usage: usage.metric ?? null,
-      buckets: usage.buckets ?? [],
-      topTools: usage.topTools ?? [],
-      accountUsage,
-      bounded: usage.bounded === true,
-        coverage: usage.coverage,
-      sampleSize: Number(usage.sampleSize || 0),
-      activeTerminals,
-      activeUsers: activeUsers.size,
-    });
+      }).sort((a, b) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
+
+      return {
+        userId: user.id,
+        name: user.name || user.login || user.id,
+        login: user.login || "",
+        calls: Number(userTotals.get(user.id) || 0),
+        agents: accountAgents,
+      };
+    }).sort((a: any, b: any) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
+
+    return Response.json({ role: "admin", period, accounts });
   }
 
   if (path.startsWith("/admin/api/users/") && request.method === "GET") {
@@ -782,58 +743,6 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     if (!adminAuthorized) scoped.searchParams.set("userId", selfUserId);
     const response = await usageQuery(env, scoped);
     return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  if (path === "/admin/api/errors" && request.method === "GET") {
-    const query = new URLSearchParams();
-    for (const key of ["limit", "cursor", "tool", "agentId", "userId", "errorClass", "operational", "from", "to"]) {
-      const value = url.searchParams.get(key);
-      if (value) query.set(key, value);
-    }
-    const response = await usageStub(env).fetch("https://usage.internal/errors/query?" + query);
-    const data = await response.json<any>().catch(() => ({}));
-    if (!response.ok) return Response.json(data, { status: response.status });
-    const state = await registryState(env);
-    const agentNames = new Map((state.agents ?? []).map((agent: any) => [agent.id, agent.name]));
-    return Response.json({
-      ...data,
-      items: (data.items ?? []).map((item: any) => ({
-        ...item,
-        ...(item.agentId ? { agentName: agentNames.get(item.agentId) || item.agentId } : {}),
-      })),
-    });
-  }
-
-  if (path === "/admin/api/users" && request.method === "POST") {
-    const name = String(body?.name ?? "").trim();
-    const login = String(body?.login ?? "").trim();
-    const password = String(body?.password ?? "");
-    const makeAdmin = body?.admin === true;
-    if (!name || !login || password.length < 8 || password.length > 128) return error(400, "invalid_user");
-    const id = String(body?.id || generatedId(name, "user"));
-    const token = newToken("usr");
-    const created = await registryCall(env, "/users/create", { id, name, tokenHash: await hashToken(token) });
-    const createdData = await created.json<any>();
-    if (!created.ok) {
-      await recordAudit(env, actor, "user.create", { type: "user", id }, "failure", { status: created.status });
-      return Response.json(createdData, { status: created.status });
-    }
-    const credentials = await registryCall(env, "/users/set-login", { userId: id, login, password });
-    if (!credentials.ok) {
-      await registryCall(env, "/users/soft-delete", { userId: id });
-      const data = await credentials.json<any>();
-      await recordAudit(env, actor, "user.create", { type: "user", id }, "failure", { status: credentials.status });
-      return Response.json(data, { status: credentials.status });
-    }
-    let user = (await credentials.json<any>()).user;
-    if (makeAdmin) {
-      const role = await registryCall(env, "/users/set-admin", { userId: id, admin: true });
-      if (!role.ok) return error(502, "user_role_update_failed");
-      user = (await role.json<any>()).user;
-    }
-    await recordAudit(env, actor, "user.create", { type: "user", id }, "success", { admin: makeAdmin });
-    await publishDashboard(env, ["overview", "users"]);
-    return Response.json({ ok: true, user }, { status: 201 });
   }
 
   if (path === "/admin/api/users/soft-delete" && request.method === "POST") {

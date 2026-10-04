@@ -92,7 +92,7 @@ await rpc(createdUsers[0].token, 2, "whoami");
 const removedCalls = await admin("/admin/api/tool-calls");
 if (removedCalls.response.status !== 404) throw new Error("removed tool-call history API is still exposed");
 const aggregateOverview = await admin("/admin/api/overview");
-const accountRow = (aggregateOverview.data.accountUsage || []).find((item) => item.userId === createdUsers[0].user.id);
+const accountRow = (aggregateOverview.data.accounts || []).find((item) => item.userId === createdUsers[0].user.id);
 if (!aggregateOverview.response.ok || !accountRow || accountRow.calls < 1) {
   throw new Error("account aggregate usage missing: " + aggregateOverview.text);
 }
@@ -103,14 +103,15 @@ const range = await admin(`/admin/api/usage?from=${new Date().toISOString().slic
 if (!range.response.ok || range.data.days?.length !== 1) throw new Error(`usage range failed: ${range.text}`);
 
 const overview = await admin("/admin/api/overview");
-if (!overview.response.ok || overview.data.users?.total < 4 || overview.data.agents?.total < 2) {
+if (!overview.response.ok || !Array.isArray(overview.data.accounts) || overview.data.accounts.length < 4) {
   throw new Error(`overview failed: ${overview.text}`);
 }
 if (overview.data.period?.label !== "Today" || overview.data.period?.timezone !== "Asia/Bangkok" || overview.data.period?.timezoneLabel !== "BKK · UTC+7") {
   throw new Error(`Bangkok period contract failed: ${overview.text}`);
 }
-if (!Array.isArray(overview.data.buckets) || !Array.isArray(overview.data.topTools)) {
-  throw new Error("overview chart payload missing");
+const overviewUser = overview.data.accounts.find((account) => account.userId === createdUsers[0].user.id);
+if (!overviewUser || !Array.isArray(overviewUser.agents) || !overviewUser.agents.some((agent) => agent.id === undefined && agent.agentId)) {
+  throw new Error("overview account-agent payload missing");
 }
 
 const disabled = await admin("/admin/users/enabled", "POST", { userId: createdUsers[2].user.id, enabled: false });
