@@ -233,8 +233,9 @@ export function shouldUseColor(stdout = process.stdout, env = process.env) {
 }
 
 export class RemoteTui {
-  constructor({ config, version, output = process.stdout, env = process.env }) {
+  constructor({ config, version, output = process.stdout, input = process.stdin, env = process.env }) {
     this.output = output;
+    this.input = input;
     this.startedAt = Date.now();
     this.state = {
       account: config.user?.name || config.user?.login || "signed in",
@@ -252,13 +253,31 @@ export class RemoteTui {
     this.timer = null;
     this.closed = false;
     this.renderPending = false;
+    this.scrollOffset = 0;
+    this.unseenTransactions = 0;
+    this.inputWasRaw = false;
+    this.onInput = (chunk) => this.handleInput(chunk);
   }
 
   start() {
     if (this.closed) return;
     // Use the terminal's alternate screen so periodic redraws never accumulate
-    // in scrollback. Keep one column unused to avoid automatic line wrapping.
-    this.output.write(ESC + "?1049h" + ESC + "?25l" + ESC + "2J" + ESC + "H");
+    // in scrollback. Mouse reporting lets the transaction viewport scroll while
+    // the header remains fixed in place.
+    this.output.write(
+      ESC + "?1049h"
+      + ESC + "?25l"
+      + ESC + "?1000h"
+      + ESC + "?1006h"
+      + ESC + "2J"
+      + ESC + "H",
+    );
+    if (this.input?.isTTY && typeof this.input.setRawMode === "function") {
+      this.inputWasRaw = Boolean(this.input.isRaw);
+      this.input.setRawMode(true);
+      this.input.resume?.();
+      this.input.on?.("data", this.onInput);
+    }
     this.render();
     this.timer = setInterval(() => this.render(), 1000);
     this.timer.unref?.();
@@ -269,7 +288,88 @@ export class RemoteTui {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    this.output.write(ESC + "?25h" + ESC + "?1049l");
+    this.input?.removeListener?.("data", this.onInput);
+    if (this.input?.isTTY && typeof this.input.setRawMode === "function" && !this.inputWasRaw) {
+      this.input.setRawMode(false);
+    }
+    this.output.write(
+      ESC + "?1000l"
+      + ESC + "?1006l"
+      + ESC + "?25h"
+      + ESC + "?1049l",
+    );
+  }
+
+  viewportMetrics() {
+    const terminalWidth = Number(this.output.columns) || 110;
+    const width = clamp(terminalWidth - 1, MIN_FRAME_WIDTH, MAX_FRAME_WIDTH);
+    const height = Math.max(16, Number(this.output.rows) || 30);
+    const availableRows = Math.max(1, height - FRAME_FIXED_ROWS - FRAME_BOTTOM_MARGIN);
+    return { width, height, availableRows };
+  }
+
+  transactionRows(width) {
+    return this.transactions.flatMap((item) => formatTransactionRows(item, width, { color: this.colorEnabled }));
+  }
+
+  maxScrollOffset() {
+    const { width, availableRows } = this.viewportMetrics();
+    return Math.max(0, this.transactionRows(width).length - availableRows);
+  }
+
+  scrollBy(lines) {
+    const next = clamp(this.scrollOffset + Number(lines || 0), 0, this.maxScrollOffset());
+    if (next === this.scrollOffset) return;
+    this.scrollOffset = next;
+    if (this.scrollOffset === 0) this.unseenTransactions = 0;
+    this.scheduleRender();
+  }
+
+  handleInput(chunk) {
+    const data = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
+    if (!data) return;
+
+    // Raw mode turns Ctrl+C into input data, so forward it to the existing
+    // shutdown handler instead of swallowing it.
+    if (data.includes("\x03")) {
+      process.emit("SIGINT");
+      return;
+    }
+
+    let handledMouse = false;
+    const mouse = /\x1b\[<(\d+);\d+;\d+[Mm]/g;
+    let match;
+    while ((match = mouse.exec(data)) !== null) {
+      const button = Number(match[1]);
+      if ((button & 64) !== 64) continue;
+      this.scrollBy((button & 1) === 0 ? 3 : -3);
+      handledMouse = true;
+    }
+    if (handledMouse) return;
+
+    if (data.includes("\x1b[5~")) return this.scrollBy(this.viewportMetrics().availableRows);
+    if (data.includes("\x1b[6~")) return this.scrollBy(-this.viewportMetrics().availableRows);
+    if (data.includes("\x1b[H") || data.includes("\x1b[1~")) {
+      this.scrollOffset = this.maxScrollOffset();
+      return this.scheduleRender();
+    }
+    if (data.includes("\x1b[F") || data.includes("\x1b[4~")) {
+      this.scrollOffset = 0;
+      this.unseenTransactions = 0;
+      return this.scheduleRender();
+    }
+    if (data.includes("\x1b[A")) return this.scrollBy(1);
+    if (data.includes("\x1b[B")) return this.scrollBy(-1);
+  }
+
+  appendTransaction(item) {
+    if (this.scrollOffset > 0) {
+      const { width } = this.viewportMetrics();
+      this.scrollOffset += formatTransactionRows(item, width, { color: false }).length;
+      this.unseenTransactions += 1;
+    }
+    this.transactions.push(item);
+    if (this.transactions.length > 100) this.transactions.splice(0, this.transactions.length - 100);
   }
 
   handleMessage(message) {
@@ -278,7 +378,7 @@ export class RemoteTui {
       this.state.status = message.state || this.state.status;
       if (Number.isFinite(Number(message.reconnects))) this.state.reconnects = Number(message.reconnects);
     } else if (message.event === "tool:start") {
-      this.transactions.push({
+      this.appendTransaction({
         requestId: message.requestId,
         at: message.at || new Date().toISOString(),
         action: message.action,
@@ -286,7 +386,6 @@ export class RemoteTui {
         status: "running",
         ok: null,
       });
-      if (this.transactions.length > 100) this.transactions.splice(0, this.transactions.length - 100);
     } else if (message.event === "tool:end") {
       const item = [...this.transactions].reverse().find((entry) => entry.requestId === message.requestId);
       if (item) {
@@ -296,14 +395,13 @@ export class RemoteTui {
         if (message.error && message.ok === false) item.summary += ` · ${truncate(message.error, 48)}`;
       }
     } else if (message.event === "system") {
-      this.transactions.push({
+      this.appendTransaction({
         requestId: "system-" + Date.now() + "-" + Math.random(),
         at: message.at || new Date().toISOString(),
         summary: message.message || "Agent event",
         status: "done",
         ok: message.level !== "error",
       });
-      if (this.transactions.length > 100) this.transactions.splice(0, this.transactions.length - 100);
     }
     this.scheduleRender();
   }
@@ -328,36 +426,32 @@ export class RemoteTui {
 
   render() {
     if (this.closed) return;
-    const terminalWidth = Number(this.output.columns) || 110;
-    const width = clamp(terminalWidth - 1, MIN_FRAME_WIDTH, MAX_FRAME_WIDTH);
-    const height = Math.max(16, Number(this.output.rows) || 30);
+    const { width, availableRows } = this.viewportMetrics();
     const separator = "─".repeat(width);
     const header = formatTwoColumnHeader({
       ...this.state,
       uptimeMs: Date.now() - this.startedAt,
     }, width, { color: this.colorEnabled });
-    // Fixed frame content occupies 11 rows. Leave one spare row at the
-    // bottom so Windows Terminal never scrolls the screen while repainting.
-    const availableRows = Math.max(1, height - FRAME_FIXED_ROWS - FRAME_BOTTOM_MARGIN);
-    const rows = [];
-    for (let index = this.transactions.length - 1; index >= 0 && rows.length < availableRows; index--) {
-      const group = formatTransactionRows(this.transactions[index], width, { color: this.colorEnabled });
-      const remaining = availableRows - rows.length;
-      if (group.length <= remaining) {
-        rows.unshift(...group);
-      } else if (rows.length === 0) {
-        rows.unshift(...group.slice(0, remaining));
-      } else {
-        break;
-      }
-    }
+
+    const allRows = this.transactionRows(width);
+    const maxOffset = Math.max(0, allRows.length - availableRows);
+    this.scrollOffset = clamp(this.scrollOffset, 0, maxOffset);
+    const end = Math.max(0, allRows.length - this.scrollOffset);
+    const start = Math.max(0, end - availableRows);
+    const rows = allRows.slice(start, end);
     while (rows.length < Math.min(availableRows, 4)) rows.unshift("");
 
     const title = this.colorEnabled
-      ? paint("Chat Relay", STYLE.bold, STYLE.cyan) + paint(`  v${this.version}`, STYLE.gray)
-      : `Chat Relay  v${this.version}`;
+      ? paint("🚀 Chat Relay", STYLE.bold, STYLE.cyan) + paint(`  v${this.version}`, STYLE.gray)
+      : `🚀 Chat Relay  v${this.version}`;
     const divider = this.colorEnabled ? paint(separator, STYLE.gray) : separator;
-    const section = this.colorEnabled ? paint("Transactions", STYLE.bold, STYLE.cyan) : "Transactions";
+    const mode = this.scrollOffset === 0
+      ? "🟢 LIVE"
+      : this.unseenTransactions > 0
+        ? `📬 +${this.unseenTransactions} new`
+        : "📜 HISTORY";
+    const sectionText = `📜 Transactions  ${mode}  ·  wheel/↑↓ scroll  ·  End = live`;
+    const section = this.colorEnabled ? paint(sectionText, STYLE.bold, STYLE.cyan) : sectionText;
 
     const screen = [
       title,
