@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DashboardTopic } from "./dashboard-hub";
 import { UsageAggregates } from "./usage-aggregates";
+import { UsageQueryIndex } from "./usage-query";
 
 type UsageEnv = { DASHBOARD: DurableObjectNamespace };
 
@@ -284,6 +285,7 @@ function nextUtcDay(nowMs: number) {
 export class Usage extends DurableObject {
   private readonly usageEnv: UsageEnv;
   private readonly aggregates: UsageAggregates;
+  private readonly queryIndex: UsageQueryIndex;
   private activeHydration?: Promise<Map<string, ActiveUsageEvent>>;
   private async activeEvents() {
     const result = await (this.activeHydration ||= (async () => {
@@ -320,6 +322,7 @@ export class Usage extends DurableObject {
     super(ctx, env);
     this.usageEnv = env;
     this.aggregates = new UsageAggregates(ctx.storage, event => !event.ok && classifyFailure(event).operational);
+    this.queryIndex = new UsageQueryIndex(ctx.storage, event => classifyFailure(event).operational);
   }
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -495,14 +498,20 @@ export class Usage extends DurableObject {
         ...(event.agentId ? [`day:${day}:agent:${safePart(event.agentId)}`] : []),
       ];
       const active = event.toolCallId ? await this.activeEvents() : undefined;
+      const eventKey = `event:${event.timestamp}:${crypto.randomUUID()}`;
       await this.ctx.storage.transaction(async txn => {
-        // Bootstrap from retained raw before adding the new event, then commit all representations atomically.
+        // Bootstrap from retained raw before adding the new event, then commit all KV representations atomically.
         await this.aggregates.record(txn, event);
         const writes: Record<string, Metric> = {};
         for (const key of metricKeys) writes[key] = addMetric(await txn.get<Metric>(key), event);
         if (event.toolCallId) await txn.delete("active:" + safePart(event.toolCallId));
-        await txn.put({ ...writes, [`event:${event.timestamp}:${crypto.randomUUID()}`]: event });
+        await txn.put({ ...writes, [eventKey]: event });
       });
+      try {
+        this.queryIndex.upsert(eventKey, event);
+      } catch {
+        await this.queryIndex.markDirty().catch(() => {});
+      }
       if (event.toolCallId) active!.delete("active:" + safePart(event.toolCallId));
       this.aggregates.invalidate(event);
       await publishDashboard(
@@ -558,6 +567,11 @@ export class Usage extends DurableObject {
         for (const key of keys) if (await this.aggregates.preserve(txn, records.get(key)!)) preserved.push(key);
         for (let offset = 0; offset < preserved.length; offset += 128) await txn.delete(preserved.slice(offset,offset+128));
       });
+      try {
+        this.queryIndex.delete(preserved);
+      } catch {
+        await this.queryIndex.markDirty().catch(() => {});
+      }
       this.aggregates.invalidate();
       const status = {
         ranAt: new Date().toISOString(),
@@ -605,7 +619,7 @@ export class Usage extends DurableObject {
       const errors = url.pathname === "/errors/query";
       const requestedState = url.searchParams.get("state");
       const state = errors || requestedState === "history" ? "history" : requestedState === "active" ? "active" : "all";
-      const limit = boundedInt(url.searchParams.get("limit"), 50, 1, 100);
+      const limit = boundedInt(url.searchParams.get("limit"), 20, 1, 100);
       const cursorValue = url.searchParams.get("cursor");
       const cursor = decodeScanCursor(cursorValue);
       if (cursorValue && !cursor) return Response.json({ error: "invalid_cursor" }, { status: 400 });
@@ -613,20 +627,101 @@ export class Usage extends DurableObject {
       const legacy = scan?.legacy || (cursor && !("v" in cursor) ? cursor : null);
       const fromMs = Date.parse(url.searchParams.get("from") || "");
       const toMs = Date.parse(url.searchParams.get("to") || "");
+      if (Number.isFinite(fromMs) && Number.isFinite(toMs) && fromMs > toMs) {
+        return Response.json({ error: "invalid_usage_window" }, { status: 400 });
+      }
+
+      const userId = url.searchParams.get("userId");
+      const tool = url.searchParams.get("tool");
+      const agentId = url.searchParams.get("agentId");
+      const activityId = url.searchParams.get("activityId");
+      const status = url.searchParams.get("status");
+      const errorClass = url.searchParams.get("errorClass");
+      const operational = url.searchParams.get("operational");
+      const q = url.searchParams.get("q");
       const matches = (event: any) => {
         const when = Date.parse(errors ? event.timestamp : event.startedAt || event.timestamp);
-        return (!errors || event.ok === false) && ["userId", "tool", "agentId", ...(errors ? ["errorClass"] : ["activityId", "status"])].every(key =>
-          !url.searchParams.get(key) || event[key] === url.searchParams.get(key)) &&
-          (!errors || (url.searchParams.get("operational") === null || String(event.operational) === url.searchParams.get("operational"))) &&
-          (!Number.isFinite(fromMs) || when >= fromMs) && (!Number.isFinite(toMs) || when <= toMs) &&
+        const search = String(q || "").trim().toLowerCase();
+        const searchable = (String(event.tool || "") + " " + String(event.agentId || "")).toLowerCase();
+        return (!errors || event.ok === false) &&
+          (!userId || event.userId === userId) &&
+          (!tool || event.tool === tool) &&
+          (!agentId || event.agentId === agentId) &&
+          (!activityId || event.activityId === activityId) &&
+          (!status || event.status === status) &&
+          (!errorClass || event.errorClass === errorClass) &&
+          (!errors || operational === null || String(event.operational) === operational) &&
+          (!search || searchable.includes(search)) &&
+          (!Number.isFinite(fromMs) || when >= fromMs) &&
+          (!Number.isFinite(toMs) || when <= toMs) &&
           (!legacy || olderThanCursor(event, legacy));
       };
-      // Storage order is the completion timestamp plus the unique storage key. Activity
-      // date filters still use startedAt, so they must not narrow completion key bounds.
+
+      if (this.queryIndex.available && !legacy && state !== "active") {
+        await this.queryIndex.ensureBackfilled();
+        const indexed = this.queryIndex.query({
+          errors,
+          limit,
+          before: scan?.before,
+          fromMs: Number.isFinite(fromMs) ? fromMs : undefined,
+          toMs: Number.isFinite(toMs) ? toMs : undefined,
+          userId,
+          tool,
+          agentId,
+          activityId,
+          status,
+          errorClass,
+          operational,
+          q,
+        });
+        if (indexed) {
+          const history = indexed.rows.map(({ key, event }) => ({
+            key,
+            event: errors ? { ...event, ...classifyFailure(event) } : {
+              ...event,
+              activityId: event.activityId || (event.toolCallId ? fallbackActivityId(event.toolCallId) : undefined),
+              status: event.ok ? "success" : "error",
+            },
+          }));
+          const active = state === "history" || scan ? [] : [...(await this.activeEvents()).values()]
+            .filter(event => Date.parse(event.startedAt) >= Date.now() - 3600000)
+            .map(event => ({
+              key: "event:" + new Date(event.startedAt).toISOString() + ":~active:" + encodeURIComponent(event.toolCallId)
+                .replace(/[!'()*]/g, character => "%" + character.charCodeAt(0).toString(16).toUpperCase()),
+              event: {
+                ...event,
+                activityId: event.activityId || fallbackActivityId(event.toolCallId),
+                timestamp: event.startedAt,
+                status: "running",
+              },
+            }))
+            .filter(row => matches(row.event));
+          const items = [...history, ...active]
+            .sort((a,b) => a.key < b.key ? 1 : a.key > b.key ? -1 : 0)
+            .map(row => row.event);
+          const nextCursor = indexed.hasMore && indexed.nextBefore
+            ? encodeScanCursor({ v: 2, before: indexed.nextBefore })
+            : null;
+          return Response.json({
+            ...(errors ? {} : { state }),
+            items,
+            pageSize: items.length,
+            matchedTotal: items.length,
+            matchedTotalLowerBound: indexed.hasMore,
+            hasMore: Boolean(nextCursor),
+            nextCursor,
+            bounded: false,
+            scanned: indexed.rowsReadUpperBound,
+            scanLimit: limit + 1,
+            queryMode: "sql-indexed",
+          });
+        }
+      }
+
+      // Test/legacy fallback for hosts without Durable Object SQL and legacy cursors.
       const toEnd = errors && Number.isFinite(toMs) ? "event:" + new Date(toMs).toISOString() + ":\uffff" : undefined;
       const end = scan?.before && toEnd ? (scan.before < toEnd ? scan.before : toEnd) : scan?.before || toEnd;
       const start = errors && Number.isFinite(fromMs) ? "event:" + new Date(fromMs).toISOString() : undefined;
-      if (Number.isFinite(fromMs) && Number.isFinite(toMs) && fromMs > toMs) return Response.json({ error: "invalid_usage_window" }, { status: 400 });
       const records = state === "active" || (start && end && end <= start) ? new Map<string, UsageEvent>() : await this.ctx.storage.list<UsageEvent>({
         prefix: "event:", reverse: true, limit: RAW_QUERY_SCAN_LIMIT,
         ...(end ? { end } : {}),
@@ -653,7 +748,7 @@ export class Usage extends DurableObject {
       const nextCursor = hasMore && before ? encodeScanCursor({ v: 2, before, ...(legacy ? { legacy } : {}) }) : null;
       return Response.json({ ...(errors ? {} : { state }), items: page.map(row => row.event), pageSize: page.length,
         matchedTotal: matched.length, matchedTotalLowerBound: hasMore, hasMore: Boolean(nextCursor), nextCursor,
-        bounded: storageHasMore, scanned: records.size, scanLimit: RAW_QUERY_SCAN_LIMIT });
+        bounded: storageHasMore, scanned: records.size, scanLimit: RAW_QUERY_SCAN_LIMIT, queryMode: "kv-fallback" });
     }
 
     if (url.pathname === "/query" && request.method === "GET") {

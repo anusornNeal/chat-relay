@@ -78,7 +78,7 @@ const TRANSPORT_PING_MS = Math.max(5000, Math.min(Number(process.env.AGENT_TRANS
 const TRANSPORT_PONG_TIMEOUT_MS = Math.max(3000, Math.min(Number(process.env.AGENT_TRANSPORT_PONG_TIMEOUT_MS) || 8000, 30000));
 const FAST_RECONNECT_MS = Math.max(100, Math.min(Number(process.env.AGENT_FAST_RECONNECT_MS) || 250, 5000));
 const FAST_RECONNECT_STABLE_MS = Math.max(5000, Math.min(Number(process.env.AGENT_FAST_RECONNECT_STABLE_MS) || 30000, 300000));
-const HEARTBEAT_ACK_TIMEOUT_MS = Math.max(15000, Math.min(Number(process.env.AGENT_HEARTBEAT_ACK_TIMEOUT_MS) || 45000, 180000));
+const HEARTBEAT_ACK_TIMEOUT_MS = Math.max(15000, Math.min(Number(process.env.AGENT_HEARTBEAT_ACK_TIMEOUT_MS) || 90000, 180000));
 const heartbeatAckWatchdog = new HeartbeatAckWatchdog({
   timeoutMs: HEARTBEAT_ACK_TIMEOUT_MS,
   onTimeout: () => {

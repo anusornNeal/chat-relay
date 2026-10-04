@@ -45,6 +45,9 @@ const bkkTime = (iso) => new Intl.DateTimeFormat("en-GB", {
 const bkkHourMinute = (iso) => new Intl.DateTimeFormat("en-GB", {
   timeZone: BKK_TZ, hour: "2-digit", minute: "2-digit", hour12: false,
 }).format(new Date(iso));
+const bkkDayLabel = (iso) => new Intl.DateTimeFormat("en-GB", {
+  timeZone: BKK_TZ, day: "2-digit", month: "short",
+}).format(new Date(iso));
 const elapsedClock = (iso) => {
   const total = Math.max(0, Math.floor((Date.now() - Date.parse(iso || "")) / 1000));
   if (!Number.isFinite(total)) return "--:--";
@@ -554,12 +557,12 @@ function connectLiveChannel() {
     lastPongAt = Date.now();
     heartbeatTimer = setInterval(() => {
       if (socket.readyState !== WebSocket.OPEN || !dashboardAvailable()) return;
-      if (Date.now() - lastPongAt > 60000) {
+      if (Date.now() - lastPongAt > 120000) {
         try { socket.close(4000, "heartbeat_timeout"); } catch {}
         return;
       }
       socket.send(JSON.stringify({ type: "ping" }));
-    }, 25000);
+    }, 50000);
     setLiveState("live");
     if (reconnect && !dataRetryTimer) queueLiveRefresh(["overview", "calls", "users", "errors", "agents"]);
   };
@@ -607,6 +610,9 @@ function periodChips(period) {
       (current === value ? icon("clock") : "") + esc(label) + "</button>"
   ).join("") + "</div>";
 }
+function periodDisplayLabel(range = dashboardRange) {
+  return range === "30d" ? "Last 30 days" : range === "7d" ? "Last 7 days" : "Today";
+}
 
 function resetCallPaging() {
   callPaging.cursor = "";
@@ -643,7 +649,8 @@ function bindPaging(kind, paging, load) {
   };
 }
 
-function chartMarkup(buckets = []) {
+function chartMarkup(buckets = [], period = dashboardPeriod) {
+  const byDay = period?.range === "7d" || period?.range === "30d";
   const max = Math.max(1, ...buckets.map((bucket) => Number(bucket.calls || 0)));
   const yTicks = [1, .75, .5, .25, 0].map((ratio) => Math.round(max * ratio));
   const yLabels = '<div class="chart-y-axis" aria-hidden="true">' +
@@ -655,7 +662,7 @@ function chartMarkup(buckets = []) {
     const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
     const start = bkkHourMinute(bucket.from);
     const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
-    const label = start + "\u2013" + end;
+    const label = byDay ? bkkDayLabel(bucket.from) : start + "\u2013" + end;
     const current = index === buckets.length - 1 ? " current" : "";
     return '<button class="chart-bar' + current + '" style="--bar-height:' + height + '%" data-chart-from="' + esc(bucket.from) + '" data-chart-to="' + esc(bucket.to) + '"' +
       ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
@@ -663,9 +670,11 @@ function chartMarkup(buckets = []) {
       '<span class="bar-fill"></span>' +
       "</button>";
   }).join("");
+  const labelEvery = byDay ? (buckets.length > 14 ? 5 : 1) : 3;
   const xLabels = buckets.map((bucket, index) => {
-    const show = index % 3 === 0 || index === buckets.length - 1;
-    return '<span class="' + (show ? "" : "muted") + '">' + (show ? esc(bkkHourMinute(bucket.from)) : "") + "</span>";
+    const show = index % labelEvery === 0 || index === buckets.length - 1;
+    const label = byDay ? bkkDayLabel(bucket.from) : bkkHourMinute(bucket.from);
+    return '<span class="' + (show ? "" : "muted") + '">' + (show ? esc(label) : "") + "</span>";
   }).join("");
   return '<div class="chart-frame">' + yLabels +
     '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div><div class="chart-bars">' + bars +
@@ -673,12 +682,18 @@ function chartMarkup(buckets = []) {
 }
 
 async function loadOverview({ patch = false } = {}) {
-  setHeader(isAdmin() ? "System overview" : "My overview", isAdmin() ? "Today across Chat Relay" : "Your activity today");
+  const requestedPeriodLabel = periodDisplayLabel(dashboardRange);
+  setHeader(
+    isAdmin() ? "System overview" : "My overview",
+    isAdmin() ? requestedPeriodLabel + " across Chat Relay" : requestedPeriodLabel + " \u00b7 your activity",
+  );
   const data = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange));
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
   dashboardRange = dashboardPeriod.range || dashboardRange;
+  const periodLabel = periodDisplayLabel(dashboardRange);
+  const chartUnit = dashboardRange === "today" ? "hour" : "day";
   const m = data.usage || {};
-  const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : "today";
+  const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : periodLabel.toLowerCase();
   const cards = [
     metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
     metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
@@ -703,13 +718,13 @@ async function loadOverview({ patch = false } = {}) {
       '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
     boundedNotice +
     '<div class="metric-grid">' + cards.join("") + "</div>" +
-    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by hour</h2></div><span class="panel-meta">Click a bar to inspect invocations</span></div>' +
-      chartMarkup(data.buckets || []) + "</section>" +
+    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by ' + chartUnit + '</h2></div><span class="panel-meta">Click a bar to inspect invocations</span></div>' +
+      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>" +
     '<section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Breakdown</div><h2>Top tools</h2></div></div><div class="list top-tools">' +
       (top.length ? top.map((item, index) =>
         '<div class="list-row"><div class="tool-rank">' + (index + 1) + '</div><div class="list-copy"><div class="primary-text">' + esc(item.tool) +
         '</div><div class="secondary-text">' + esc(humanTool(item.tool)) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + "</strong></div>"
-      ).join("") : '<div class="empty-inline">No tool invocations yet today.</div>') +
+      ).join("") : '<div class="empty-inline">No tool invocations in this period.</div>') +
     "</div></section></div>";
   renderContent(liveMarkup, patch);
   document.querySelectorAll("[data-overview-range]").forEach((button) => {
@@ -781,9 +796,25 @@ function activeTerminalRows(terminals = []) {
   ]);
 }
 async function ensureCallPeriod() {
-  if (dashboardPeriod?.from && dashboardPeriod?.to) return;
-  const overview = await api("/admin/api/overview");
+  if (dashboardPeriod?.range === dashboardRange && dashboardPeriod?.from && dashboardPeriod?.to) return;
+  const overview = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange));
   dashboardPeriod = overview.period;
+}
+function bindPeriodRange(loader) {
+  document.querySelectorAll("[data-overview-range]").forEach((button) => {
+    button.onclick = async () => {
+      const nextRange = button.dataset.overviewRange || "today";
+      if (nextRange === dashboardRange) return;
+      dashboardRange = nextRange;
+      dashboardPeriod = null;
+      callFilters.from = "";
+      callFilters.to = "";
+      callFilters.drilldown = false;
+      resetCallPaging();
+      resetErrorPaging();
+      await loader({ patch: true });
+    };
+  });
 }
 async function loadAdminUsersForFilter() {
   if (!isAdmin() || adminUsersCache.length) return;
@@ -799,8 +830,10 @@ function callFilterMarkup() {
   const statusOptions = [["", "All statuses"], ["running", "Running"], ["success", "Success"], ["error", "Error"]]
     .map(([value, label]) => '<option value="' + value + '"' + (callFilters.status === value ? " selected" : "") + ">" + label + "</option>").join("");
   const windowLabel = callFilters.drilldown && callFilters.from
-    ? bkkHourMinute(callFilters.from) + "\u2013" + bkkHourMinute(new Date(Date.parse(callFilters.to) + 1).toISOString())
-    : "Today";
+    ? (dashboardRange === "today"
+      ? bkkHourMinute(callFilters.from) + "\u2013" + bkkHourMinute(new Date(Date.parse(callFilters.to) + 1).toISOString())
+      : bkkDayLabel(callFilters.from))
+    : periodDisplayLabel(dashboardRange);
   const related = callFilters.activityId
     ? '<button id="clearActivity" class="button subtle activity-filter-chip" type="button">' + icon("activity") + esc(activityLabel(callFilters.activityId)) + ' ' + icon("x") + "</button>"
     : "";
@@ -943,6 +976,7 @@ async function loadCalls({ patch = false } = {}) {
     paginationMarkup("calls", callPaging, Boolean(data.hasMore));
   renderContent(liveMarkup, patch);
   ensureRunningClock();
+  bindPeriodRange(loadCalls);
 
   const search = $("toolSearch");
   if (search) {
@@ -1094,6 +1128,7 @@ async function loadErrors({ patch = false } = {}) {
       rows + "</tbody></table></div>" +
     paginationMarkup("errors", errorPaging, Boolean(data.hasMore));
   renderContent(liveMarkup, patch);
+  bindPeriodRange(loadErrors);
   bindDetailRows();
   bindTableFilter("errorSearch");
   document.querySelectorAll("[data-error-mode]").forEach((button) => {

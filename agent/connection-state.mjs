@@ -30,7 +30,7 @@ export class AgentConnectionState {
   constructor(options = {}) {
     this.baseReconnectMs = boundedInteger(options.baseReconnectMs, 2000, 100, 60_000);
     this.maxReconnectMs = boundedInteger(options.maxReconnectMs, 30_000, this.baseReconnectMs, 120_000);
-    this.heartbeatMs = boundedInteger(options.heartbeatMs, 15_000, 5_000, 60_000);
+    this.heartbeatMs = boundedInteger(options.heartbeatMs, 30_000, 5_000, 60_000);
     this.processStartedAt = new Date().toISOString();
     this.state = "starting";
     this.connectedAt = null;

@@ -105,6 +105,38 @@ type ToolActivityContext = {
 
 const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
 
+const REQUEST_CACHE_TTL_MS = 10_000;
+const REQUEST_CACHE_MAX_ENTRIES = 512;
+
+type TimedCacheEntry<T> = { value: T; expiresAt: number };
+type ResolvedAgentAccess = { agentId: string; scopes: string[] };
+
+const authUserCache = new Map<string, TimedCacheEntry<AuthUser>>();
+const resolvedAgentCache = new Map<string, TimedCacheEntry<ResolvedAgentAccess>>();
+let quotaDisabledUntil = 0;
+
+function cacheGet<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function cachePut<T>(cache: Map<string, TimedCacheEntry<T>>, key: string, value: T) {
+  if (cache.size >= REQUEST_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, { value, expiresAt: Date.now() + REQUEST_CACHE_TTL_MS });
+}
+
+function grantAllows(scopes: string[], required: Scope) {
+  return scopes.includes("*") || scopes.includes(required);
+}
+
 async function activityContextForRequest(request: Request): Promise<ToolActivityContext> {
   const source = [
     "mcp-session-id",
@@ -183,6 +215,7 @@ async function inspectMcpToolCall(request: Request) {
 async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Promise<Response | null> {
   const call = await inspectMcpToolCall(request);
   if (!call) return null;
+  if (quotaDisabledUntil > Date.now()) return null;
   let response: Response;
   try {
     response = await usageStub(env).fetch(new Request("https://usage.internal/quota/check", {
@@ -195,6 +228,9 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
   }
   if (!response.ok) return error(503, "quota_unavailable");
   const decision = await response.json<QuotaDecision>();
+  if (decision.policy?.rateLimit === 0 && decision.policy?.dailyCallQuota === 0) {
+    quotaDisabledUntil = Date.now() + REQUEST_CACHE_TTL_MS;
+  }
   if (decision.allowed) return null;
 
   const code = decision.code === "quota_exceeded" ? "quota_exceeded" : "rate_limited";
@@ -318,11 +354,16 @@ async function authenticateUser(request: Request, env: Env): Promise<AuthUser | 
   const resource = !queryToken && headerToken && url.pathname === "/mcp"
     ? oauthResource(request)
     : undefined;
+  const cacheKey = tokenHash + "|" + (resource || "");
+  const cached = cacheGet(authUserCache, cacheKey);
+  if (cached) return cached;
   const { response, data } = await registryJson<{ user?: AuthUser }>(env, "/auth/user", {
     tokenHash,
     ...(resource ? { resource } : {}),
   });
-  return response.ok && data.user ? data.user : null;
+  if (!response.ok || !data.user) return null;
+  cachePut(authUserCache, cacheKey, data.user);
+  return data.user;
 }
 
 async function authenticateAgent(request: Request, env: Env, agentId: string): Promise<boolean> {
@@ -338,7 +379,7 @@ async function resolveAgent(
   userId: string,
   scope: Scope,
   requestedAgentId?: string,
-): Promise<{ ok: true; agentId: string } | { ok: false; response: Response }> {
+): Promise<{ ok: true; agentId: string; scopes: string[] } | { ok: false; response: Response }> {
   const { response, data } = await registryJson<any>(env, "/resolve", {
     userId,
     scope,
@@ -347,7 +388,7 @@ async function resolveAgent(
   if (!response.ok) {
     return { ok: false, response: Response.json(data, { status: response.status }) };
   }
-  return { ok: true, agentId: data.agent.id };
+  return { ok: true, agentId: data.agent.id, scopes: Array.isArray(data.scopes) ? data.scopes : [] };
 }
 
 function scopeForAction(action: string): Scope {
@@ -368,13 +409,21 @@ async function resolveAgentForScopes(
   scopes: Scope[],
   requestedAgentId?: string,
 ): Promise<{ ok: true; agentId: string } | { ok: false; response: Response }> {
-  let agentId = requestedAgentId;
-  for (const scope of scopes) {
-    const resolved = await resolveAgent(env, userId, scope, agentId);
-    if (!resolved.ok) return resolved;
-    agentId = resolved.agentId;
+  const uniqueScopes = [...new Set(scopes)];
+  const cacheKey = userId + "|" + (requestedAgentId || "auto");
+  const cached = cacheGet(resolvedAgentCache, cacheKey);
+  if (cached && uniqueScopes.every(scope => grantAllows(cached.scopes, scope))) {
+    return { ok: true, agentId: cached.agentId };
   }
-  return { ok: true, agentId: agentId! };
+
+  const firstScope = uniqueScopes[0] || "read";
+  const resolved = await resolveAgent(env, userId, firstScope, requestedAgentId);
+  if (!resolved.ok) return resolved;
+  if (!uniqueScopes.every(scope => grantAllows(resolved.scopes, scope))) {
+    return { ok: false, response: Response.json({ error: "permission_denied" }, { status: 403 }) };
+  }
+  cachePut(resolvedAgentCache, cacheKey, { agentId: resolved.agentId, scopes: resolved.scopes });
+  return { ok: true, agentId: resolved.agentId };
 }
 
 async function callAgent(
