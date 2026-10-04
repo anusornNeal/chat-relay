@@ -381,7 +381,7 @@ const window = (from, to, filter = {}) =>
         .status,
       200,
     );
-  assert.equal(f.stats.puts, 1);
+  assert.equal(f.stats.puts, 0);
   f.records.set("agent:a", { ...f.records.get("agent:a"), enabled: false });
   assert.equal(
     (await f.call("/auth/agent", { agentId: "a", tokenHash: "agent-token" }))

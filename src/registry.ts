@@ -1404,7 +1404,7 @@ export class Registry extends DurableObject {
       if (session && !isExpired(session.expiresAt)) {
         userId = session.userId;
       } else if (session) {
-        await this.ctx.storage.delete(key.userSession(tokenHash));
+        await this.ctx.storage.delete(key.userSession(tokenHash)).catch(() => {});
       }
     }
 
@@ -1417,7 +1417,7 @@ export class Registry extends DurableObject {
           !resource || access.resource !== resource ||
           !access.scope.includes("mcp")) {
         if (access && isExpired(access.expiresAt)) {
-          await this.ctx.storage.delete(key.oauthAccess(tokenHash));
+          await this.ctx.storage.delete(key.oauthAccess(tokenHash)).catch(() => {});
         }
         return json({ error: "unauthorized" }, 401);
       }
@@ -1436,10 +1436,8 @@ export class Registry extends DurableObject {
     if (!agentId || agentId !== requestedId) return json({ error: "unauthorized" }, 401);
     const agent = await this.ctx.storage.get<AgentRecord>(key.agent(agentId));
     if (!agent?.enabled) return json({ error: "unauthorized" }, 401);
-    if (!Number.isFinite(Date.parse(agent.lastSeenAt || "")) || Date.now() - Date.parse(agent.lastSeenAt!) >= 60000) {
-      agent.lastSeenAt = new Date().toISOString();
-      await this.ctx.storage.put(key.agent(agent.id), agent);
-    }
+    // Agent authentication must remain read-only so an existing credential can
+    // reconnect even when the Durable Objects rows_written budget is exhausted.
     return json({ ok: true, agent: { id: agent.id, name: agent.name } });
   }
 

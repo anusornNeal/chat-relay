@@ -20,7 +20,6 @@ type Pending = {
 
 const TIMEOUT_MS = 30_000;
 const AGENT_DIAGNOSTICS_KEY = "agent:diagnostics";
-const AGENT_CONNECTION_GENERATION_KEY = "agent:connection-generation";
 const TEMP_ARTIFACT_DEFAULT_TTL_SECONDS = 300;
 const TEMP_ARTIFACT_MAX_TTL_SECONDS = 900;
 const TEMP_ARTIFACT_EXPIRED_TOMBSTONE_MS = 60_000;
@@ -115,13 +114,13 @@ export class Relay extends DurableObject {
     return Response.json({ ...agentLiveness(this.resolveAgent()), diagnostics });
   }
 
-  private async nextConnectionGeneration(): Promise<number> {
-    return this.ctx.storage.transaction(async (transaction) => {
-      const stored = await transaction.get<unknown>(AGENT_CONNECTION_GENERATION_KEY);
-      const next = nextAgentConnectionGeneration(stored);
-      await transaction.put(AGENT_CONNECTION_GENERATION_KEY, next);
-      return next;
-    });
+  private nextConnectionGeneration(): number {
+    let latest = 0;
+    for (const socket of this.ctx.getWebSockets()) {
+      const generation = agentConnectionGeneration(socket);
+      if (generation !== null) latest = Math.max(latest, generation);
+    }
+    return nextAgentConnectionGeneration(latest || undefined);
   }
 
   async alarm(): Promise<void> {
@@ -301,7 +300,7 @@ export class Relay extends DurableObject {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
-    const connectionGeneration = await this.nextConnectionGeneration();
+    const connectionGeneration = this.nextConnectionGeneration();
 
     const existingAgent = this.resolveAgent();
     const existingGeneration = agentConnectionGeneration(existingAgent);
