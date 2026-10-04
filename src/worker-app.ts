@@ -48,11 +48,6 @@ export async function publishDashboard(env: Env, topics: string[]): Promise<void
   } catch {}
 }
 
-function byteSize(value: unknown): number {
-  try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; }
-  catch { return 0; }
-}
-
 type SafeTiming = {
   workerOverheadMs?: number;
   relayRoundTripMs?: number;
@@ -106,8 +101,8 @@ type ToolActivityContext = {
 
 const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
 
-const REQUEST_CACHE_TTL_MS = 10_000;
-const QUOTA_DISABLED_CACHE_TTL_MS = 60_000;
+const REQUEST_CACHE_TTL_MS = 30_000;
+const QUOTA_DISABLED_CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_CACHE_MAX_ENTRIES = 512;
 
 type TimedCacheEntry<T> = { value: T; expiresAt: number };
@@ -156,7 +151,7 @@ async function activityContextForRequest(request: Request): Promise<ToolActivity
   };
 }
 
-async function recordUsage(env: Env, event: UsageEvent): Promise<void> {
+async function recordUsage(env: Env, event: Pick<UsageEvent, "userId" | "agentId" | "timestamp">): Promise<void> {
   try {
     await usageStub(env).fetch(new Request("https://usage.internal/record", {
       method: "POST",
@@ -219,22 +214,6 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
   if (decision.allowed) return null;
 
   const code = decision.code === "quota_exceeded" ? "quota_exceeded" : "rate_limited";
-  const activity = toolActivityContexts.get(user);
-  await recordUsage(env, {
-    userId: user.id,
-    tool: call.tool,
-    ...(call.agentId ? { agentId: call.agentId } : {}),
-    ...(activity?.toolCallId ? { toolCallId: activity.toolCallId } : {}),
-    ...(activity?.activityId ? { activityId: activity.activityId } : {}),
-    ...(activity?.startedAt ? { startedAt: activity.startedAt } : {}),
-    timestamp: new Date().toISOString(),
-    durationMs: 0,
-    ok: false,
-    errorClass: code,
-    statusCode: 429,
-    requestBytes: byteSize(call.args),
-    responseBytes: 0,
-  });
   const retryAt = decision.retryAt || decision.resetAt;
   const retryAtMs = retryAt ? Date.parse(retryAt) : NaN;
   const retryAfter = Number.isFinite(retryAtMs)
@@ -257,15 +236,10 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
 async function instrumentTool<T>(
   env: Env,
   user: AuthUser,
-  tool: string,
+  _tool: string,
   args: unknown,
   run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming }>,
 ): Promise<T> {
-  const started = Date.now();
-  const activity = toolActivityContexts.get(user) ?? {
-    toolCallId: "tc_" + crypto.randomUUID().replace(/-/g, ""),
-    startedAt: new Date().toISOString(),
-  };
   const requestedAgentId = typeof args === "object" && args !== null && typeof (args as any).agentId === "string"
     ? String((args as any).agentId).slice(0, 128)
     : undefined;
@@ -276,41 +250,16 @@ async function instrumentTool<T>(
   } catch (cause) {
     await recordUsage(env, {
       userId: user.id,
-      tool,
       ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
-      toolCallId: activity.toolCallId,
-      ...(activity.activityId ? { activityId: activity.activityId } : {}),
-      startedAt: activity.startedAt,
       timestamp: new Date().toISOString(),
-      durationMs: Date.now() - started,
-      ok: false,
-      errorClass: safeErrorCode(cause instanceof Error ? cause.name : undefined) || "exception",
-      errorSource: "worker",
-      errorCode: safeErrorCode(cause instanceof Error ? cause.name : undefined) || "exception",
-      requestBytes: byteSize(args),
-      responseBytes: 0,
     });
     throw cause;
   } finally {
     if (outcome) {
       await recordUsage(env, {
         userId: user.id,
-        tool,
         ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
-        toolCallId: activity.toolCallId,
-        ...(activity.activityId ? { activityId: activity.activityId } : {}),
-        startedAt: activity.startedAt,
         timestamp: new Date().toISOString(),
-        durationMs: Date.now() - started,
-        ok: outcome.ok,
-        ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
-        ...(outcome.errorSource ? { errorSource: outcome.errorSource } : {}),
-        ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
-        ...(Number.isFinite(outcome.statusCode) ? { statusCode: outcome.statusCode } : {}),
-        ...(outcome.exitCode === null || Number.isFinite(outcome.exitCode) ? { exitCode: outcome.exitCode } : {}),
-        ...(outcome.timing || {}),
-        requestBytes: byteSize(args),
-        responseBytes: byteSize(outcome.value),
       });
     }
   }

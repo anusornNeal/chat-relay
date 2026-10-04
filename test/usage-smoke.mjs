@@ -183,30 +183,23 @@ const grant = await admin("/admin/grants", "POST", {
 if (!grant.response.ok) throw new Error(`grant failed: ${grant.text}`);
 await tool(created.data.token, 5, "whoami");
 
-const total = await admin(`/admin/usage?day=${day}&recentLimit=100`);
-if (!total.response.ok) throw new Error(`usage query failed: ${total.text}`);
-if ((total.data.metric?.calls || 0) < 6 || (total.data.metric?.errors || 0) < 2) {
-  throw new Error(`unexpected total usage: ${total.text}`);
-}
-if (!(total.data.metric.avgDurationMs >= 0)) throw new Error("missing duration aggregate");
+const readerCookie = await browserLogin(created.data.user.id, "reader");
+const initialOverview = await admin("/admin/api/overview");
+if (!initialOverview.response.ok) throw new Error(`overview query failed: ${initialOverview.text}`);
+const ownerBefore = (initialOverview.data.accounts || []).find((item) => item.userId === "owner");
+if (!ownerBefore || ownerBefore.calls < 6) throw new Error(`owner usage attribution failed: ${initialOverview.text}`);
+const usageAgentBefore = (ownerBefore.agents || []).find((item) => item.agentId === usageAgentId);
+if (!usageAgentBefore || usageAgentBefore.calls < 4) throw new Error(`agent usage attribution failed: ${initialOverview.text}`);
+const missingAgentBefore = (ownerBefore.agents || []).find((item) => item.agentId === "missing-agent");
+if (!missingAgentBefore || missingAgentBefore.calls < 1) throw new Error(`missing-agent attribution failed: ${initialOverview.text}`);
 
-const reader = await admin(`/admin/usage?day=${day}&userId=${encodeURIComponent(created.data.user.id)}`);
-if (reader.data.metric?.calls !== 1) throw new Error(`user attribution failed: ${reader.text}`);
-
-const reads = await admin(`/admin/usage?day=${day}&tool=read_file`);
-if ((reads.data.metric?.calls || 0) < 2 || (reads.data.metric?.errors || 0) < 1) {
-  throw new Error(`tool attribution failed: ${reads.text}`);
-}
-
-const missingAgent = await admin(`/admin/usage?day=${day}&agentId=missing-agent`);
-if ((missingAgent.data.metric?.calls || 0) < 1 || (missingAgent.data.metric?.errors || 0) < 1) {
-  throw new Error(`missing-agent attribution failed: ${missingAgent.text}`);
+const readerOverview = await jsonFetch("/admin/api/overview", { headers: { cookie: readerCookie } });
+if (!readerOverview.response.ok || readerOverview.data.accounts?.length !== 1 || readerOverview.data.accounts[0]?.userId !== created.data.user.id || readerOverview.data.accounts[0]?.calls !== 1) {
+  throw new Error(`server-side user usage filtering failed: ${readerOverview.text}`);
 }
 
-const agent = await admin(`/admin/usage?day=${day}&agentId=${encodeURIComponent(usageAgentId)}`);
-if ((agent.data.metric?.calls || 0) < 3 || (agent.data.metric?.errors || 0) < 1) {
-  throw new Error(`agent attribution failed: ${agent.text}`);
-}
+const removedUsage = await admin("/admin/usage?day=" + day);
+if (removedUsage.response.status !== 404) throw new Error("legacy admin usage query is still exposed");
 
 await Promise.all([
   tool(ownerToken, 60, "whoami", {}, false, "concurrent-chat-a"),
@@ -215,15 +208,12 @@ await Promise.all([
 const aggregateAfterConcurrent = await admin("/admin/api/overview");
 const ownerAggregate = (aggregateAfterConcurrent.data.accounts || []).find((item) => item.userId === "owner");
 if (!aggregateAfterConcurrent.response.ok || !ownerAggregate || ownerAggregate.calls < 1) throw new Error("owner aggregate usage missing");
-const correlated = await admin("/admin/usage?day=" + day + "&recentLimit=100");
-if (Array.isArray(correlated.data.recent)) throw new Error("raw recent usage history is still exposed");
 const removedErrors = await admin("/admin/api/errors?limit=100");
 if (removedErrors.response.status !== 404) throw new Error("removed Errors API is still exposed");
-
 const removedHistory = await admin("/admin/api/tool-calls?state=history&limit=2");
 if (removedHistory.response.status !== 404) throw new Error("removed tool-call history API is still exposed");
 
-const serialized = JSON.stringify(total.data.recent || []);
+const serialized = JSON.stringify(aggregateAfterConcurrent.data);
 for (const forbidden of [
   "SENSITIVE_PATH_SECRET",
   "SENSITIVE_FAILURE_PATH",

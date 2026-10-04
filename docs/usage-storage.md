@@ -1,19 +1,50 @@
 # Usage storage access
 
-Overview `/window` and rolling `/summary` use persisted enriched aggregates, rather than scanning the entire raw event history. Each completed event updates its raw row, existing UTC daily counters, BKK daily aggregate and UTC hourly aggregate in one transaction. Timestamp input is validated and stored as canonical UTC ISO. Each aggregate stores sparse `(userId, tool, agentId)` groups, exact invocation/error/operational-error counts, sums, min/max latency and a latency histogram. All filter intersections and top tools use these groups.
+Usage counting is intentionally minimal. The dashboard only needs tool-call counts grouped by account and agent for Today, 7 days, and 30 days.
 
-The dashboard's existing BKK-midnight periods use daily middle rows and hourly boundary rows: a cold 30-day request typically reads about 30 daily plus at most 48 hourly rows, independent of event volume, after migration. Rolling summary uses this same planner. `/window` preserves the requested-from anchored chart bucket contract; arbitrary custom chart boundaries may require more hourly rows. Histogram p95 is explicitly approximate, using 10% exponential bins; the dashboard labels this approximation. Counts are exact for preserved history.
+## Current write path
 
-The DO memory cache holds at most 256 aggregate rows for 60 seconds. Cache keys are bucket identities, rather than continuously changing request timestamps. Recording a new or late event invalidates only affected hour/day entries; historical buckets are mutable when late events arrive. Revision checks prevent a concurrent old read from repopulating stale cache entries. An arbitrary partial-hour query reads raw only when stored timestamp extents cross its bounds. Up to four boundary hours with at most 8,000 events each are cached for 10 seconds; larger boundary hours remain exact but are read again. Full aggregate rows are capped at 96,000 encoded JSON bytes. A daily overflow decomposes into hourly aggregates; an overflowing hour uses paginated raw fallback and is excluded from raw cleanup.
+Each completed tool call sends only:
 
-Missing rich buckets migrate retained raw once, in pages of 1,000, and persist empty buckets as well. Migration does not truncate at 20,000 events. First-request migration cost scales with retained volume, and each bucket is built transactionally; a very large legacy bucket may take longer than an ordinary query. UTC legacy totals are compared against retained raw during initial coverage migration. Already-expired raw cannot reconstruct rich dimensions, errors or latency; affected responses expose `bounded: true` and `coverage: retained-history`. They do not substitute unrelated legacy totals for filtered results.
+- `userId`
+- `agentId` (or the synthetic `__relay__` agent for relay-local calls)
+- completion `timestamp`
 
-Raw cleanup preserves enriched hour/day data before deletion, marks affected rows `rawPruned`, and chunks deletes to the host's 128-key limit. Complete-hour/day queries retain exact counts after cleanup. Partial-hour queries whose extents require deleted raw disclose incomplete coverage. The active-call map hydrates once from paginated durable records, updates on start/completion, survives DO eviction through storage, and prunes abandoned records after one hour. Summary counts only the last five minutes.
+The Usage Durable Object stores that call with one SQLite upsert into `usage_hourly_v2`, keyed by `(hour_ms, user_id, agent_id)`.
 
-OAuth authorization keeps existing remembered consent behavior and uses a direct index for token-backed fallback. Legacy token rows are indexed once in 500-row pages with a durable migration marker. Index entries retain the longest-lived token for each token-kind and scope set; queried token records are checked for user/client/resource, expiry and requested scopes, so token deletion remains effective. This covers existing all-user token revocation; introducing independent per-token revocation would require preserving fallback references to older tokens of the same scope set. Index updates use transactions to preserve concurrent scope variants. Agent authentication still validates token identity and enabled state on every request, while persisting `lastSeenAt` at most once per minute.
+This replaces the previous minute + hour + day aggregate writes. Normal usage accounting is therefore one aggregate row write per tool call. Failed calls use the same counter path and do not create raw error-history rows.
 
-Run `npm run test:usage-storage` for instrumented production-handler tests. They bundle the real Usage/Registry handlers with only the Cloudflare base class mocked, clone storage values, count reads, reject oversized delete batches and serialize transactions. These establish local access patterns and behavior, not a measurement of deployed Cloudflare billing or a guarantee about daily account quotas.
+Disabled quota policy checks are read-only and do not create per-user quota rows.
 
-Raw `/activity/query` and `/errors/query` scan at most 500 historical rows per request, in descending canonical completion timestamp and unique storage-key order. Version 2 opaque cursors store the exclusive storage frontier, including when filters produce an empty page. `hasMore` and `nextCursor` permit continuing to older results; `bounded` means the scan cap was reached, and `matchedTotalLowerBound` signals that `matchedTotal` is only the number of matches seen in this bounded scan, not a global count. Consumers must allow continuation from empty pages. Active calls merge with the history frontier using canonical start timestamps and stable synthetic keys. The existing active map still hydrates once from storage on cold start. Legacy timestamp/id cursors remain accepted with bounded scanning, but future pages use storage-key ordering. Activity from/to filters use start time; errors use completion time. No additional raw-event index or eager history migration is created.
+## Query path
 
-Dashboard live invalidations coalesce with a minimum 30-second interval; local tool lifecycle patches remain immediate. Fallback polling and failed-data retries start at 60 seconds, with data retry and reconnect backoff capped at five minutes. Hidden or offline dashboards stop refresh timers, WebSocket reconnects and heartbeats, and resume with a refresh. Overview reuses registry state and avoids terminal observability probes for agents already known offline. Hub publication reads agent names only with eligible subscribers. Agent heartbeat liveness remains in its socket attachment; process diagnostics persist only when process identity or reconnect/disconnect diagnostics change. Process-epoch `lastSeenAt` therefore reflects the last persisted diagnostic observation, while status liveness uses the current heartbeat attachment. These changes reduce local storage/request patterns; they do not guarantee an account-wide Cloudflare daily quota or measure production billing.
+`/window` is the only usage-count query used by the dashboard.
+
+Filtering is performed in SQLite:
+
+- time range
+- optional `userId`
+- optional `agentId`
+
+The query groups with `SUM(calls) GROUP BY user_id, agent_id`. The dashboard receives already-grouped account/agent counts and does not filter raw usage rows in the browser.
+
+For pre-cutover data, the Usage Durable Object reads the old BKK daily `agg:v1:day:...` buckets in one batched storage read. If a legacy day was marked overflow, one additional batched hourly read is used for that day. Legacy reads never backfill or rewrite storage. Once a requested range is entirely after the SQL cutover day, the legacy read path is skipped.
+
+## Registry metadata
+
+Dashboard Overview performs one Usage query and one Registry state query. Registry state is cached in-memory for 30 seconds and invalidated by user/agent/grant mutations, avoiding repeated storage-list reads while the Durable Object is hot.
+
+## Removed paths
+
+The detailed usage/history system is intentionally gone:
+
+- raw successful/error event history
+- Tool Calls history
+- Errors history
+- usage SQL event index/backfill
+- minute/hour/day triple-write aggregation
+- rolling `/summary`
+- compatibility `/query`
+- usage raw-retention cleanup
+
+Run `npm run test:usage-storage` for storage/query access-pattern regression tests. Local tests validate code behavior and write-call counts; Cloudflare billing metrics remain the source of truth for deployed row accounting.

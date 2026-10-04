@@ -78,7 +78,7 @@ The automated `test:submission` check fails if any public tool omits one of thes
 
 The relay transports requested tool inputs/results between ChatGPT and the authorized local agent. Raw file contents, terminal commands/output, screenshot bytes, typed text, click coordinates, passwords, cookies, OAuth tokens, and administrator secrets are not intentionally written to usage or audit telemetry.
 
-Usage telemetry stores bounded metadata such as user id, agent id, tool name, timestamp, duration, success/error class, and byte counts. Raw usage events default to 30-day retention; daily aggregate metrics are retained separately.
+Usage telemetry stores only hourly aggregate tool-call counts keyed by user id and agent id. The dashboard queries these counters by time range; detailed tool-call and error history is not retained.
 
 Security/admin audit events store sanitized actor/action/target/result metadata. Audit events default to 180-day retention. Sensitive metadata keys such as password/token/secret/command/content/payload/cookie/CSRF are excluded.
 

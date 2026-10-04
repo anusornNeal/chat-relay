@@ -11,7 +11,6 @@ export interface Env {
   USER_RATE_LIMIT_PER_WINDOW?: string;
   USER_RATE_WINDOW_SECONDS?: string;
   USER_DAILY_CALL_QUOTA?: string;
-  USAGE_RAW_RETENTION_DAYS?: string;
   AUDIT_RETENTION_DAYS?: string;
   OPENAI_APPS_CHALLENGE?: string;
   PUBLIC_BASE_URL?: string;

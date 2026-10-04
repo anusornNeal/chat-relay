@@ -116,12 +116,12 @@ const rpc = await request("/mcp?key=" + encodeURIComponent(callerToken), {
 });
 if (!rpc.response.ok) throw new Error("usage fixture MCP call failed: " + rpc.text);
 
-const day = new Date().toISOString().slice(0, 10);
-const usageBefore = await admin("/admin/api/usage?day=" + day + "&recentLimit=100");
-if (!usageBefore.response.ok || !usageBefore.data.metric?.calls || !usageBefore.data.recent?.length) {
+const usageBefore = await admin("/admin/api/overview");
+const ownerUsageBefore = (usageBefore.data.accounts || []).find((account) => account.userId === "owner");
+if (!usageBefore.response.ok || !ownerUsageBefore?.calls) {
   throw new Error("usage fixture missing before cleanup: " + usageBefore.text);
 }
-const aggregateCalls = usageBefore.data.metric.calls;
+const aggregateCalls = ownerUsageBefore.calls;
 
 const device = await request("/auth/device/start", {
   method: "POST",
@@ -162,33 +162,22 @@ for (const secret of [password, createdToken, rotatedToken, adminToken, callerTo
 
 const operationsBefore = await admin("/admin/api/operations");
 if (!operationsBefore.response.ok || !operationsBefore.data.components?.registry?.ok ||
-    !operationsBefore.data.components?.usage?.ok || !operationsBefore.data.components?.audit?.ok) {
+    !operationsBefore.data.components?.audit?.ok || operationsBefore.data.components?.usage) {
   throw new Error("operations health invalid: " + operationsBefore.text);
 }
 
-let cleanupPasses = 0;
-let cleanupDeleted = 0;
-while (cleanupPasses < 10) {
-  const cleanup = await admin("/admin/api/operations/cleanup", "POST", {
-    usageRawRetentionDays: 0,
-    auditRetentionDays: 365,
-    limit: 500,
-  });
-  if (!cleanup.response.ok || !cleanup.data.ok) throw new Error("cleanup failed: " + cleanup.text);
-  const deleted = Number(cleanup.data.usage?.data?.deleted || 0);
-  cleanupDeleted += deleted;
-  cleanupPasses += 1;
-  if (deleted === 0) break;
+const cleanup = await admin("/admin/api/operations/cleanup", "POST", {
+  auditRetentionDays: 365,
+  limit: 500,
+});
+if (!cleanup.response.ok || !cleanup.data.ok || cleanup.data.usage) {
+  throw new Error("cleanup failed: " + cleanup.text);
 }
-if (cleanupDeleted < 1) throw new Error("raw usage cleanup removed no eligible events");
-if (cleanupPasses >= 10) throw new Error("raw usage cleanup did not converge within safety bound");
 
-const usageAfter = await admin("/admin/api/usage?day=" + day + "&recentLimit=100");
-if (!usageAfter.response.ok || usageAfter.data.metric?.calls !== aggregateCalls) {
-  throw new Error("usage aggregate changed during raw cleanup: " + usageAfter.text);
-}
-if ((usageAfter.data.recent || []).length !== 0) {
-  throw new Error("raw usage events survived zero-day cleanup");
+const usageAfter = await admin("/admin/api/overview");
+const ownerUsageAfter = (usageAfter.data.accounts || []).find((account) => account.userId === "owner");
+if (!usageAfter.response.ok || ownerUsageAfter?.calls !== aggregateCalls) {
+  throw new Error("usage count changed during unrelated cleanup: " + usageAfter.text);
 }
 
 const pending = await request("/auth/device/token", {
@@ -208,13 +197,11 @@ if (!browserSession.response.ok || browserSession.data.user?.id !== "owner") {
 }
 
 const cleanupAgain = await admin("/admin/api/operations/cleanup", "POST", {
-  usageRawRetentionDays: 0,
   auditRetentionDays: 365,
   limit: 500,
 });
-if (!cleanupAgain.response.ok || !cleanupAgain.data.ok) throw new Error("second cleanup failed");
-if ((cleanupAgain.data.usage?.data?.deleted || 0) !== 0) {
-  throw new Error("cleanup was not idempotent for raw usage");
+if (!cleanupAgain.response.ok || !cleanupAgain.data.ok || cleanupAgain.data.usage) {
+  throw new Error("second cleanup failed");
 }
 
 const auditAfter = await admin("/admin/api/audit?limit=100");

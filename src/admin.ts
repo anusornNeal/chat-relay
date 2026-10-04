@@ -16,7 +16,6 @@ type AdminEnv = {
   USER_RATE_LIMIT_PER_WINDOW?: string;
   USER_RATE_WINDOW_SECONDS?: string;
   USER_DAILY_CALL_QUOTA?: string;
-  USAGE_RAW_RETENTION_DAYS?: string;
   AUDIT_RETENTION_DAYS?: string;
   PUBLIC_BASE_URL?: string;
   GOOGLE_CLIENT_ID?: string;
@@ -212,22 +211,6 @@ async function registryState(env: AdminEnv) {
   return data;
 }
 
-async function usageQuery(env: AdminEnv, source: URL) {
-  const query = new URLSearchParams();
-  for (const key of ["day", "from", "to", "userId", "tool", "agentId", "recentLimit"]) {
-    const value = source.searchParams.get(key);
-    if (value) query.set(key, value);
-  }
-  return usageStub(env).fetch("https://usage.internal/query" + (query.size ? "?" + query : ""));
-}
-
-async function usageSummary(env: AdminEnv, hours: number, userId?: string) {
-  const query = new URLSearchParams({ hours: String(hours) });
-  if (userId) query.set("userId", userId);
-  const response = await usageStub(env).fetch("https://usage.internal/summary?" + query);
-  return response.json<any>();
-}
-
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 type DashboardRange = "today" | "7d" | "30d";
 function dashboardPeriod(range: DashboardRange = "today", nowMs = Date.now()) {
@@ -292,42 +275,6 @@ async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], gra
     };
   }));
 }
-async function terminalActivity(env: AdminEnv, selfUserId?: string, loadedState?: any, statuses?: any[]) {
-  const state = loadedState ?? await registryState(env);
-  const allowed = new Set<string>();
-  for (const agent of state.agents ?? []) {
-    if (!agent.enabled || agent.retiredAt || statuses?.find(status => status.id === agent.id)?.online === false) continue;
-    if (!selfUserId || (state.grants ?? []).some((grant: any) => grant.userId === selfUserId && grant.agentId === agent.id)) {
-      allowed.add(agent.id);
-    }
-  }
-  const snapshots = await Promise.all([...allowed].map(async (agentId) => {
-    try {
-      const response = await env.RELAY.get(env.RELAY.idFromName(agentId)).fetch(new Request("https://relay.internal/relay", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ payload: { action: "terminal.observability" } }),
-      }));
-      const envelope = await response.json<any>().catch(() => null);
-      const payload = envelope?.payload;
-      if (!response.ok || !payload?.ok) return { agentId, agentName: (state.agents ?? []).find((agent: any) => agent.id === agentId)?.name || agentId, sessions: [], batches: [] };
-      const belongs = (item: any) => !selfUserId || item.userId === selfUserId;
-      const agentName = (state.agents ?? []).find((agent: any) => agent.id === agentId)?.name || agentId;
-      return {
-        agentId,
-        agentName,
-        sessions: (payload.sessions ?? []).filter((item: any) => belongs(item) && item.status === "running"),
-        batches: (payload.batches ?? []).filter((item: any) =>
-          belongs(item) && (Number(item.counts?.running || 0) > 0 || Number(item.counts?.queued || 0) > 0)
-        ),
-      };
-    } catch {
-      return { agentId, agentName: (state.agents ?? []).find((agent: any) => agent.id === agentId)?.name || agentId, sessions: [], batches: [] };
-    }
-  }));
-  return snapshots;
-}
-
 export async function handleAdmin(request: Request, env: AdminEnv): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -465,10 +412,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   const sessionUser = browserAuth?.ok ? browserAuth.data.user : null;
   const adminAuthorized = operatorAuthorized || sessionUser?.admin === true;
   const selfUserId = sessionUser?.id ? String(sessionUser.id) : "";
-  const selfService = request.method === "GET" && [
-    "/admin/api/overview",
-    "/admin/api/usage",
-  ].includes(path);
+  const selfService = request.method === "GET" && path === "/admin/api/overview";
   if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService) {
     return error(403, "admin_required");
   }
@@ -514,44 +458,35 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   if (path === "/admin/api/operations" && request.method === "GET") {
-    const [registry, usage, audit] = await Promise.all([
+    const [registry, audit] = await Promise.all([
       internalJson(registryStub(env).fetch("https://registry.internal/ops/status")),
-      internalJson(usageStub(env).fetch("https://usage.internal/ops/status")),
       internalJson(auditStub(env).fetch("https://audit.internal/ops/status")),
     ]);
     return Response.json({
-      ok: registry.ok && usage.ok && audit.ok,
-      components: { registry, usage, audit },
-      retention: {
-        rawUsageDays: boundedRetention(env.USAGE_RAW_RETENTION_DAYS, 30),
-        auditDays: boundedRetention(env.AUDIT_RETENTION_DAYS, 180),
-      },
+      ok: registry.ok && audit.ok,
+      components: { registry, audit },
+      retention: { auditDays: boundedRetention(env.AUDIT_RETENTION_DAYS, 180) },
     });
   }
 
   if (path === "/admin/api/operations/cleanup" && request.method === "POST") {
-    const rawUsageDays = boundedRetention(body?.usageRawRetentionDays, boundedRetention(env.USAGE_RAW_RETENTION_DAYS, 30));
     const auditDays = boundedRetention(body?.auditRetentionDays, boundedRetention(env.AUDIT_RETENTION_DAYS, 180));
     const limit = Math.min(1000, Math.max(1, Math.floor(Number(body?.limit) || 250)));
-    const [registry, usage, audit] = await Promise.all([
+    const [registry, audit] = await Promise.all([
       internalJson(registryStub(env).fetch(new Request("https://registry.internal/ops/cleanup", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ limit }),
-      }))),
-      internalJson(usageStub(env).fetch(new Request("https://usage.internal/cleanup", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ retentionDays: rawUsageDays, limit }),
       }))),
       internalJson(auditStub(env).fetch(new Request("https://audit.internal/cleanup", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ retentionDays: auditDays, limit }),
       }))),
     ]);
-    const ok = registry.ok && usage.ok && audit.ok;
+    const ok = registry.ok && audit.ok;
     await recordAudit(env, actor, "operations.cleanup", { type: "operations", id: "retention" }, ok ? "success" : "failure", {
       registryDeleted: Number(registry.data?.deletedRecords || 0),
-      usageDeleted: Number(usage.data?.deleted || 0),
       auditDeleted: Number(audit.data?.deleted || 0),
       status: ok ? 200 : 502,
     });
-    return Response.json({ ok, registry, usage, audit }, { status: ok ? 200 : 502 });
+    return Response.json({ ok, registry, audit }, { status: ok ? 200 : 502 });
   }
 
   if (path === "/admin/api/limits" && request.method === "GET") {
@@ -595,10 +530,9 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
     if (!adminAuthorized) {
       const agentUsage = (usage.agents ?? [])
-        .filter((entry: any) => entry.userId === selfUserId)
         .map((entry: any) => ({
           agentId: entry.agentId,
-          name: entry.agentId,
+          name: entry.agentId === "__relay__" ? "Relay" : entry.agentId,
           calls: Number(entry.calls || 0),
         }))
         .sort((a: any, b: any) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
@@ -625,18 +559,30 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       (usage.agents ?? []).map((entry: any) => [JSON.stringify([entry.userId, entry.agentId]), Number(entry.calls || 0)]),
     );
     const userTotals = new Map((usage.users ?? []).map((entry: any) => [entry.userId, Number(entry.calls || 0)]));
+    const ownedAgentIdsByUser = new Map<string, Set<string>>();
+    const grantedAgentIdsByUser = new Map<string, Set<string>>();
+    const usageAgentIdsByUser = new Map<string, Set<string>>();
+    const addAgentId = (map: Map<string, Set<string>>, userId: string, agentId: string) => {
+      const ids = map.get(userId) || new Set<string>();
+      ids.add(agentId);
+      map.set(userId, ids);
+    };
+    for (const agent of agents) if (agent.ownerUserId && !agent.retiredAt) addAgentId(ownedAgentIdsByUser, agent.ownerUserId, agent.id);
+    for (const grant of grants) addAgentId(grantedAgentIdsByUser, grant.userId, grant.agentId);
+    for (const entry of usage.agents ?? []) addAgentId(usageAgentIdsByUser, entry.userId, entry.agentId);
 
     const accounts = users.map((user: any) => {
-      const ids = new Set<string>();
-      for (const agent of agents) if (agent.ownerUserId === user.id && !agent.retiredAt) ids.add(agent.id);
-      for (const grant of grants) if (grant.userId === user.id) ids.add(grant.agentId);
-      for (const entry of usage.agents ?? []) if (entry.userId === user.id) ids.add(entry.agentId);
+      const ids = new Set<string>([
+        ...(ownedAgentIdsByUser.get(user.id) || []),
+        ...(grantedAgentIdsByUser.get(user.id) || []),
+        ...(usageAgentIdsByUser.get(user.id) || []),
+      ]);
 
       const accountAgents = [...ids].map((agentId) => {
         const agent: any = agentById.get(agentId);
         return {
           agentId,
-          name: agent?.name || agentId,
+          name: agentId === "__relay__" ? "Relay" : agent?.name || agentId,
           calls: Number(usageByUserAgent.get(JSON.stringify([user.id, agentId])) || 0),
         };
       }).sort((a, b) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
@@ -666,39 +612,42 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const q = String(url.searchParams.get("q") || "").toLowerCase();
     const enabled = url.searchParams.get("enabled");
     const deleted = url.searchParams.get("deleted");
-    const agents = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
+    const filteredUsers = (state.users ?? []).filter((user: any) =>
+      (!q || String(user.id + " " + user.name + " " + (user.login ?? "")).toLowerCase().includes(q)) &&
+      (enabled === null || String(user.enabled) === enabled) &&
+      (deleted === null || String(Boolean(user.deletedAt)) === deleted)
+    );
+    const userPage = page(filteredUsers, url);
+    const pageUserIds = new Set(userPage.items.map((user: any) => user.id));
+    const relevantAgentIds = new Set<string>();
+    for (const grant of state.grants ?? []) if (pageUserIds.has(grant.userId)) relevantAgentIds.add(grant.agentId);
+    for (const agent of state.agents ?? []) if (agent.ownerUserId && pageUserIds.has(agent.ownerUserId)) relevantAgentIds.add(agent.id);
+
+    const relevantAgents = (state.agents ?? []).filter((agent: any) => relevantAgentIds.has(agent.id));
+    const agents = await onlineAgents(env, relevantAgents, state.users ?? [], state.grants ?? []);
     const agentById = new Map(agents.map((agent: any) => [agent.id, agent]));
-    const items = (state.users ?? [])
-      .filter((user: any) =>
-        (!q || String(user.id + " " + user.name + " " + (user.login ?? "")).toLowerCase().includes(q)) &&
-        (enabled === null || String(user.enabled) === enabled) &&
-        (deleted === null || String(Boolean(user.deletedAt)) === deleted)
-      )
-      .map((user: any) => {
-        const ids = new Set<string>();
-        for (const grant of state.grants ?? []) if (grant.userId === user.id) ids.add(grant.agentId);
-        for (const agent of state.agents ?? []) if (agent.ownerUserId === user.id) ids.add(agent.id);
-        const activeIds = [...ids].filter((id) => {
-          const agent = agentById.get(id);
-          return agent && agent.enabled && !agent.retiredAt;
-        });
-        const assignedAgents = activeIds
-          .map((id) => agentById.get(id))
-          .filter(Boolean)
-          .map((agent: any) => ({
-            id: agent.id,
-            name: agent.name || agent.id,
-            online: agent.online === true,
-          }))
-          .sort((a: any, b: any) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
-        return {
-          ...user,
-          agentCount: assignedAgents.length,
-          onlineAgentCount: assignedAgents.filter((agent: any) => agent.online).length,
-          assignedAgents,
-        };
-      });
-    return Response.json(page(items, url));
+
+    const items = userPage.items.map((user: any) => {
+      const ids = new Set<string>();
+      for (const grant of state.grants ?? []) if (grant.userId === user.id) ids.add(grant.agentId);
+      for (const agent of state.agents ?? []) if (agent.ownerUserId === user.id) ids.add(agent.id);
+      const assignedAgents = [...ids]
+        .map((id) => agentById.get(id))
+        .filter((agent: any) => agent && agent.enabled && !agent.retiredAt)
+        .map((agent: any) => ({
+          id: agent.id,
+          name: agent.name || agent.id,
+          online: agent.online === true,
+        }))
+        .sort((a: any, b: any) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+      return {
+        ...user,
+        agentCount: assignedAgents.length,
+        onlineAgentCount: assignedAgents.filter((agent: any) => agent.online).length,
+        assignedAgents,
+      };
+    });
+    return Response.json({ ...userPage, items });
   }
 
   if (path.startsWith("/admin/api/agents/") && request.method === "GET") {
@@ -712,14 +661,20 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
   if (path === "/admin/api/agents" && request.method === "GET") {
     const state = await registryState(env);
-    let items = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
     const q = String(url.searchParams.get("q") || "").toLowerCase();
     const online = url.searchParams.get("online");
-    items = items.filter((agent: any) =>
-      (!q || String(agent.id + " " + agent.name).toLowerCase().includes(q)) &&
-      (online === null || String(agent.online) === online)
+    const candidates = (state.agents ?? []).filter((agent: any) =>
+      !q || String(agent.id + " " + agent.name).toLowerCase().includes(q)
     );
-    return Response.json(page(items, url));
+
+    if (online === null) {
+      const basePage = page(candidates, url);
+      const items = await onlineAgents(env, basePage.items, state.users ?? [], state.grants ?? []);
+      return Response.json({ ...basePage, items });
+    }
+
+    const enriched = await onlineAgents(env, candidates, state.users ?? [], state.grants ?? []);
+    return Response.json(page(enriched.filter((agent: any) => String(agent.online) === online), url));
   }
 
   if (path === "/admin/api/grants" && request.method === "GET") {
@@ -736,13 +691,6 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const response = await registryCall(env, "/sessions/list", { userId: url.searchParams.get("userId") || undefined });
     const data = await response.json<any>();
     return Response.json(page(data.sessions ?? [], url), { status: response.status });
-  }
-
-  if (path === "/admin/api/usage" && request.method === "GET") {
-    const scoped = new URL(url.toString());
-    if (!adminAuthorized) scoped.searchParams.set("userId", selfUserId);
-    const response = await usageQuery(env, scoped);
-    return new Response(response.body, { status: response.status, headers: response.headers });
   }
 
   if (path === "/admin/api/users/soft-delete" && request.method === "POST") {
@@ -915,7 +863,6 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     await recordAudit(env, actor, "agent.token.rotate", { type: "agent", id: agentId }, response.ok ? "success" : "failure", { status: response.status });
     return Response.json(response.ok ? { ...data, token } : data, { status: response.status });
   }
-  if (path === "/admin/usage" && request.method === "GET") return usageQuery(env, url);
   if (path === "/admin/state" && request.method === "GET") return registryCall(env, "/state");
   return error(404, "not_found");
 }

@@ -212,11 +212,33 @@ function isExpired(iso: string): boolean {
   return Date.parse(iso) <= Date.now();
 }
 
+const STATE_CACHE_TTL_MS = 30_000;
+const STATE_MUTATION_PATHS = new Set([
+  "/bootstrap",
+  "/users/create",
+  "/agents/create",
+  "/grants/upsert",
+  "/grants/delete",
+  "/users/set-enabled",
+  "/users/soft-delete",
+  "/users/restore",
+  "/users/set-login",
+  "/users/set-admin",
+  "/agents/set-enabled",
+  "/agents/rename",
+  "/agents/retire",
+  "/google/upsert",
+  "/device/exchange",
+]);
+
 export class Registry extends DurableObject {
+  private stateCache?: { expiresAt: number; data: any };
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const body = request.method === "GET" ? null : await request.json().catch(() => null);
+    if (request.method !== "GET" && STATE_MUTATION_PATHS.has(path)) this.stateCache = undefined;
 
     switch (path) {
       case "/bootstrap": return this.bootstrap(body);
@@ -384,8 +406,10 @@ export class Registry extends DurableObject {
     if (!body?.userId || !body?.agentId || !Array.isArray(body?.scopes)) {
       return json({ error: "invalid_grant" }, 400);
     }
-    const user = await this.ctx.storage.get<UserRecord>(key.user(String(body.userId)));
-    const agent = await this.ctx.storage.get<AgentRecord>(key.agent(String(body.agentId)));
+    const [user, agent] = await Promise.all([
+      this.ctx.storage.get<UserRecord>(key.user(String(body.userId))),
+      this.ctx.storage.get<AgentRecord>(key.agent(String(body.agentId))),
+    ]);
     if (!user || !agent) return json({ error: "principal_not_found" }, 404);
 
     const allowed = new Set(["*", "read", "write", "terminal", "process", "desktop_read", "desktop_control", "admin"]);
@@ -773,8 +797,10 @@ export class Registry extends DurableObject {
     if (!user?.enabled || user.deletedAt || !user.googleSub) return json({ error: "account_unavailable" }, 403);
 
     let agentId = device.agentId;
-    let agent = await this.ctx.storage.get<AgentRecord>(key.agent(agentId));
-    let grant = await this.ctx.storage.get<GrantRecord>(key.grant(user.id, agentId));
+    let [agent, grant] = await Promise.all([
+      this.ctx.storage.get<AgentRecord>(key.agent(agentId)),
+      this.ctx.storage.get<GrantRecord>(key.grant(user.id, agentId)),
+    ]);
 
     if (agent && agent.ownerUserId !== user.id) {
       agentId = `${agentId.slice(0, 54)}-${crypto.randomUUID().slice(0, 8)}`;
@@ -903,8 +929,12 @@ export class Registry extends DurableObject {
 
     await this.migrateOAuthAuthorizationIndex();
     const index = await this.ctx.storage.get<Record<string, string>>(this.oauthAuthorizationKey(userId, clientId, resource));
-    for (const tokenKey of Object.values(index || {})) {
-      const record = await this.ctx.storage.get<OAuthTokenRecord>(tokenKey);
+    const tokenKeys = [...new Set(Object.values(index || {}))];
+    const records = tokenKeys.length
+      ? await this.ctx.storage.get<OAuthTokenRecord>(tokenKeys)
+      : new Map<string, OAuthTokenRecord>();
+    for (const tokenKey of tokenKeys) {
+      const record = records.get(tokenKey);
       if (record && record.userId === userId && record.clientId === clientId && record.resource === resource &&
           !isExpired(record.expiresAt) && requestedScope.every((scope: string) => record.scope.includes(scope))) {
         return json({ ok: true, authorized: true });
@@ -1020,9 +1050,11 @@ export class Registry extends DurableObject {
       return json({ ok: true, user: publicUser(existing), created: false });
     }
 
-    const emailUserId =
-      await this.ctx.storage.get<string>(key.userEmail(email)) ??
-      await this.ctx.storage.get<string>(key.userLogin(email));
+    const [emailIndexUserId, loginIndexUserId] = await Promise.all([
+      this.ctx.storage.get<string>(key.userEmail(email)),
+      this.ctx.storage.get<string>(key.userLogin(email)),
+    ]);
+    const emailUserId = emailIndexUserId ?? loginIndexUserId;
     if (emailUserId) {
       const existing = await this.ctx.storage.get<UserRecord>(key.user(emailUserId));
       if (!existing) return json({ error: "google_identity_conflict" }, 409);
@@ -1471,9 +1503,14 @@ export class Registry extends DurableObject {
   private async listAgents(body: any): Promise<Response> {
     const userId = String(body?.userId ?? "");
     const grants = await this.ctx.storage.list<GrantRecord>({ prefix: `grant:${userId}:` });
+    const grantRows = [...grants.values()];
+    const agentKeys = [...new Set(grantRows.map((grant) => key.agent(grant.agentId)))];
+    const agents = agentKeys.length
+      ? await this.ctx.storage.get<AgentRecord>(agentKeys)
+      : new Map<string, AgentRecord>();
     const result = [];
-    for (const grant of grants.values()) {
-      const agent = await this.ctx.storage.get<AgentRecord>(key.agent(grant.agentId));
+    for (const grant of grantRows) {
+      const agent = agents.get(key.agent(grant.agentId));
       if (!agent?.enabled) continue;
       result.push({
         id: agent.id,
@@ -1489,20 +1526,34 @@ export class Registry extends DurableObject {
     const userId = String(body?.userId ?? "");
     const requestedId = body?.agentId ? String(body.agentId) : null;
     const scope = String(body?.scope ?? "read");
-    const grants = await this.ctx.storage.list<GrantRecord>({ prefix: `grant:${userId}:` });
 
-    const candidates: Array<{ agent: AgentRecord; grant: GrantRecord }> = [];
-    for (const grant of grants.values()) {
-      if (!hasScope(grant, scope)) continue;
-      const agent = await this.ctx.storage.get<AgentRecord>(key.agent(grant.agentId));
-      if (!agent?.enabled) continue;
-      if (requestedId && agent.id !== requestedId) continue;
-      candidates.push({ agent, grant });
+    if (requestedId) {
+      const [grant, agent] = await Promise.all([
+        this.ctx.storage.get<GrantRecord>(key.grant(userId, requestedId)),
+        this.ctx.storage.get<AgentRecord>(key.agent(requestedId)),
+      ]);
+      if (!grant || !hasScope(grant, scope) || !agent?.enabled) {
+        return json({ error: "permission_denied" }, 403);
+      }
+      return json({
+        ok: true,
+        agent: { id: agent.id, name: agent.name, lastSeenAt: agent.lastSeenAt ?? null },
+        scopes: grant.scopes,
+      });
     }
 
-    if (requestedId && candidates.length === 0) return json({ error: "permission_denied" }, 403);
-    if (!requestedId && candidates.length === 0) return json({ error: "no_agent" }, 404);
-    if (!requestedId && candidates.length > 1) {
+    const grants = await this.ctx.storage.list<GrantRecord>({ prefix: `grant:${userId}:` });
+    const scopedGrants = [...grants.values()].filter((grant) => hasScope(grant, scope));
+    const agentKeys = [...new Set(scopedGrants.map((grant) => key.agent(grant.agentId)))];
+    const agents = agentKeys.length
+      ? await this.ctx.storage.get<AgentRecord>(agentKeys)
+      : new Map<string, AgentRecord>();
+    const candidates = scopedGrants
+      .map((grant) => ({ grant, agent: agents.get(key.agent(grant.agentId)) }))
+      .filter((entry): entry is { grant: GrantRecord; agent: AgentRecord } => Boolean(entry.agent?.enabled));
+
+    if (candidates.length === 0) return json({ error: "no_agent" }, 404);
+    if (candidates.length > 1) {
       return json({
         error: "agent_required",
         agents: candidates.map(({ agent }) => ({ id: agent.id, name: agent.name })),
@@ -1518,16 +1569,21 @@ export class Registry extends DurableObject {
   }
 
   private async state(): Promise<Response> {
+    const now = Date.now();
+    if (this.stateCache && this.stateCache.expiresAt > now) return json(this.stateCache.data);
+
     const [users, agents, grants] = await Promise.all([
       this.ctx.storage.list<UserRecord>({ prefix: "user:" }),
       this.ctx.storage.list<AgentRecord>({ prefix: "agent:" }),
       this.ctx.storage.list<GrantRecord>({ prefix: "grant:" }),
     ]);
-    return json({
+    const data = {
       ok: true,
       users: [...users.values()].map((user) => publicUser(user)),
       agents: [...agents.values()].map(({ tokenHash: _tokenHash, ...agent }) => agent),
       grants: [...grants.values()],
-    });
+    };
+    this.stateCache = { expiresAt: now + STATE_CACHE_TTL_MS, data };
+    return json(data);
   }
 }

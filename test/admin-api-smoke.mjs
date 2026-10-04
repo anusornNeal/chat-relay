@@ -96,11 +96,8 @@ const accountRow = (aggregateOverview.data.accounts || []).find((item) => item.u
 if (!aggregateOverview.response.ok || !accountRow || accountRow.calls < 1) {
   throw new Error("account aggregate usage missing: " + aggregateOverview.text);
 }
-const usage = await admin(`/admin/api/usage?day=${new Date().toISOString().slice(0, 10)}`);
-if (!usage.response.ok || !(usage.data.metric?.calls >= 1)) throw new Error(`usage API failed: ${usage.text}`);
-
-const range = await admin(`/admin/api/usage?from=${new Date().toISOString().slice(0, 10)}&to=${new Date().toISOString().slice(0, 10)}`);
-if (!range.response.ok || range.data.days?.length !== 1) throw new Error(`usage range failed: ${range.text}`);
+const removedUsage = await admin("/admin/api/usage");
+if (removedUsage.response.status !== 404) throw new Error("removed usage compatibility API is still exposed");
 
 const overview = await admin("/admin/api/overview");
 if (!overview.response.ok || !Array.isArray(overview.data.accounts) || overview.data.accounts.length < 4) {
