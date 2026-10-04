@@ -133,7 +133,7 @@ function googleError(message: string, status = 400) {
   );
 }
 
-export async function startGoogleLogin(request: Request, env: GoogleAuthEnv, continuation = ""): Promise<Response> {
+export async function startGoogleLogin(request: Request, env: GoogleAuthEnv, continuation = "", options: { selectAccount?: boolean } = {}): Promise<Response> {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
     return googleError("Google login is not configured.", 503);
   }
@@ -151,7 +151,7 @@ export async function startGoogleLogin(request: Request, env: GoogleAuthEnv, con
   target.searchParams.set("nonce", nonce);
   target.searchParams.set("code_challenge", challenge);
   target.searchParams.set("code_challenge_method", "S256");
-  target.searchParams.set("prompt", "select_account");
+  if (options.selectAccount !== false) target.searchParams.set("prompt", "select_account");
 
   const cookieState = await signedGoogleState(env.GOOGLE_CLIENT_SECRET, {
     state,

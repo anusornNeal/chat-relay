@@ -459,6 +459,7 @@ export async function handleOAuth(
       request,
       googleEnv,
       JSON.stringify({ kind: "connector-oauth", params: validated.params }),
+      { selectAccount: false },
     );
   }
 
