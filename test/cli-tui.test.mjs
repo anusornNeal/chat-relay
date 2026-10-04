@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { humanizeToolCall } from "../agent/toolcall-summary.mjs";
-import { RemoteTui, formatTransactionRow, formatTransactionRows, formatTwoColumnHeader, shouldUseTui } from "../cli/tui.mjs";
+import { RemoteTui, formatTransactionRow, formatTransactionRows, formatTwoColumnHeader, shouldUseColor, shouldUseTui } from "../cli/tui.mjs";
 
 test("humanizes filesystem and terminal calls without file contents", () => {
   assert.equal(
@@ -88,6 +88,10 @@ test("formats transaction rows and tui selection", () => {
   assert.equal(shouldUseTui({ tuiEnabled: true }, { isTTY: false }), true);
   assert.equal(shouldUseTui({}, { isTTY: true }), true);
   assert.equal(shouldUseTui({}, { isTTY: false }), false);
+  assert.equal(shouldUseColor({ isTTY: true }, {}), true);
+  assert.equal(shouldUseColor({ isTTY: true }, { NO_COLOR: "1" }), false);
+  assert.equal(shouldUseColor({ isTTY: true }, { TERM: "dumb" }), false);
+  assert.equal(shouldUseColor({ isTTY: false }, {}), false);
 });
 
 test("tui redraw stays inside terminal bounds and uses alternate screen", () => {
@@ -119,10 +123,12 @@ test("tui redraw stays inside terminal bounds and uses alternate screen", () => 
   assert.match(writes[0], /\x1b\[\?1049h/);
   assert.match(writes.at(-1), /\x1b\[\?1049l/);
 
-  const frame = writes.find((value) => value.includes("Chat Relay  v0.11.1-test"));
+  const stripAnsi = (value) => value.replace(/\x1b\[[0-9;]*m/g, "");
+  const frame = writes.find((value) => stripAnsi(value).includes("Chat Relay  v0.11.1-test"));
   assert.ok(frame);
   const visible = frame.replace(/^\x1b\[2J\x1b\[H/, "");
   const lines = visible.split("\n");
   assert.ok(lines.length <= output.rows - 1);
-  assert.ok(lines.every((line) => line.length <= output.columns - 1));
+  assert.ok(lines.every((line) => stripAnsi(line).length <= output.columns - 1));
+  assert.match(frame, /\x1b\[36m/);
 });

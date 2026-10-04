@@ -1,6 +1,17 @@
 import { humanizeToolCall } from "../agent/toolcall-summary.mjs";
 
 const ESC = "\x1b[";
+const RESET = "\x1b[0m";
+const STYLE = {
+  reset: RESET,
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  red: "\x1b[31m",
+  gray: "\x1b[90m",
+};
 const LABEL_WIDTH = 12;
 const GAP = 3;
 const MIN_FRAME_WIDTH = 60;
@@ -20,12 +31,33 @@ function truncate(value, width) {
   return text.slice(0, width - 1) + "…";
 }
 
-function field(label, value, width) {
-  const valueWidth = Math.max(1, width - LABEL_WIDTH);
-  return truncate(String(label).padEnd(LABEL_WIDTH) + truncate(value, valueWidth), width).padEnd(width);
+function paint(value, ...styles) {
+  if (!styles.length) return String(value ?? "");
+  return styles.join("") + String(value ?? "") + RESET;
 }
 
-export function formatTwoColumnHeader(state, width = 110) {
+function field(label, value, width, color = false, valueStyle = null) {
+  const valueWidth = Math.max(1, width - LABEL_WIDTH);
+  const plainLabel = String(label).padEnd(LABEL_WIDTH);
+  const plainValue = truncate(value, valueWidth);
+  const plain = truncate(plainLabel + plainValue, width).padEnd(width);
+  if (!color) return plain;
+  const renderedLabel = paint(plainLabel, STYLE.gray);
+  const renderedValue = valueStyle ? paint(plainValue, valueStyle) : plainValue;
+  return renderedLabel + renderedValue + " ".repeat(Math.max(0, width - plainLabel.length - plainValue.length));
+}
+
+function statusStyle(value) {
+  switch (String(value || "").toLowerCase()) {
+    case "connected": return STYLE.green;
+    case "connecting":
+    case "reconnecting": return STYLE.yellow;
+    case "offline": return STYLE.red;
+    default: return STYLE.gray;
+  }
+}
+
+export function formatTwoColumnHeader(state, width = 110, { color = false } = {}) {
   const usable = clamp(Number(width) || 110, MIN_FRAME_WIDTH, MAX_FRAME_WIDTH);
   const leftWidth = Math.floor((usable - GAP) / 2);
   const rightWidth = usable - GAP - leftWidth;
@@ -36,9 +68,13 @@ export function formatTwoColumnHeader(state, width = 110) {
     ["Terminal", state.terminal ? "enabled" : "disabled", "Desktop", state.desktop ? "enabled" : "disabled"],
   ];
   return rows
-    .map(([leftLabel, leftValue, rightLabel, rightValue]) =>
-      field(leftLabel, leftValue, leftWidth) + " ".repeat(GAP) + field(rightLabel, rightValue, rightWidth).trimEnd(),
-    )
+    .map(([leftLabel, leftValue, rightLabel, rightValue]) => {
+      const leftStyle = leftLabel === "Status" ? statusStyle(state.status) : null;
+      const rightStyle = rightLabel === "Reconnects" && Number(state.reconnects || 0) > 0 ? STYLE.yellow : null;
+      return field(leftLabel, leftValue, leftWidth, color, leftStyle)
+        + " ".repeat(GAP)
+        + field(rightLabel, rightValue, rightWidth, color, rightStyle).trimEnd();
+    })
     .join("\n");
 }
 
@@ -102,7 +138,7 @@ function wrapText(value, width, maxLines = 3) {
   return lines.length ? lines : [""];
 }
 
-export function formatTransactionRows(item, width = 110) {
+export function formatTransactionRows(item, width = 110, { color = false } = {}) {
   const usable = clamp(Number(width) || 110, 60, 180);
   const status = item.status === "running" ? "●" : item.ok === false ? "✕" : "✓";
   const prefix = `${clock(item.at)}  ${status}  `;
@@ -114,14 +150,21 @@ export function formatTransactionRows(item, width = 110) {
 
   return summaryLines.map((line, index) => {
     if (index === 0) {
-      return prefix + line.padEnd(summaryWidth) + suffix;
+      if (!color) return prefix + line.padEnd(summaryWidth) + suffix;
+      const time = paint(clock(item.at), STYLE.gray);
+      const glyphStyle = item.status === "running" ? STYLE.yellow : item.ok === false ? STYLE.red : STYLE.green;
+      const glyph = paint(status, glyphStyle, STYLE.bold);
+      const summary = item.status === "running" ? paint(line.padEnd(summaryWidth), STYLE.bold) : line.padEnd(summaryWidth);
+      const timing = paint(suffix, STYLE.gray);
+      return `${time}  ${glyph}  ${summary}${timing}`;
     }
-    return continuationPrefix + line;
+    if (!color) return continuationPrefix + line;
+    return " ".repeat(prefix.length) + paint(line, STYLE.dim);
   });
 }
 
-export function formatTransactionRow(item, width = 110) {
-  return formatTransactionRows(item, width).join("\n");
+export function formatTransactionRow(item, width = 110, options) {
+  return formatTransactionRows(item, width, options).join("\n");
 }
 
 function normalizeRelay(value) {
@@ -139,6 +182,13 @@ export function shouldUseTui(options = {}, stdout = process.stdout) {
   return Boolean(stdout?.isTTY);
 }
 
+export function shouldUseColor(stdout = process.stdout, env = process.env) {
+  if (!stdout?.isTTY) return false;
+  if (Object.prototype.hasOwnProperty.call(env || {}, "NO_COLOR")) return false;
+  if (String(env?.TERM || "").toLowerCase() === "dumb") return false;
+  return true;
+}
+
 export class RemoteTui {
   constructor({ config, version, output = process.stdout }) {
     this.output = output;
@@ -153,6 +203,7 @@ export class RemoteTui {
       desktop: config.desktopEnabled === true,
     };
     this.version = version || "-";
+    this.colorEnabled = shouldUseColor(output);
     this.transactions = [];
     this.timer = null;
     this.closed = false;
@@ -231,13 +282,13 @@ export class RemoteTui {
     const header = formatTwoColumnHeader({
       ...this.state,
       uptimeMs: Date.now() - this.startedAt,
-    }, width);
+    }, width, { color: this.colorEnabled });
     // Fixed frame content occupies 11 rows. Leave one spare row at the
     // bottom so Windows Terminal never scrolls the screen while repainting.
     const availableRows = Math.max(1, height - FRAME_FIXED_ROWS - FRAME_BOTTOM_MARGIN);
     const rows = [];
     for (let index = this.transactions.length - 1; index >= 0 && rows.length < availableRows; index--) {
-      const group = formatTransactionRows(this.transactions[index], width);
+      const group = formatTransactionRows(this.transactions[index], width, { color: this.colorEnabled });
       const remaining = availableRows - rows.length;
       if (group.length <= remaining) {
         rows.unshift(...group);
@@ -249,14 +300,20 @@ export class RemoteTui {
     }
     while (rows.length < Math.min(availableRows, 4)) rows.unshift("");
 
+    const title = this.colorEnabled
+      ? paint("Chat Relay", STYLE.bold, STYLE.cyan) + paint(`  v${this.version}`, STYLE.gray)
+      : `Chat Relay  v${this.version}`;
+    const divider = this.colorEnabled ? paint(separator, STYLE.gray) : separator;
+    const section = this.colorEnabled ? paint("Transactions", STYLE.bold, STYLE.cyan) : "Transactions";
+
     const screen = [
-      `Chat Relay  v${this.version}`,
-      separator,
+      title,
+      divider,
       "",
       header,
       "",
-      separator,
-      "Transactions",
+      divider,
+      section,
       "",
       ...rows,
     ].join("\n");
