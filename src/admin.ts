@@ -468,7 +468,6 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   const selfService = request.method === "GET" && [
     "/admin/api/overview",
     "/admin/api/usage",
-    "/admin/api/tool-calls",
   ].includes(path);
   if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService) {
     return error(403, "admin_required");
@@ -613,6 +612,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
         usage: usage.metric ?? null,
         buckets: usage.buckets ?? [],
         topTools: usage.topTools ?? [],
+        accountUsage: usage.users ?? [],
         bounded: usage.bounded === true,
         coverage: usage.coverage,
         sampleSize: Number(usage.sampleSize || 0),
@@ -629,7 +629,24 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const activeTerminals = terminals.reduce((count, agent) => count +
       agent.sessions.filter((session: any) => session.status === "running").length +
       agent.batches.reduce((sum: number, batch: any) => sum + Number(batch.counts?.running || 0), 0), 0);
-    const activeUsers = new Set((state.users ?? []).filter((u: any) => u.enabled && !u.deletedAt).map((u: any) => u.id));
+    const users = state.users ?? [];
+    const activeUsers = new Set(users.filter((u: any) => u.enabled && !u.deletedAt).map((u: any) => u.id));
+    const usageByUserId = new Map((usage.users ?? []).map((entry: any) => [entry.userId, entry]));
+    const accountUsage = users
+      .filter((user: any) => !user.deletedAt)
+      .map((user: any) => {
+        const metric: any = usageByUserId.get(user.id);
+        return {
+          userId: user.id,
+          calls: Number(metric?.calls || 0),
+          errors: Number(metric?.errors || 0),
+          operationalErrors: Number(metric?.operationalErrors || 0),
+          name: user.name || user.login || user.id,
+          login: user.login || "",
+          enabled: user.enabled === true,
+        };
+      })
+      .sort((a: any, b: any) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
     const agentHealth = agents.reduce((summary: any, agent: any) => {
       const health = agent.runtime?.health;
       const queues = health?.queues && typeof health.queues === "object" ? Object.values(health.queues) as any[] : [];
@@ -666,6 +683,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       usage: usage.metric ?? null,
       buckets: usage.buckets ?? [],
       topTools: usage.topTools ?? [],
+      accountUsage,
       bounded: usage.bounded === true,
         coverage: usage.coverage,
       sampleSize: Number(usage.sampleSize || 0),
@@ -764,36 +782,6 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     if (!adminAuthorized) scoped.searchParams.set("userId", selfUserId);
     const response = await usageQuery(env, scoped);
     return new Response(response.body, { status: response.status, headers: response.headers });
-  }
-
-  if (path === "/admin/api/tool-calls" && request.method === "GET") {
-    const query = new URLSearchParams();
-    for (const key of ["state", "limit", "cursor", "tool", "agentId", "from", "to", "activityId", "status", "q"]) {
-      const value = url.searchParams.get(key);
-      if (value) query.set(key, value);
-    }
-    if (adminAuthorized) {
-      const userId = url.searchParams.get("userId");
-      if (userId) query.set("userId", userId);
-    } else {
-      query.set("userId", selfUserId);
-    }
-    const response = await usageStub(env).fetch("https://usage.internal/activity/query?" + query);
-    const data = await response.json<any>().catch(() => ({}));
-    if (!response.ok) return Response.json(data, { status: response.status });
-    const state = await registryState(env);
-    const agentNames = new Map((state.agents ?? []).map((agent: any) => [agent.id, agent.name]));
-    const enriched = {
-      ...data,
-      items: (data.items ?? []).map((item: any) => ({
-        ...item,
-        ...(item.agentId ? { agentName: agentNames.get(item.agentId) || item.agentId } : {}),
-      })),
-    };
-    if (query.get("state") === "history" || query.get("cursor")) return Response.json(enriched);
-    const terminalUserId = adminAuthorized ? (query.get("userId") || undefined) : selfUserId;
-    const terminals = await terminalActivity(env, terminalUserId, state);
-    return Response.json({ ...enriched, terminals });
   }
 
   if (path === "/admin/api/errors" && request.method === "GET") {

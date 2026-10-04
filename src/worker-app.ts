@@ -154,23 +154,6 @@ async function activityContextForRequest(request: Request): Promise<ToolActivity
   };
 }
 
-async function beginUsage(env: Env, event: {
-  userId: string;
-  tool: string;
-  agentId?: string;
-  toolCallId: string;
-  activityId?: string;
-  startedAt: string;
-}): Promise<void> {
-  try {
-    await usageStub(env).fetch(new Request("https://usage.internal/activity/start", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(event),
-    }));
-  } catch {}
-}
-
 async function recordUsage(env: Env, event: UsageEvent): Promise<void> {
   try {
     await usageStub(env).fetch(new Request("https://usage.internal/record", {
@@ -284,14 +267,6 @@ async function instrumentTool<T>(
   const requestedAgentId = typeof args === "object" && args !== null && typeof (args as any).agentId === "string"
     ? String((args as any).agentId).slice(0, 128)
     : undefined;
-  await beginUsage(env, {
-    userId: user.id,
-    tool,
-    ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
-    toolCallId: activity.toolCallId,
-    ...(activity.activityId ? { activityId: activity.activityId } : {}),
-    startedAt: activity.startedAt,
-  });
   let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming } | undefined;
   try {
     outcome = await run();

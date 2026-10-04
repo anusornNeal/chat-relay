@@ -153,32 +153,11 @@ const lifecycleCookie = await browserLogin(lifecycleUser.data.user.id, "lifecycl
 const dashboardSocket = await openDashboardWs(lifecycleCookie);
 await new Promise((resolve) => setTimeout(resolve, 40));
 
-const lifecycleOrder = [];
-const collectLifecycle = (raw) => {
-  try {
-    const event = JSON.parse(String(raw));
-    if (event?.type === "tool_started" || event?.type === "tool_finished") lifecycleOrder.push(event);
-  } catch {}
-};
-dashboardSocket.on("message", collectLifecycle);
+const aggregateInvalidation = nextDashboardEvent(dashboardSocket, (event) => event.type === "invalidate" && event.topics?.includes("overview"));
 const lifecycleSensitivePath = "SENSITIVE_FAST_LIFECYCLE_PATH.txt";
-const startedPromise = nextDashboardEvent(dashboardSocket, (event) => event.type === "tool_started" && event.tool === "read_file");
-const finishedPromise = nextDashboardEvent(dashboardSocket, (event) => event.type === "tool_finished" && event.tool === "read_file");
-const fastToolPromise = tool(lifecycleUser.data.token, 40, "read_file", { path: lifecycleSensitivePath }, false, "lifecycle-fast-session");
-const [startedEvent, finishedEvent] = await Promise.all([startedPromise, finishedPromise]);
-await fastToolPromise;
-if (startedEvent.toolCallId !== finishedEvent.toolCallId || finishedEvent.status !== "success" || finishedEvent.ok !== true || !finishedEvent.agentName || finishedEvent.agentName === finishedEvent.agentId) {
-  throw new Error(`lifecycle transition mismatch: ${JSON.stringify({ startedEvent, finishedEvent })}`);
-}
-const ordered = lifecycleOrder.filter((event) => event.toolCallId === startedEvent.toolCallId).map((event) => event.type);
-if (ordered[0] !== "tool_started" || ordered[1] !== "tool_finished") {
-  throw new Error(`lifecycle delivery order invalid: ${JSON.stringify(ordered)}`);
-}
-const lifecycleSerialized = JSON.stringify([startedEvent, finishedEvent]);
-for (const forbidden of [lifecycleSensitivePath, "PRIVATE_FILE_OUTPUT", "command", "args", "arguments", "payload", "stdout", "stderr"]) {
-  if (lifecycleSerialized.includes(forbidden)) throw new Error(`unsafe dashboard lifecycle payload: ${forbidden}`);
-}
-dashboardSocket.off("message", collectLifecycle);
+await tool(lifecycleUser.data.token, 40, "read_file", { path: lifecycleSensitivePath }, false, "lifecycle-fast-session");
+const aggregateEvent = await aggregateInvalidation;
+if (JSON.stringify(aggregateEvent).includes(lifecycleSensitivePath)) throw new Error("aggregate invalidation leaked tool arguments");
 
 await tool(ownerToken, 1, "whoami");
 await tool(ownerToken, 2, "ping_agent", { agentId: usageAgentId });
@@ -189,11 +168,8 @@ await tool(ownerToken, 42, "whoami", {}, false, null);
 
 const runningPromise = tool(ownerToken, 43, "terminal_exec", { agentId: usageAgentId, command: "echo realtime-running" }, false, "usage-running-session");
 await new Promise((resolve) => setTimeout(resolve, 180));
-const running = await admin("/admin/api/tool-calls?state=all&status=running&limit=50");
-const runningTerminal = (running.data.items || []).find((event) => event.tool === "terminal_exec" && event.status === "running");
-if (!runningTerminal || !runningTerminal.activityId) {
-  throw new Error(`running tool visibility failed: ${running.text}`);
-}
+const removedRunning = await admin("/admin/api/tool-calls?state=all&status=running&limit=50");
+if (removedRunning.response.status !== 404) throw new Error("removed running tool-call API is still exposed");
 await runningPromise;
 
 const suffix = Date.now().toString(36);
@@ -236,17 +212,14 @@ await Promise.all([
   tool(ownerToken, 60, "whoami", {}, false, "concurrent-chat-a"),
   tool(ownerToken, 61, "whoami", {}, false, "concurrent-chat-b"),
 ]);
-const correlated = await admin(`/admin/usage?day=${day}&recentLimit=100`);
-const concurrentWhoami = (correlated.data.recent || []).filter((event) => event.tool === "whoami" && event.toolCallId && event.activityId);
-const activityIds = new Set(concurrentWhoami.map((event) => event.activityId));
-const callIds = new Set(concurrentWhoami.map((event) => event.toolCallId));
-if (activityIds.size < 3) throw new Error(`concurrent activity correlation collapsed: ${JSON.stringify(concurrentWhoami)}`);
-if (callIds.size !== concurrentWhoami.length) throw new Error("toolCallId is not unique per call");
+const aggregateAfterConcurrent = await admin("/admin/api/overview");
+const ownerAggregate = (aggregateAfterConcurrent.data.accountUsage || []).find((item) => item.userId === "owner");
+if (!aggregateAfterConcurrent.response.ok || !ownerAggregate || ownerAggregate.calls < 1) throw new Error("owner aggregate usage missing");
+const correlated = await admin("/admin/usage?day=" + day + "&recentLimit=100");
 for (const event of correlated.data.recent || []) {
-  if (!event.toolCallId || !String(event.toolCallId).startsWith("tc_")) throw new Error("missing toolCallId in raw usage event");
+  if (event.ok !== false) throw new Error("successful raw usage event persisted");
+  if (!event.toolCallId || !String(event.toolCallId).startsWith("tc_")) throw new Error("missing toolCallId in retained error event");
 }
-const fallbackActivity = (correlated.data.recent || []).find((event) => event.tool === "whoami" && String(event.activityId || "").startsWith("call_"));
-if (!fallbackActivity) throw new Error("missing safe per-call activity fallback for uncorrelated tool call");
 
 const errors = await admin("/admin/api/errors?limit=100");
 const syntheticError = (errors.data.items || []).find((event) => event.tool === "read_file" && event.errorCode === "synthetic_failure");
@@ -262,16 +235,8 @@ if (!handledErrors.response.ok || !(handledErrors.data.items || []).some((event)
   throw new Error(`handled error filtering failed: ${handledErrors.text}`);
 }
 
-const firstPage = await admin("/admin/api/tool-calls?state=history&agentId=" + encodeURIComponent(usageAgentId) + "&limit=2");
-if (!firstPage.response.ok || firstPage.data.items?.length !== 2 || !firstPage.data.nextCursor || firstPage.data.items.some((event) => !event.agentName || event.agentName === event.agentId)) {
-  throw new Error(`cursor page 1 failed: ${firstPage.text}`);
-}
-const secondPage = await admin("/admin/api/tool-calls?state=history&agentId=" + encodeURIComponent(usageAgentId) + "&limit=2&cursor=" + encodeURIComponent(firstPage.data.nextCursor));
-if (!secondPage.response.ok || !secondPage.data.items?.length) throw new Error(`cursor page 2 failed: ${secondPage.text}`);
-const firstIds = new Set(firstPage.data.items.map((event) => event.toolCallId));
-if (secondPage.data.items.some((event) => firstIds.has(event.toolCallId))) throw new Error("cursor pages overlap");
-const invalidCursor = await admin("/admin/api/tool-calls?state=history&limit=2&cursor=not-a-valid-cursor");
-if (invalidCursor.response.status !== 400) throw new Error("invalid activity cursor was accepted");
+const removedHistory = await admin("/admin/api/tool-calls?state=history&limit=2");
+if (removedHistory.response.status !== 404) throw new Error("removed tool-call history API is still exposed");
 
 const errorPage = await admin("/admin/api/errors?limit=1");
 if (!errorPage.response.ok || errorPage.data.items?.length !== 1 || !errorPage.data.nextCursor) throw new Error(`error cursor page failed: ${errorPage.text}`);

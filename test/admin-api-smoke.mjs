@@ -89,9 +89,12 @@ if (!revoked.response.ok || typeof revoked.data.revoked !== "number") throw new 
 
 await rpc(ownerToken, 1, "whoami");
 await rpc(createdUsers[0].token, 2, "whoami");
-const filteredCalls = await admin(`/admin/api/tool-calls?state=all&status=success&userId=${encodeURIComponent(createdUsers[0].user.id)}&limit=100`);
-if (!filteredCalls.response.ok || !filteredCalls.data.items?.length || filteredCalls.data.items.some((item) => item.userId !== createdUsers[0].user.id || item.status !== "success")) {
-  throw new Error(`admin tool-call user/status filter failed: ${filteredCalls.text}`);
+const removedCalls = await admin("/admin/api/tool-calls");
+if (removedCalls.response.status !== 404) throw new Error("removed tool-call history API is still exposed");
+const aggregateOverview = await admin("/admin/api/overview");
+const accountRow = (aggregateOverview.data.accountUsage || []).find((item) => item.userId === createdUsers[0].user.id);
+if (!aggregateOverview.response.ok || !accountRow || accountRow.calls < 1) {
+  throw new Error("account aggregate usage missing: " + aggregateOverview.text);
 }
 const usage = await admin(`/admin/api/usage?day=${new Date().toISOString().slice(0, 10)}`);
 if (!usage.response.ok || !(usage.data.metric?.calls >= 1)) throw new Error(`usage API failed: ${usage.text}`);

@@ -1,6 +1,7 @@
 import type { UsageEvent } from "./usage";
 
-const HOUR = 3600000;
+const MINUTE = 60000;
+const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const BKK = 7 * HOUR;
 const MAX_ROW_BYTES = 96000;
@@ -129,12 +130,14 @@ export function publicRichMetric(metric: RichMetric) {
 }
 export function bucketSpecs(time: number) {
   return [
+    { start: Math.floor(time / MINUTE) * MINUTE, size: MINUTE },
     { start: Math.floor(time / HOUR) * HOUR, size: HOUR },
     { start: Math.floor((time + BKK) / DAY) * DAY - BKK, size: DAY },
   ];
 }
 function bucketKey(start: number, size: number) {
-  return `agg:v1:${size === DAY ? "day" : "hour"}:${new Date(start).toISOString()}`;
+  const unit = size === DAY ? "day" : size === HOUR ? "hour" : "minute";
+  return `agg:v1:${unit}:${new Date(start).toISOString()}`;
 }
 function emptyBucket(start: number, size: number): RichBucket {
   return {
@@ -210,26 +213,28 @@ export class UsageAggregates {
     await this.raw(store, start, start + size - 1, (event) =>
       addRichEvent(bucket, event, this.operational(event)),
     );
-    // A UTC legacy day whose total exceeds retained raw proves lost rich history.
-    // Inspect entire intersecting UTC days only during migration; never invent missing dimensions.
-    for (
-      let day = Math.floor(start / DAY) * DAY;
-      day <= start + size - 1;
-      day += DAY
-    ) {
-      const coverageKey = `agg:v1:coverage:${day}`;
-      let coverage = await store.get<{ incomplete: boolean }>(coverageKey);
-      if (!coverage) {
-        const legacy = await store.get<{ calls: number }>(
-          `day:${new Date(day).toISOString().slice(0, 10)}:total`,
-        );
-        let retained = 0;
-        if (legacy?.calls)
-          await this.raw(store, day, day + DAY - 1, () => retained++);
-        coverage = { incomplete: retained < (legacy?.calls || 0) };
-        await store.put(coverageKey, coverage);
+    if (size !== MINUTE) {
+      // A UTC legacy day whose total exceeds retained raw proves lost rich history.
+      // Inspect entire intersecting UTC days only during migration; never invent missing dimensions.
+      for (
+        let day = Math.floor(start / DAY) * DAY;
+        day <= start + size - 1;
+        day += DAY
+      ) {
+        const coverageKey = `agg:v1:coverage:${day}`;
+        let coverage = await store.get<{ incomplete: boolean }>(coverageKey);
+        if (!coverage) {
+          const legacy = await store.get<{ calls: number }>(
+            `day:${new Date(day).toISOString().slice(0, 10)}:total`,
+          );
+          let retained = 0;
+          if (legacy?.calls)
+            await this.raw(store, day, day + DAY - 1, () => retained++);
+          coverage = { incomplete: retained < (legacy?.calls || 0) };
+          await store.put(coverageKey, coverage);
+        }
+        bucket.incomplete ||= coverage.incomplete;
       }
-      bucket.incomplete ||= coverage.incomplete;
     }
     boundRichBucket(bucket);
     await store.put(key, bucket);
@@ -310,7 +315,8 @@ export class UsageAggregates {
     includeBuckets = true,
   ) {
     const total = emptyRichMetric(),
-      tools = new Map<string, number>();
+      tools = new Map<string, number>(),
+      users = new Map<string, { calls: number; errors: number; operationalErrors: number }>();
     const daily = to - from + 1 > 48 * HOUR,
       chartSize = daily ? DAY : HOUR;
     const origin = from;
@@ -336,9 +342,14 @@ export class UsageAggregates {
       (!filters.userId || filters.userId === group.userId) &&
       (!filters.tool || filters.tool === group.tool) &&
       (!filters.agentId || filters.agentId === group.agentId);
-    const consume = (metric: RichMetric, tool: string, time: number) => {
+    const consume = (metric: RichMetric, tool: string, userId: string, time: number) => {
       mergeRichMetric(total, metric);
       tools.set(tool, (tools.get(tool) || 0) + metric.calls);
+      const user = users.get(userId) || { calls: 0, errors: 0, operationalErrors: 0 };
+      user.calls += metric.calls;
+      user.errors += metric.errors;
+      user.operationalErrors += metric.operationalErrors;
+      users.set(userId, user);
       if (!includeBuckets) return;
       const chart = buckets[Math.floor((time - origin) / chartSize)];
       chart.calls += metric.calls;
@@ -367,7 +378,17 @@ export class UsageAggregates {
         start = Math.floor(cursor / HOUR) * HOUR;
         bucket = await this.read(start, size);
       }
-      const end = Math.min(chartEnd, start + size - 1);
+      let end = Math.min(chartEnd, start + size - 1);
+      if (
+        size === HOUR &&
+        !bucket.overflow &&
+        (bucket.minTimestamp < cursor || bucket.maxTimestamp > end)
+      ) {
+        size = MINUTE;
+        start = Math.floor(cursor / MINUTE) * MINUTE;
+        bucket = await this.read(start, size);
+        end = Math.min(chartEnd, start + size - 1);
+      }
       incomplete ||= bucket.incomplete;
       overflow ||= bucket.overflow;
       if (
@@ -383,6 +404,7 @@ export class UsageAggregates {
           consume(
             Object.values(single.groups)[0].metric,
             event.tool,
+            event.userId,
             Date.parse(event.timestamp),
           );
         };
@@ -390,7 +412,7 @@ export class UsageAggregates {
         else await this.raw(this.storage, cursor, end, consumeRaw);
       } else
         for (const group of Object.values(bucket.groups))
-          if (matches(group)) consume(group.metric, group.tool, cursor);
+          if (matches(group)) consume(group.metric, group.tool, group.userId, cursor);
       cursor = end + 1;
     }
     return {
@@ -402,6 +424,10 @@ export class UsageAggregates {
         .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
         .slice(0, 8)
         .map(([tool, calls]) => ({ tool, calls })),
+      users: [...users]
+        .sort((a, b) => b[1].calls - a[1].calls || a[0].localeCompare(b[0]))
+        .slice(0, 100)
+        .map(([userId, metric]) => ({ userId, ...metric })),
       sampleSize: total.calls,
       bounded: incomplete,
       coverage: incomplete ? "retained-history" : "complete",

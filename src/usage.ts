@@ -51,15 +51,6 @@ export type UsageEvent = {
   responseBytes: number;
 };
 
-type ActiveUsageEvent = {
-  userId: string;
-  tool: string;
-  agentId?: string;
-  toolCallId: string;
-  activityId?: string;
-  startedAt: string;
-};
-
 export type QuotaPolicy = {
   rateLimit: number;
   rateWindowSeconds: number;
@@ -286,37 +277,7 @@ export class Usage extends DurableObject {
   private readonly usageEnv: UsageEnv;
   private readonly aggregates: UsageAggregates;
   private readonly queryIndex: UsageQueryIndex;
-  private activeHydration?: Promise<Map<string, ActiveUsageEvent>>;
-  private async activeEvents() {
-    const result = await (this.activeHydration ||= (async () => {
-      const result = new Map<string, ActiveUsageEvent>();
-      let startAfter: string | undefined;
-      for (;;) {
-        const page = await this.ctx.storage.list<ActiveUsageEvent>({ prefix: "active:", limit: 1000, ...(startAfter ? { startAfter } : {}) });
-        for (const [key, event] of page) result.set(key,event);
-        if (page.size < 1000) break;
-        startAfter = [...page.keys()].at(-1)!;
-      }
-      return result;
-    })().catch(error => { this.activeHydration = undefined; throw error; }));
-    const cutoff = Date.now()-3600000;
-    const stale = [...result].filter(([,event]) => Date.parse(event.startedAt) < cutoff);
-    if (stale.length) {
-      const removed = await this.ctx.storage.transaction(async txn => {
-        const keys: string[] = [];
-        for (const [key,event] of stale) {
-          const current = await txn.get<ActiveUsageEvent>(key);
-          if (current?.startedAt === event.startedAt) keys.push(key);
-        }
-        for (let offset = 0; offset < keys.length; offset += 128) await txn.delete(keys.slice(offset,offset+128));
-        return keys;
-      });
-      for (const key of removed) {
-        if (Date.parse(result.get(key)?.startedAt || "") < cutoff) result.delete(key);
-      }
-    }
-    return result;
-  }
+  private readonly lastOverviewPublishAt = new Map<string, number>();
 
   constructor(ctx: DurableObjectState, env: UsageEnv) {
     super(ctx, env);
@@ -434,38 +395,6 @@ export class Usage extends DurableObject {
       return Response.json(decision);
     }
 
-    if (url.pathname === "/activity/start" && request.method === "POST") {
-      const body = await request.json<any>().catch(() => null);
-      const userId = String(body?.userId ?? "").slice(0, 128);
-      const tool = String(body?.tool ?? "").slice(0, 160);
-      const toolCallId = String(body?.toolCallId ?? "").slice(0, 96);
-      const startedAt = String(body?.startedAt ?? body?.timestamp ?? "");
-      if (!userId || !tool || !toolCallId || !Number.isFinite(Date.parse(startedAt))) {
-        return Response.json({ error: "invalid_active_usage_event" }, { status: 400 });
-      }
-      const event: ActiveUsageEvent = {
-        userId,
-        tool,
-        toolCallId,
-        startedAt,
-        ...(body?.agentId ? { agentId: String(body.agentId).slice(0, 128) } : {}),
-        activityId: body?.activityId ? String(body.activityId).slice(0, 96) : fallbackActivityId(toolCallId),
-      };
-      const active = await this.activeEvents();
-      await this.ctx.storage.put("active:" + safePart(toolCallId), event);
-      active.set("active:" + safePart(toolCallId), event);
-      await publishDashboard(this.usageEnv, [], event.userId, {
-        type: "tool_started",
-        userId: event.userId,
-        tool: event.tool,
-        toolCallId: event.toolCallId,
-        activityId: event.activityId,
-        agentId: event.agentId,
-        startedAt: event.startedAt,
-      });
-      return Response.json({ ok: true });
-    }
-
     if (url.pathname === "/record" && request.method === "POST") {
       const body = await request.json<UsageEvent>().catch(() => null);
       if (!body || !body.userId || !body.tool || !body.timestamp) {
@@ -512,52 +441,32 @@ export class Usage extends DurableObject {
         `day:${day}:tool:${safePart(event.tool)}`,
         ...(event.agentId ? [`day:${day}:agent:${safePart(event.agentId)}`] : []),
       ];
-      const active = event.toolCallId ? await this.activeEvents() : undefined;
-      const eventKey = `event:${event.timestamp}:${crypto.randomUUID()}`;
+      const eventKey = !event.ok ? `event:${event.timestamp}:${crypto.randomUUID()}` : undefined;
       await this.ctx.storage.transaction(async txn => {
-        // Bootstrap from retained raw before adding the new event, then commit all KV representations atomically.
         await this.aggregates.record(txn, event);
         const writes: Record<string, Metric> = {};
         for (const key of metricKeys) writes[key] = addMetric(await txn.get<Metric>(key), event);
-        if (event.toolCallId) await txn.delete("active:" + safePart(event.toolCallId));
-        await txn.put({ ...writes, [eventKey]: event });
+        await txn.put(writes);
+        if (eventKey) await txn.put(eventKey, event);
       });
-      try {
-        this.queryIndex.upsert(eventKey, event);
-      } catch {
-        await this.queryIndex.markDirty().catch(() => {});
+      if (eventKey) {
+        try {
+          this.queryIndex.upsert(eventKey, event);
+        } catch {
+          await this.queryIndex.markDirty().catch(() => {});
+        }
       }
-      if (event.toolCallId) active!.delete("active:" + safePart(event.toolCallId));
       this.aggregates.invalidate(event);
-      await publishDashboard(
-        this.usageEnv,
-        event.ok ? ["overview"] : ["overview", "errors"],
-        event.userId,
-        {
-          type: "tool_finished",
-          userId: event.userId,
-          tool: event.tool,
-          toolCallId: event.toolCallId,
-          activityId: event.activityId,
-          agentId: event.agentId,
-          startedAt: event.startedAt || event.timestamp,
-          timestamp: event.timestamp,
-          durationMs: event.durationMs,
-          ok: event.ok,
-          errorClass: event.errorClass,
-          errorSource: event.errorSource,
-          errorCode: event.errorCode,
-          failureStage: event.failureStage,
-          retryable: event.retryable,
-          statusCode: event.statusCode,
-          exitCode: event.exitCode,
-          workerOverheadMs: event.workerOverheadMs,
-          relayRoundTripMs: event.relayRoundTripMs,
-          transportMs: event.transportMs,
-          agentQueueWaitMs: event.agentQueueWaitMs,
-          agentHandlerMs: event.agentHandlerMs,
-        },
-      );
+      if (!event.ok) {
+        await publishDashboard(this.usageEnv, ["overview", "errors"], event.userId);
+      } else {
+        const now = Date.now();
+        const lastPublishedAt = this.lastOverviewPublishAt.get(event.userId) || 0;
+        if (now - lastPublishedAt >= 60_000) {
+          this.lastOverviewPublishAt.set(event.userId, now);
+          await publishDashboard(this.usageEnv, ["overview"], event.userId);
+        }
+      }
       return Response.json({ ok: true });
     }
 
@@ -624,16 +533,12 @@ export class Usage extends DurableObject {
       const userId = url.searchParams.get("userId"), tool = url.searchParams.get("tool"), agentId = url.searchParams.get("agentId");
       const now = Date.now();
       const summary = await this.aggregates.window(now-hours*3600000,now,{userId,tool,agentId},false);
-      const active = [...(await this.activeEvents()).values()].filter(event => Date.parse(event.startedAt) >= now-300000 &&
-        (!userId || event.userId === userId) && (!tool || event.tool === tool) && (!agentId || event.agentId === agentId));
-      return Response.json({ hours, metric: summary.metric, activeCalls: active.length, sampleSize: summary.sampleSize,
+      return Response.json({ hours, metric: summary.metric, activeCalls: 0, sampleSize: summary.sampleSize,
         bounded: summary.bounded, coverage: summary.coverage, p95Approximate: true });
     }
 
-    if ((url.pathname === "/activity/query" || url.pathname === "/errors/query") && request.method === "GET") {
-      const errors = url.pathname === "/errors/query";
-      const requestedState = url.searchParams.get("state");
-      const state = errors || requestedState === "history" ? "history" : requestedState === "active" ? "active" : "all";
+    if (url.pathname === "/errors/query" && request.method === "GET") {
+      const errors = true;
       const limit = boundedInt(url.searchParams.get("limit"), 20, 1, 100);
       const cursorValue = url.searchParams.get("cursor");
       const cursor = decodeScanCursor(cursorValue);
@@ -672,7 +577,7 @@ export class Usage extends DurableObject {
           (!legacy || olderThanCursor(event, legacy));
       };
 
-      const canUseQueryIndex = this.queryIndex.available && !legacy && state !== "active";
+      const canUseQueryIndex = this.queryIndex.available && !legacy;
       const queryIndexReady = canUseQueryIndex && await this.queryIndex.isReady();
       if (canUseQueryIndex && !queryIndexReady) {
         this.ctx.waitUntil(this.continueQueryIndexBackfill());
@@ -703,27 +608,13 @@ export class Usage extends DurableObject {
               status: event.ok ? "success" : "error",
             },
           }));
-          const active = state === "history" || scan ? [] : [...(await this.activeEvents()).values()]
-            .filter(event => Date.parse(event.startedAt) >= Date.now() - 3600000)
-            .map(event => ({
-              key: "event:" + new Date(event.startedAt).toISOString() + ":~active:" + encodeURIComponent(event.toolCallId)
-                .replace(/[!'()*]/g, character => "%" + character.charCodeAt(0).toString(16).toUpperCase()),
-              event: {
-                ...event,
-                activityId: event.activityId || fallbackActivityId(event.toolCallId),
-                timestamp: event.startedAt,
-                status: "running",
-              },
-            }))
-            .filter(row => matches(row.event));
-          const items = [...history, ...active]
+          const items = history
             .sort((a,b) => a.key < b.key ? 1 : a.key > b.key ? -1 : 0)
             .map(row => row.event);
           const nextCursor = indexed.hasMore && indexed.nextBefore
             ? encodeScanCursor({ v: 2, before: indexed.nextBefore })
             : null;
           return Response.json({
-            ...(errors ? {} : { state }),
             items,
             pageSize: items.length,
             matchedTotal: items.length,
@@ -742,7 +633,7 @@ export class Usage extends DurableObject {
       const toEnd = errors && Number.isFinite(toMs) ? "event:" + new Date(toMs).toISOString() + ":\uffff" : undefined;
       const end = scan?.before && toEnd ? (scan.before < toEnd ? scan.before : toEnd) : scan?.before || toEnd;
       const start = errors && Number.isFinite(fromMs) ? "event:" + new Date(fromMs).toISOString() : undefined;
-      const records = state === "active" || (start && end && end <= start) ? new Map<string, UsageEvent>() : await this.ctx.storage.list<UsageEvent>({
+      const records = start && end && end <= start ? new Map<string, UsageEvent>() : await this.ctx.storage.list<UsageEvent>({
         prefix: "event:", reverse: true, limit: RAW_QUERY_SCAN_LIMIT,
         ...(end ? { end } : {}),
         ...(start ? { start } : {}),
@@ -753,20 +644,13 @@ export class Usage extends DurableObject {
       } }));
       const frontier = [...records.keys()].at(-1);
       const storageHasMore = records.size === RAW_QUERY_SCAN_LIMIT;
-      const active = state === "history" ? [] : [...(await this.activeEvents()).values()]
-        .filter(event => Date.parse(event.startedAt) >= Date.now() - 3600000)
-        .map(event => ({ key: "event:" + new Date(event.startedAt).toISOString() + ":~active:" + encodeURIComponent(event.toolCallId)
-          .replace(/[!'()*]/g, character => "%" + character.charCodeAt(0).toString(16).toUpperCase()), event: {
-          ...event, activityId: event.activityId || fallbackActivityId(event.toolCallId), timestamp: event.startedAt, status: "running",
-        } }))
-        .filter(row => (!scan || row.key < scan.before) && (!storageHasMore || !frontier || row.key >= frontier));
-      const matched = [...history, ...active].filter(row => matches(row.event))
+      const matched = history.filter(row => matches(row.event))
         .sort((a,b) => a.key < b.key ? 1 : a.key > b.key ? -1 : 0);
       const page = matched.slice(0, limit);
       const hasMore = matched.length > limit || storageHasMore;
       const before = matched.length > limit ? page.at(-1)!.key : frontier;
       const nextCursor = hasMore && before ? encodeScanCursor({ v: 2, before, ...(legacy ? { legacy } : {}) }) : null;
-      return Response.json({ ...(errors ? {} : { state }), items: page.map(row => row.event), pageSize: page.length,
+      return Response.json({ items: page.map(row => row.event), pageSize: page.length,
         matchedTotal: matched.length, matchedTotalLowerBound: hasMore, hasMore: Boolean(nextCursor), nextCursor,
         bounded: storageHasMore, scanned: records.size, scanLimit: RAW_QUERY_SCAN_LIMIT, queryMode: "kv-fallback" });
     }

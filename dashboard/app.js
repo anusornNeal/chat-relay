@@ -21,13 +21,9 @@ let dashboardPeriod = null;
 let dashboardRange = "today";
 let adminUsersCache = [];
 const PAGE_SIZE = 20;
-let callFilters = { userId: "", status: "", query: "", activityId: "", from: "", to: "", drilldown: false };
-const callPaging = { cursor: "", stack: [], nextCursor: null };
 const errorPaging = { cursor: "", stack: [], nextCursor: null };
 let errorMode = "attention";
 let userMode = "active";
-let runningClockTimer = null;
-let callSearchTimer = null;
 
 const BKK_TZ = "Asia/Bangkok";
 const API_TIMEOUT_MS = 12000;
@@ -48,31 +44,6 @@ const bkkHourMinute = (iso) => new Intl.DateTimeFormat("en-GB", {
 const bkkDayLabel = (iso) => new Intl.DateTimeFormat("en-GB", {
   timeZone: BKK_TZ, day: "2-digit", month: "short",
 }).format(new Date(iso));
-const elapsedClock = (iso) => {
-  const total = Math.max(0, Math.floor((Date.now() - Date.parse(iso || "")) / 1000));
-  if (!Number.isFinite(total)) return "--:--";
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = total % 60;
-  return hours > 0
-    ? [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":")
-    : [minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
-};
-function updateRunningTimers() {
-  document.querySelectorAll("[data-running-start]").forEach((node) => {
-    node.textContent = elapsedClock(node.dataset.runningStart);
-  });
-}
-function ensureRunningClock() {
-  if (!document.querySelector("[data-running-start]")) {
-    clearInterval(runningClockTimer);
-    runningClockTimer = null;
-    return;
-  }
-  if (!runningClockTimer) runningClockTimer = setInterval(updateRunningTimers, 1000);
-  updateRunningTimers();
-}
-
 const ICONS = {
   overview: '<path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/>',
   activity: '<path d="M4 12h3l2-6 4 12 2-6h5"/><path d="M3 4v16h18"/>',
@@ -151,20 +122,7 @@ function showDetail(id, title = "Safe metadata") {
   const rows = Object.entries(data).map(([key, value]) =>
     '<div class="detail-row"><span class="detail-key">' + esc(key) + '</span><strong class="' + (key.endsWith("Id") ? "mono" : "") + '">' + esc(value) + "</strong></div>"
   ).join("");
-  const related = data.activityId
-    ? '<div class="detail-actions"><button id="detailRelated" class="button subtle" type="button">' + icon("activity") + "View related tool calls</button></div>"
-    : "";
-  $("detailBody").innerHTML = rows + related;
-  const relatedButton = $("detailRelated");
-  if (relatedButton) relatedButton.onclick = async () => {
-    $("detailDialog").close();
-    callFilters.activityId = String(data.activityId || "");
-    resetCallPaging();
-    activeView = "calls";
-    renderNav();
-    showLoading();
-    await loadCalls({ patch: false });
-  };
+  $("detailBody").innerHTML = rows;
   $("detailDialog").showModal();
 }
 function bindDetailRows() {
@@ -396,8 +354,8 @@ function isAdmin() { return currentUser?.admin === true; }
 
 function navItems() {
   return isAdmin()
-    ? [["overview", "Overview", "overview"], ["calls", "Tool Calls", "activity"], ["users", "Users", "users"], ["errors", "Errors", "alert"]]
-    : [["overview", "My Overview", "overview"], ["calls", "My Tool Calls", "activity"]];
+    ? [["overview", "Overview", "overview"], ["users", "Users", "users"], ["errors", "Errors", "alert"]]
+    : [["overview", "My Overview", "overview"]];
 }
 function renderNav() {
   $("nav").innerHTML = navItems().map(([id, label, glyph]) =>
@@ -422,10 +380,6 @@ function showLoading() {
 }
 async function switchView(view) {
   if (!navItems().some(([id]) => id === view)) view = "overview";
-  if (view !== "calls") {
-    clearInterval(runningClockTimer);
-    runningClockTimer = null;
-  }
   activeView = view;
   renderNav();
   showLoading();
@@ -435,7 +389,6 @@ async function loadActive({ patch = false } = {}) {
   setNotice("");
   try {
     if (activeView === "overview") await loadOverview({ patch });
-    else if (activeView === "calls") await loadCalls({ patch });
     else if (activeView === "users") await loadUsers({ patch });
     else if (activeView === "errors") await loadErrors({ patch });
     clearDataRetry();
@@ -474,8 +427,7 @@ async function refreshActiveIncrementally({ initial = false } = {}) {
 }
 function topicsTouchActiveView(topics) {
   const set = new Set(topics);
-  if (activeView === "overview") return ["overview", "calls", "users", "errors", "agents"].some((topic) => set.has(topic));
-  if (activeView === "calls") return callPaging.stack.length === 0 && (set.has("calls") || set.has("agents"));
+  if (activeView === "overview") return ["overview", "users", "errors", "agents"].some((topic) => set.has(topic));
   if (activeView === "users") return set.has("users") || set.has("agents");
   if (activeView === "errors") return errorPaging.stack.length === 0 && set.has("errors");
   return false;
@@ -527,8 +479,6 @@ function stopLiveChannel() {
   liveRefreshTimer = null;
   clearInterval(heartbeatTimer);
   heartbeatTimer = null;
-  clearInterval(runningClockTimer);
-  runningClockTimer = null;
   lastPongAt = 0;
   stopFallbackPolling();
   pendingLiveTopics.clear();
@@ -564,7 +514,7 @@ function connectLiveChannel() {
       socket.send(JSON.stringify({ type: "ping" }));
     }, 50000);
     setLiveState("live");
-    if (reconnect && !dataRetryTimer) queueLiveRefresh(["overview", "calls", "users", "errors", "agents"]);
+    if (reconnect && !dataRetryTimer) queueLiveRefresh(["overview", "users", "errors", "agents"]);
   };
   socket.onmessage = (event) => {
     if (liveSocket !== socket || typeof event.data !== "string") return;
@@ -572,10 +522,6 @@ function connectLiveChannel() {
     try { data = JSON.parse(event.data); } catch { return; }
     if (data?.type === "pong" || data?.type === "ready") {
       lastPongAt = Date.now();
-      return;
-    }
-    if (data?.type === "tool_started" || data?.type === "tool_finished") {
-      applyToolLifecycle(data);
       return;
     }
     if (data?.type === "invalidate" && Array.isArray(data.topics)) queueLiveRefresh(data.topics);
@@ -614,11 +560,6 @@ function periodDisplayLabel(range = dashboardRange) {
   return range === "30d" ? "Last 30 days" : range === "7d" ? "Last 7 days" : "Today";
 }
 
-function resetCallPaging() {
-  callPaging.cursor = "";
-  callPaging.stack = [];
-  callPaging.nextCursor = null;
-}
 function resetErrorPaging() {
   errorPaging.cursor = "";
   errorPaging.stack = [];
@@ -664,11 +605,11 @@ function chartMarkup(buckets = [], period = dashboardPeriod) {
     const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
     const label = byDay ? bkkDayLabel(bucket.from) : start + "\u2013" + end;
     const current = index === buckets.length - 1 ? " current" : "";
-    return '<button class="chart-bar' + current + '" style="--bar-height:' + height + '%" data-chart-from="' + esc(bucket.from) + '" data-chart-to="' + esc(bucket.to) + '"' +
+    return '<div class="chart-bar' + current + '" style="--bar-height:' + height + '%" tabindex="0" role="img"' +
       ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
-      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations \u00b7 ' + fmtNum(errors) + ' operational errors</span><small>Open filtered tool calls</small></span>' +
+      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations \u00b7 ' + fmtNum(errors) + ' operational errors</span><small>Aggregate usage</small></span>' +
       '<span class="bar-fill"></span>' +
-      "</button>";
+      "</div>";
   }).join("");
   const labelEvery = byDay ? (buckets.length > 14 ? 5 : 1) : 3;
   const xLabels = buckets.map((bucket, index) => {
@@ -718,14 +659,19 @@ async function loadOverview({ patch = false } = {}) {
       '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
     boundedNotice +
     '<div class="metric-grid">' + cards.join("") + "</div>" +
-    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by ' + chartUnit + '</h2></div><span class="panel-meta">Click a bar to inspect invocations</span></div>' +
+    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by ' + chartUnit + '</h2></div><span class="panel-meta">Aggregate invocations</span></div>' +
       chartMarkup(data.buckets || [], dashboardPeriod) + "</section>" +
     '<section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Breakdown</div><h2>Top tools</h2></div></div><div class="list top-tools">' +
       (top.length ? top.map((item, index) =>
         '<div class="list-row"><div class="tool-rank">' + (index + 1) + '</div><div class="list-copy"><div class="primary-text">' + esc(item.tool) +
         '</div><div class="secondary-text">' + esc(humanTool(item.tool)) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + "</strong></div>"
       ).join("") : '<div class="empty-inline">No tool invocations in this period.</div>') +
-    "</div></section></div>";
+    "</div></section></div>" +
+    (isAdmin() ? '<section class="panel account-usage-panel"><div class="panel-heading"><div><div class="panel-kicker">Accounts</div><h2>Tool invocations by account</h2></div><span class="panel-meta">' + esc(periodLabel) + '</span></div><div class="list account-usage">' +
+      ((data.accountUsage || []).length ? data.accountUsage.map((item) =>
+        '<div class="list-row"><div class="list-copy"><div class="primary-text">' + esc(item.name || item.userId) + '</div><div class="secondary-text">' + esc(item.login || item.userId) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + '</strong></div>'
+      ).join("") : '<div class="empty-inline">No account usage in this period.</div>') +
+    "</div></section>" : "");
   renderContent(liveMarkup, patch);
   document.querySelectorAll("[data-overview-range]").forEach((button) => {
     button.onclick = async () => {
@@ -733,25 +679,7 @@ async function loadOverview({ patch = false } = {}) {
       if (nextRange === dashboardRange) return;
       dashboardRange = nextRange;
       dashboardPeriod = null;
-      callFilters.from = "";
-      callFilters.to = "";
-      callFilters.drilldown = false;
-      resetCallPaging();
       await loadOverview();
-    };
-  });
-
-  document.querySelectorAll("[data-chart-from]").forEach((bar) => {
-    bar.onclick = async () => {
-      callFilters.from = bar.dataset.chartFrom;
-      callFilters.to = bar.dataset.chartTo;
-      callFilters.drilldown = true;
-      callFilters.activityId = "";
-      resetCallPaging();
-      activeView = "calls";
-      renderNav();
-      showLoading();
-      await loadCalls();
     };
   });
 }
@@ -762,38 +690,6 @@ function statusBadge(status) {
   const glyph = normalized === "success" ? "check" : normalized === "error" ? "x" : normalized === "running" ? "activity" : "info";
   const label = normalized ? normalized[0].toUpperCase() + normalized.slice(1) : "Unknown";
   return '<span class="status-pill ' + tone + '">' + icon(glyph) + esc(label) + "</span>";
-}
-function activeTerminalRows(terminals = []) {
-  return terminals.flatMap((agent) => [
-    ...(agent.sessions || []).map((session) => ({
-      userId: session.userId || "",
-      tool: session.type === "shell" ? "terminal_start_shell" : "terminal_start",
-      agentId: agent.agentId,
-      agentName: agent.agentName || agent.agentId,
-      activityId: session.activityId || (session.toolCallId ? "call_" + String(session.toolCallId).replace(/^tc_/, "").slice(0, 12) : ""),
-      toolCallId: session.toolCallId,
-      startedAt: session.startedAt,
-      timestamp: session.startedAt,
-      status: "running",
-      durationMs: Date.now() - Date.parse(session.startedAt || new Date().toISOString()),
-      sessionId: session.sessionId,
-      syntheticTerminal: true,
-    })),
-    ...(agent.batches || []).map((batch) => ({
-      userId: batch.userId || "",
-      tool: "terminal_batch_start",
-      agentId: agent.agentId,
-      agentName: agent.agentName || agent.agentId,
-      activityId: batch.activityId || (batch.toolCallId ? "call_" + String(batch.toolCallId).replace(/^tc_/, "").slice(0, 12) : ""),
-      toolCallId: batch.toolCallId,
-      startedAt: batch.startedAt,
-      timestamp: batch.startedAt,
-      status: "running",
-      durationMs: Date.now() - Date.parse(batch.startedAt || new Date().toISOString()),
-      batchId: batch.batchId,
-      syntheticTerminal: true,
-    })),
-  ]);
 }
 async function ensureCallPeriod() {
   if (dashboardPeriod?.range === dashboardRange && dashboardPeriod?.from && dashboardPeriod?.to) return;
@@ -807,10 +703,6 @@ function bindPeriodRange(loader) {
       if (nextRange === dashboardRange) return;
       dashboardRange = nextRange;
       dashboardPeriod = null;
-      callFilters.from = "";
-      callFilters.to = "";
-      callFilters.drilldown = false;
-      resetCallPaging();
       resetErrorPaging();
       await loader({ patch: true });
     };
@@ -821,199 +713,11 @@ async function loadAdminUsersForFilter() {
   const data = await api("/admin/api/users?limit=100");
   adminUsersCache = Array.isArray(data.items) ? data.items : [];
 }
-function callFilterMarkup() {
-  const userSelect = isAdmin()
-    ? '<label class="filter-control"><span>User</span><select id="callUser"><option value="">All users</option>' +
-      adminUsersCache.map((user) => '<option value="' + esc(user.id) + '"' + (callFilters.userId === user.id ? " selected" : "") + ">" + esc(user.name || user.login || user.id) + "</option>").join("") +
-      "</select></label>"
-    : "";
-  const statusOptions = [["", "All statuses"], ["running", "Running"], ["success", "Success"], ["error", "Error"]]
-    .map(([value, label]) => '<option value="' + value + '"' + (callFilters.status === value ? " selected" : "") + ">" + label + "</option>").join("");
-  const windowLabel = callFilters.drilldown && callFilters.from
-    ? (dashboardRange === "today"
-      ? bkkHourMinute(callFilters.from) + "\u2013" + bkkHourMinute(new Date(Date.parse(callFilters.to) + 1).toISOString())
-      : bkkDayLabel(callFilters.from))
-    : periodDisplayLabel(dashboardRange);
-  const related = callFilters.activityId
-    ? '<button id="clearActivity" class="button subtle activity-filter-chip" type="button">' + icon("activity") + esc(activityLabel(callFilters.activityId)) + ' ' + icon("x") + "</button>"
-    : "";
-  return '<div class="filters-panel"><div class="filters-row">' +
-    '<label class="filter-control grow"><span>Search</span><div class="input-with-icon">' + icon("search") + '<input id="toolSearch" value="' + esc(callFilters.query) + '" placeholder="Tool, agent"></div></label>' +
-    userSelect +
-    '<label class="filter-control"><span>Status</span><select id="callStatus">' + statusOptions + "</select></label>" +
-    '<div class="filter-window"><span>Window</span><div class="window-chip">' + icon("clock") + esc(windowLabel) + "</div></div>" +
-    related +
-    (callFilters.drilldown ? '<button id="clearDrilldown" class="button subtle" type="button">' + icon("x") + "Clear bucket</button>" : "") +
-    "</div></div>";
-}
-
-function rememberAgentName(event) {
-  if (event?.agentId && event?.agentName) agentNameCache.set(String(event.agentId), String(event.agentName));
-}
-function callAgentName(event) {
-  return event?.agentName || (event?.agentId ? agentNameCache.get(String(event.agentId)) : "") || "Resolving\u2026";
-}
 function userDisplayName(userId) {
   const id = String(userId || "");
   if (!id) return "-";
   const user = adminUsersCache.find((item) => item.id === id);
   return user?.name || user?.login || id;
-}
-function callEventMatchesFilters(event) {
-  const when = Date.parse(event.startedAt || event.timestamp || "");
-  if (callFilters.from && Number.isFinite(when) && when < Date.parse(callFilters.from)) return false;
-  if (callFilters.to && Number.isFinite(when) && when > Date.parse(callFilters.to)) return false;
-  if (isAdmin() && callFilters.userId && event.userId !== callFilters.userId) return false;
-  if (callFilters.activityId && event.activityId !== callFilters.activityId) return false;
-  if (callFilters.status && event.status !== callFilters.status) return false;
-  const q = String(callFilters.query || "").trim().toLowerCase();
-  if (q) {
-    const searchable = [event.tool, event.agentId, event.agentName].filter(Boolean).join(" ").toLowerCase();
-    if (!searchable.includes(q)) return false;
-  }
-  return true;
-}
-function callRowMarkup(event) {
-  rememberAgentName(event);
-  const detailId = registerDetail(event);
-  const when = event.startedAt || event.timestamp;
-  const rowKey = event.toolCallId || [when, event.userId, event.tool, event.agentId].join(":");
-  const duration = event.status === "running"
-    ? '<span class="running-duration" data-running-start="' + esc(event.startedAt || event.timestamp) + '">' + esc(elapsedClock(event.startedAt || event.timestamp)) + "</span>"
-    : esc(fmtMs(event.durationMs));
-  return '<tr data-filter-row data-live-key="' + esc(rowKey) + '" data-detail-id="' + detailId + '" data-detail-title="Tool call detail">' +
-    '<td class="time-cell"><strong>' + esc(when ? bkkTime(when) : "-") + "</strong></td>" +
-    (isAdmin() ? '<td><span class="user-cell" title="' + esc(event.userId || "") + '">' + esc(userDisplayName(event.userId)) + "</span></td>" : "") +
-    '<td><div class="tool-cell"><span class="tool-icon">' + icon(toolIconName(event.tool)) + '</span><div><strong>' + esc(event.tool || "-") + '</strong><span>' + esc(humanTool(event.tool)) + "</span></div></div></td>" +
-    '<td><div class="agent-cell"><strong>' + esc(callAgentName(event)) + "</strong></div></td>" +
-    "<td>" + duration + "</td>" +
-    "<td>" + statusBadge(event.status || (event.ok ? "success" : "error")) + "</td>" +
-    '<td class="row-chevron">' + icon("chevron") + "</td></tr>";
-}
-function lifecycleCallEvent(data) {
-  const started = data.startedAt || data.timestamp;
-  const status = data.type === "tool_started" ? "running" : (data.status || (data.ok ? "success" : "error"));
-  const event = {
-    ...data,
-    status,
-    startedAt: started,
-    timestamp: data.type === "tool_started" ? started : data.timestamp,
-    ...(data.agentId && agentNameCache.has(String(data.agentId)) ? { agentName: agentNameCache.get(String(data.agentId)) } : {}),
-  };
-  delete event.type;
-  return event;
-}
-function applyToolLifecycle(data) {
-  if (!data?.toolCallId || activeView !== "calls" || callPaging.cursor) return;
-  const tbody = document.querySelector(".calls-table tbody");
-  if (!tbody) return;
-
-  const event = lifecycleCallEvent(data);
-  const existing = [...tbody.querySelectorAll("[data-live-key]")].find((row) => row.dataset.liveKey === event.toolCallId);
-  if (!callEventMatchesFilters(event)) {
-    existing?.remove();
-    ensureRunningClock();
-    touchFreshness();
-    return;
-  }
-
-  const template = document.createElement("template");
-  template.innerHTML = callRowMarkup(event).trim();
-  const nextRow = template.content.firstElementChild;
-  if (!nextRow) return;
-
-  const empty = tbody.querySelector(".table-empty")?.closest("tr");
-  empty?.remove();
-  if (existing) patchLiveNode(existing, nextRow);
-  else tbody.prepend(nextRow);
-
-  const rows = [...tbody.querySelectorAll("[data-filter-row]")];
-  for (const row of rows.slice(PAGE_SIZE)) row.remove();
-  bindDetailRows();
-  ensureRunningClock();
-  touchFreshness();
-}
-
-async function loadCalls({ patch = false } = {}) {
-  detailRecords.clear();
-  detailSeq = 0;
-  setHeader(isAdmin() ? "Tool calls" : "My tool calls", "Live running and completed activity");
-  await ensureCallPeriod();
-  await loadAdminUsersForFilter();
-  const from = callFilters.from || dashboardPeriod?.from;
-  const to = callFilters.to || new Date().toISOString();
-  const params = new URLSearchParams({ state: "all", limit: String(PAGE_SIZE) });
-  if (from) params.set("from", from);
-  if (to) params.set("to", to);
-  if (callPaging.cursor) params.set("cursor", callPaging.cursor);
-  if (callFilters.status) params.set("status", callFilters.status);
-  if (callFilters.query.trim()) params.set("q", callFilters.query.trim());
-  if (callFilters.activityId) params.set("activityId", callFilters.activityId);
-  if (isAdmin() && callFilters.userId) params.set("userId", callFilters.userId);
-  const data = await api("/admin/api/tool-calls?" + params);
-  callPaging.nextCursor = data.nextCursor || null;
-  const rawItems = Array.isArray(data.items) ? data.items : [];
-  const q = String(callFilters.query || "").trim().toLowerCase();
-  const terminalItems = (!callPaging.cursor && (!callFilters.status || callFilters.status === "running")
-    ? activeTerminalRows(data.terminals || [])
-    : []).filter((item) =>
-      (!isAdmin() || !callFilters.userId || item.userId === callFilters.userId) &&
-      (!q || [item.tool, item.agentId, item.agentName].filter(Boolean).join(" ").toLowerCase().includes(q))
-    );
-  const seen = new Set(rawItems.map((item) => item.toolCallId).filter(Boolean));
-  const items = [...terminalItems.filter((item) => !item.toolCallId || !seen.has(item.toolCallId)), ...rawItems]
-    .sort((a, b) => Date.parse(b.timestamp || b.startedAt || "") - Date.parse(a.timestamp || a.startedAt || ""));
-
-  items.forEach(rememberAgentName);
-  const tableRows = items.length ? items.map(callRowMarkup).join("") : '<tr><td colspan="' + (isAdmin() ? "7" : "6") + '"><div class="table-empty">' + icon("activity") + '<strong>No tool calls in this window</strong><span>New activity appears here in realtime.</span></div></td></tr>';
-
-  const liveMarkup =
-    '<div class="section-toolbar">' + periodChips(dashboardPeriod) +
-      '<span class="privacy-chip">' + icon("info") + "Safe metadata only</span></div>" +
-    (data.bounded ? '<div class="data-warning">' + icon("alert") + "<span>This page hit the legacy history scan bound. Use Older to continue; totals are a lower bound.</span></div>" : "") +
-    callFilterMarkup() +
-    '<div class="table-wrap calls-table"><table><thead><tr><th>Time</th>' + (isAdmin() ? "<th>User</th>" : "") +
-      "<th>Tool</th><th>Agent</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody>" + tableRows + "</tbody></table></div>" +
-    paginationMarkup("calls", callPaging, Boolean(data.hasMore));
-  renderContent(liveMarkup, patch);
-  ensureRunningClock();
-  bindPeriodRange(loadCalls);
-
-  const search = $("toolSearch");
-  if (search) {
-    search.oninput = () => {
-      callFilters.query = search.value;
-      clearTimeout(callSearchTimer);
-      callSearchTimer = setTimeout(async () => {
-        resetCallPaging();
-        await loadCalls({ patch: true });
-      }, 250);
-    };
-  }
-  if ($("callUser")) $("callUser").onchange = async () => {
-    callFilters.userId = $("callUser").value;
-    resetCallPaging();
-    await loadCalls({ patch: true });
-  };
-  if ($("callStatus")) $("callStatus").onchange = async () => {
-    callFilters.status = $("callStatus").value;
-    resetCallPaging();
-    await loadCalls({ patch: true });
-  };
-  if ($("clearActivity")) $("clearActivity").onclick = async () => {
-    callFilters.activityId = "";
-    resetCallPaging();
-    await loadCalls({ patch: true });
-  };
-  if ($("clearDrilldown")) $("clearDrilldown").onclick = async () => {
-    callFilters.from = "";
-    callFilters.to = "";
-    callFilters.drilldown = false;
-    resetCallPaging();
-    await loadCalls({ patch: true });
-  };
-  bindPaging("calls", callPaging, loadCalls);
-  bindDetailRows();
 }
 
 async function loadUsers({ patch = false } = {}) {

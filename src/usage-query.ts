@@ -125,7 +125,8 @@ export class UsageQueryIndex {
   private upsertBatch(rows: Array<[string, UsageEvent]>) {
     if (!this.sql || !rows.length) return;
     for (let offset = 0; offset < rows.length; offset += INSERT_BATCH_SIZE) {
-      const batch = rows.slice(offset, offset + INSERT_BATCH_SIZE);
+      const batch = rows.slice(offset, offset + INSERT_BATCH_SIZE).filter(([, event]) => !event.ok);
+      if (!batch.length) continue;
       const placeholders = batch.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(",");
       const bindings = batch.flatMap(([key, event]) => this.values(key, event));
       this.sql.exec(
