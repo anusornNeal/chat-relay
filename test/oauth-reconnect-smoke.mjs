@@ -44,6 +44,15 @@ assert(
   "OAuth smoke test no longer verifies repeated reuse of one refresh token",
 );
 assert(
+  oauthSmoke.includes("refresh without resource defaults to MCP resource"),
+  "OAuth smoke test no longer verifies refresh without an explicit resource",
+);
+const oauth = fs.readFileSync("src/oauth.ts", "utf8");
+assert(
+  oauth.includes("const tokenResource = requestedResource || resource;"),
+  "token refresh no longer defaults an omitted resource to the MCP resource",
+);
+assert(
   oauthSmoke.includes("retriedRefresh.data.access_token === refreshed.data.access_token"),
   "OAuth smoke test no longer verifies a fresh access token on repeated refresh",
 );

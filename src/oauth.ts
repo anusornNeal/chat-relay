@@ -501,9 +501,10 @@ export async function handleOAuth(
     if (!clientId || !(await getClient(registryCall, clientId))) {
       return oauthError("invalid_client", "Unknown OAuth client.", 401);
     }
-    if (requestedResource !== resource) {
+    if (requestedResource && requestedResource !== resource) {
       return oauthError("invalid_target", "resource must match the MCP endpoint.");
     }
+    const tokenResource = requestedResource || resource;
 
     if (grantType === "authorization_code") {
       const code = String(form.get("code") ?? "");
@@ -519,7 +520,7 @@ export async function handleOAuth(
         clientId,
         redirectUri,
         codeChallenge: await pkceChallenge(verifier),
-        resource: requestedResource,
+        resource: tokenResource,
       });
       const data = await exchanged.json<any>().catch(() => ({
         error: "server_error",
@@ -535,7 +536,7 @@ export async function handleOAuth(
       const exchanged = await registryCall("/oauth/refresh/exchange", {
         refreshTokenHash: await hashToken(refreshToken),
         clientId,
-        resource: requestedResource,
+        resource: tokenResource,
       });
 
       const data = await exchanged.json<any>().catch(() => ({

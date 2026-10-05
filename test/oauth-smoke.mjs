@@ -287,6 +287,22 @@ if (!retriedRefresh.response.ok ||
 }
 console.log("stable refresh token reuse ok");
 
+const omittedResourceRefresh = await jsonFetch("/token", {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: formBody({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    refresh_token: token.data.refresh_token,
+  }),
+});
+if (!omittedResourceRefresh.response.ok ||
+    !omittedResourceRefresh.data.access_token ||
+    omittedResourceRefresh.data.refresh_token) {
+  throw new Error(`refresh without resource failed: ${omittedResourceRefresh.text}`);
+}
+console.log("refresh without resource defaults to MCP resource");
+
 const wrongResource = await jsonFetch("/token", {
   method: "POST",
   headers: { "content-type": "application/x-www-form-urlencoded" },
