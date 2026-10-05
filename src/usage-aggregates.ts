@@ -216,7 +216,7 @@ export class UsageAggregates {
 
     const startKey = `${String(hourStart(fromMs)).padStart(13, "0")}|`;
     const endKey = `${String(hourStart(toMs) + HOUR).padStart(13, "0")}|`;
-    const where = ["bucket_key >= ?", "bucket_key < ?"];
+    const where = ["bucket_key >= ?", "bucket_key < ?", "agent_id <> '__relay__'"];
     const bindings: SqlValue[] = [startKey, endKey];
     if (filters.userId) {
       where.push("user_id = ?");
@@ -269,7 +269,7 @@ export class UsageAggregates {
 
     const startKey = `${String(hourStart(fromMs)).padStart(13, "0")}|`;
     const endKey = `${String(hourStart(toMs) + HOUR).padStart(13, "0")}|`;
-    const where = ["bucket_key >= ?", "bucket_key < ?"];
+    const where = ["bucket_key >= ?", "bucket_key < ?", "agent_id <> '__relay__'"];
     const bindings: SqlValue[] = [startKey, endKey];
     if (filters.userId) {
       where.push("user_id = ?");
@@ -413,6 +413,7 @@ export class UsageAggregates {
       if (!Number.isFinite(hourMs) || hourMs < hourStart(fromMs) || hourMs > hourStart(toMs)) continue;
       const userId = decodeURIComponent(parts[3] || "");
       const agentId = decodeURIComponent(parts.slice(4).join(":") || "");
+      if (!agentId || agentId === "__relay__") continue;
       if (filters.userId && userId !== filters.userId) continue;
       if (filters.agentId && agentId !== filters.agentId) continue;
       addRow(rows, userId, agentId, Number(value || 0));
@@ -428,8 +429,8 @@ export class UsageAggregates {
     if (!bucket?.groups) return;
     for (const group of Object.values(bucket.groups)) {
       const userId = String(group.userId || "");
-      const agentId = String(group.agentId || "__relay__");
-      if (!userId) continue;
+      const agentId = String(group.agentId || "");
+      if (!userId || !agentId || agentId === "__relay__") continue;
       if (filters.userId && userId !== filters.userId) continue;
       if (filters.agentId && agentId !== filters.agentId) continue;
       addRow(target, userId, agentId, Number(group.metric?.calls || 0));

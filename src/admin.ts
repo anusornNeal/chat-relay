@@ -639,7 +639,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       const agentUsage = (usage.agents ?? [])
         .map((entry: any) => ({
           agentId: entry.agentId,
-          name: entry.agentId === "__relay__" ? "Relay" : entry.agentId,
+          name: entry.agentId,
           calls: Number(entry.calls || 0),
         }))
         .sort((a: any, b: any) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
@@ -698,9 +698,9 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
         const agent: any = agentById.get(agentId);
         return {
           agentId,
-          name: agentId === "__relay__" ? "Relay" : agent?.name || agentId,
+          name: agent?.name || agentId,
           calls: Number(usageByUserAgent.get(JSON.stringify([user.id, agentId])) || 0),
-          online: agentId === "__relay__" ? true : onlineByAgentId.get(agentId) === true,
+          online: onlineByAgentId.get(agentId) === true,
         };
       }).sort((a, b) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
 

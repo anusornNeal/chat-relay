@@ -230,9 +230,14 @@ export class Usage extends DurableObject {
         return Response.json({ error: "invalid_usage_timestamp" }, { status: 400 });
       }
 
+      const agentId = body.agentId ? String(body.agentId).slice(0, 128) : "";
+      if (!agentId || agentId === "__relay__") {
+        return Response.json({ ok: true, skipped: true });
+      }
+
       const event: UsageEvent = {
         userId: String(body.userId).slice(0, 128),
-        agentId: body.agentId ? String(body.agentId).slice(0, 128) : "__relay__",
+        agentId,
         timestamp: new Date(timestampMs).toISOString(),
         ...(body.tool ? { tool: String(body.tool).slice(0, 128) } : {}),
         durationMs: Number.isFinite(Number(body.durationMs))

@@ -156,6 +156,28 @@ const event = (timestamp, overrides = {}) => ({
 {
   const f = fixture();
   f.reset();
+  const skippedMissing = await f.call("/record", event("2026-10-04T08:00:00Z", { agentId: "" }));
+  const skippedRelay = await f.call("/record", event("2026-10-04T08:01:00Z", { agentId: "__relay__" }));
+  assert.equal(skippedMissing.skipped, true);
+  assert.equal(skippedRelay.skipped, true);
+  assert.equal(f.stats.puts, 0, "relay-local usage must not be stored");
+  console.log("PASS relay-local usage is ignored");
+}
+
+{
+  const f = fixture();
+  const hour = String(Date.parse("2026-10-04T08:00:00Z")).padStart(13, "0");
+  f.records.set(`usage:v2:${hour}:alice:__relay__`, 9);
+  f.records.set(`usage:v2:${hour}:alice:agent-a`, 2);
+  const filtered = await f.call("/window?from=2026-10-04T08:00:00Z&to=2026-10-04T08:59:59Z");
+  assert.equal(filtered.metric.calls, 2);
+  assert.equal(filtered.agents.some((row) => row.agentId === "__relay__"), false);
+  console.log("PASS historical relay-local usage is hidden");
+}
+
+{
+  const f = fixture();
+  f.reset();
   await f.call("/record", event("2026-10-04T08:00:00Z", { ok: false, errorCode: "synthetic" }));
   assert.equal(f.stats.puts, 1);
   assert.equal([...f.records.keys()].some((key) => key.startsWith("event:")), false);
