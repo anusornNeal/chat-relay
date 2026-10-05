@@ -112,7 +112,9 @@ export class CapabilityScheduler {
     if (value.startsWith("process.")) return this.lanes.get("process");
     if (value === "terminal.exec") return this.lanes.get("terminalExec");
     if (value.startsWith("terminal.")) return this.lanes.get("terminalControl");
-    if (value === "desktop.screenshot") return this.lanes.get("desktopRead");
+    if (["desktop.screenshot", "desktop.clipboard.read", "desktop.window.list"].includes(value)) {
+      return this.lanes.get("desktopRead");
+    }
     if (value.startsWith("desktop.")) return null;
     return this.lanes.get("agent");
   }

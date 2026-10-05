@@ -30,8 +30,41 @@ const ALLOWED_WHILE_DRAINING = new Set([
   "terminal.observability",
 ]);
 
+const ALLOWED_WHILE_FINALIZING = new Set([
+  "ping",
+  "agent.config",
+  "agent.lifecycle.status",
+]);
+
 export const AGENT_RESTART_EXIT_CODE = 4;
 export const AGENT_UPGRADE_EXIT_CODE = 5;
+
+export function summarizeAgentWork({ terminal = {}, scheduler = {}, desktop = {} } = {}) {
+  const terminalExec = scheduler.terminalExec || {};
+  const otherSchedulerLanes = ["filesystem", "process", "terminalControl", "desktopRead"];
+  const activeOtherJobs = otherSchedulerLanes.reduce(
+    (sum, name) => sum + Math.max(0, Number(scheduler[name]?.active) || 0),
+    0,
+  );
+  const queuedOtherJobs = otherSchedulerLanes.reduce(
+    (sum, name) => sum + Math.max(0, Number(scheduler[name]?.queued) || 0),
+    0,
+  );
+  const desktopControl = desktop.controlQueue || {};
+  return {
+    activeSessions: Array.isArray(terminal.sessions)
+      ? terminal.sessions.filter((item) => item?.status === "running").length
+      : 0,
+    activeBatchJobs: Math.max(0, Number(terminal.activeExecJobs) || 0),
+    queuedBatchJobs: Math.max(0, Number(terminal.queuedJobs) || 0),
+    activeTerminalExecs: Math.max(0, Number(terminalExec.active) || 0),
+    queuedTerminalExecs: Math.max(0, Number(terminalExec.queued) || 0),
+    activeOtherJobs,
+    queuedOtherJobs,
+    activeDesktopControls: Math.max(0, Number(desktopControl.active) || 0),
+    queuedDesktopControls: Math.max(0, Number(desktopControl.queued) || 0),
+  };
+}
 
 function normalizeWork(value = {}) {
   const count = (key) => Math.max(0, Number(value[key]) || 0);
@@ -41,6 +74,10 @@ function normalizeWork(value = {}) {
     queuedBatchJobs: count("queuedBatchJobs"),
     activeTerminalExecs: count("activeTerminalExecs"),
     queuedTerminalExecs: count("queuedTerminalExecs"),
+    activeOtherJobs: count("activeOtherJobs"),
+    queuedOtherJobs: count("queuedOtherJobs"),
+    activeDesktopControls: count("activeDesktopControls"),
+    queuedDesktopControls: count("queuedDesktopControls"),
   };
   work.total = Object.values(work).reduce((sum, item) => sum + item, 0);
   return work;
@@ -91,7 +128,12 @@ export class AgentLifecycle {
   }
 
   guard(action) {
-    if (this.state === "running" || ALLOWED_WHILE_DRAINING.has(String(action))) return null;
+    const name = String(action);
+    if (this.state === "running") return null;
+    if ((this.state === "restart-pending" || this.state === "upgrade-pending") && ALLOWED_WHILE_FINALIZING.has(name)) {
+      return null;
+    }
+    if (this.state === "draining" && ALLOWED_WHILE_DRAINING.has(name)) return null;
     return { ok: false, error: "agent_draining", lifecycle: this.snapshot() };
   }
 

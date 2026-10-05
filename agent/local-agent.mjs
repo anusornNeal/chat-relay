@@ -6,7 +6,12 @@ import { TerminalManager } from "./terminal-manager.mjs";
 import { CapabilityScheduler } from "./capability-scheduler.mjs";
 import { AgentConnectionState } from "./connection-state.mjs";
 import { buildAgentHello } from "./protocol.mjs";
-import { AgentLifecycle, AGENT_RESTART_EXIT_CODE, AGENT_UPGRADE_EXIT_CODE } from "./lifecycle.mjs";
+import {
+  AgentLifecycle,
+  AGENT_RESTART_EXIT_CODE,
+  AGENT_UPGRADE_EXIT_CODE,
+  summarizeAgentWork,
+} from "./lifecycle.mjs";
 import { humanizeToolCall } from "./toolcall-summary.mjs";
 import {
   HeartbeatAckWatchdog,
@@ -109,15 +114,11 @@ const heartbeatAckWatchdog = new HeartbeatAckWatchdog({
 });
 
 function currentWorkSummary() {
-  const terminal = terminals.observability();
-  const terminalExec = scheduler.snapshot().terminalExec || {};
-  return {
-    activeSessions: terminal.sessions.filter((item) => item.status === "running").length,
-    activeBatchJobs: terminal.activeExecJobs,
-    queuedBatchJobs: terminal.queuedJobs,
-    activeTerminalExecs: terminalExec.active,
-    queuedTerminalExecs: terminalExec.queued,
-  };
+  return summarizeAgentWork({
+    terminal: terminals.observability(),
+    scheduler: scheduler.snapshot(),
+    desktop: desktop.getConfig(),
+  });
 }
 
 const lifecycle = new AgentLifecycle({ workSummary: currentWorkSummary });

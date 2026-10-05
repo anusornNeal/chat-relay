@@ -326,6 +326,7 @@ export class RemoteTui {
     this.unseenTransactions = 0;
     this.inputWasRaw = false;
     this.inputWasPaused = false;
+    this.inputFlowingState = null;
     this.mouseEnabled = false;
     this.onInput = (chunk) => this.handleInput(chunk);
   }
@@ -339,6 +340,7 @@ export class RemoteTui {
     if (interactiveInput) {
       this.inputWasRaw = Boolean(this.input.isRaw);
       this.inputWasPaused = Boolean(this.input.isPaused?.());
+      this.inputFlowingState = this.input.readableFlowing ?? null;
       try {
         this.input.setRawMode(true);
         this.input.resume?.();
@@ -369,7 +371,7 @@ export class RemoteTui {
     if (this.input?.isTTY && typeof this.input.setRawMode === "function" && !this.inputWasRaw) {
       try { this.input.setRawMode(false); } catch {}
     }
-    if (this.inputWasPaused) this.input?.pause?.();
+    if (this.inputFlowingState !== true) this.input?.pause?.();
     this.output.write(
       (this.mouseEnabled ? ESC + "?1000l" + ESC + "?1006l" : "")
       + ESC + "?25h"

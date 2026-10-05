@@ -229,6 +229,10 @@ export function normalizeAgentLifecycle(value: any) {
       queuedBatchJobs: count("queuedBatchJobs"),
       activeTerminalExecs: count("activeTerminalExecs"),
       queuedTerminalExecs: count("queuedTerminalExecs"),
+      activeOtherJobs: count("activeOtherJobs"),
+      queuedOtherJobs: count("queuedOtherJobs"),
+      activeDesktopControls: count("activeDesktopControls"),
+      queuedDesktopControls: count("queuedDesktopControls"),
       total: count("total"),
     },
   };

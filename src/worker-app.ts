@@ -336,7 +336,7 @@ function scopeForAction(action: string): Scope {
       action.startsWith("fs.mkdir") || action.startsWith("fs.move") ||
       action.startsWith("fs.delete")) return "write";
   if (action.startsWith("terminal.")) return "terminal";
-  if (["agent.lifecycle.drain", "agent.lifecycle.resume", "agent.lifecycle.restart"].includes(action)) return "process";
+  if (["agent.lifecycle.drain", "agent.lifecycle.resume", "agent.lifecycle.restart", "agent.lifecycle.upgrade"].includes(action)) return "process";
   if (action === "process.kill" || action === "process.list") return "process";
   if (action === "desktop.screenshot") return "desktop_read";
   if (action === "desktop.mouse.click" || action === "desktop.keyboard.input" || action === "desktop.step") return "desktop_control";
@@ -603,7 +603,7 @@ const terminalSessionIdSchema = z.union([
 ]);
 
 const READ_ONLY_TOOLS = new Set([
-  "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls",
+  "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
   "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
   "start_search", "get_more_search_results", "list_processes", "screenshot", "clipboard_read", "list_windows",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
@@ -612,7 +612,7 @@ const OPEN_WORLD_TOOLS = new Set([
   "mouse_click", "keyboard_input", "desktop_step", "clipboard_write", "focus_window",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write",
   "terminal_batch_start", "terminal_batch_cancel",
-  "start_process", "interact_with_process",
+  "start_process", "interact_with_process", "upgrade_agent",
 ]);
 
 const DESTRUCTIVE_TOOLS = new Set([
@@ -620,7 +620,7 @@ const DESTRUCTIVE_TOOLS = new Set([
   "mouse_click", "keyboard_input", "desktop_step", "clipboard_write", "focus_window",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write", "terminal_kill",
   "terminal_batch_start", "terminal_batch_cancel",
-  "start_process", "interact_with_process", "force_terminate",
+  "start_process", "interact_with_process", "force_terminate", "restart_agent", "upgrade_agent",
 ]);
 
 function annotationsForTool(name: string, override: Record<string, boolean> = {}) {
@@ -727,6 +727,46 @@ function createMcpServer(env: Env, user: AuthUser) {
     "read",
     { limit: z.number().int().min(1).max(100).optional() },
     ({ limit }) => ({ action: "agent.recentCalls", limit }),
+  );
+
+  register(
+    "agent_lifecycle_status",
+    "Get local agent drain, restart, upgrade, and active-work state.",
+    "read",
+    {},
+    () => ({ action: "agent.lifecycle.status" }),
+  );
+
+  register(
+    "drain_agent",
+    "Stop admitting new work while allowing current work to finish before restart or upgrade.",
+    "process",
+    {},
+    () => ({ action: "agent.lifecycle.drain" }),
+  );
+
+  register(
+    "resume_agent",
+    "Cancel drain mode and resume normal local agent work admission.",
+    "process",
+    {},
+    () => ({ action: "agent.lifecycle.resume" }),
+  );
+
+  register(
+    "restart_agent",
+    "Restart the local agent after it is drained and no active work remains.",
+    "process",
+    {},
+    () => ({ action: "agent.lifecycle.restart" }),
+  );
+
+  register(
+    "upgrade_agent",
+    "Hand off the drained local agent to @anusornneal/chat-relay@latest and reconnect with saved configuration. Requires no active work.",
+    "process",
+    {},
+    () => ({ action: "agent.lifecycle.upgrade" }),
   );
 
   register(

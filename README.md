@@ -93,6 +93,7 @@ Depending on the device grants and local configuration, Chat Relay can expose:
 - Process inspection and termination.
 - Windows/macOS screenshots, mouse input, and keyboard input when desktop access is explicitly enabled.
 - Multiple computers under one account, with per-device routing and permissions.
+- Agent lifecycle control from ChatGPT with process permission: inspect status, drain/resume, restart, and safely hand off to the latest published package.
 - Batched filesystem, terminal, and desktop operations to reduce remote round trips.
 
 Desktop access is opt-in. Linux desktop control is not currently implemented.

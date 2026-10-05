@@ -25,7 +25,7 @@
         "logout": "node bin/chat-relay.js logout",
         "status": "node bin/chat-relay.js status",
         "dev": "wrangler dev",
-        "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN=test-caller --var ADMIN_TOKEN=test-admin",
+        "dev:test": "wrangler dev --local --port 8790 --var AGENT_TOKEN:test-agent --var CALLER_TOKEN:test-caller --var ADMIN_TOKEN:test-admin --var OPENAI_APPS_CHALLENGE:test-openai-apps-challenge",
         "deploy": "wrangler deploy",
         "agent": "node --env-file-if-exists=.dev.vars agent/local-agent.mjs",
         "admin": "node scripts/admin.mjs",

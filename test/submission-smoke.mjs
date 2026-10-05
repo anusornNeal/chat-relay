@@ -101,6 +101,11 @@ const expected = {
   terminal_exec: { readOnlyHint: false, openWorldHint: true, destructiveHint: true },
   screenshot: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   mouse_click: { readOnlyHint: false, openWorldHint: true, destructiveHint: true },
+  agent_lifecycle_status: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
+  drain_agent: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  resume_agent: { readOnlyHint: false, openWorldHint: false, destructiveHint: false },
+  restart_agent: { readOnlyHint: false, openWorldHint: false, destructiveHint: true },
+  upgrade_agent: { readOnlyHint: false, openWorldHint: true, destructiveHint: true },
 };
 for (const [name, annotations] of Object.entries(expected)) {
   const actual = byName.get(name);

@@ -302,3 +302,48 @@ test("terminalCellWidth treats relay emoji as wide glyphs", () => {
   assert.equal(terminalCellWidth("🚀"), 2);
   assert.equal(terminalCellWidth("📜 Transactions"), 15);
 });
+
+test("TUI restores an initially non-flowing stdin without pausing a pre-existing flowing stream", () => {
+  const output = { isTTY: true, columns: 80, rows: 20, write() { return true; } };
+
+  class Input extends EventEmitter {
+    constructor(readableFlowing) {
+      super();
+      this.isTTY = true;
+      this.isRaw = false;
+      this.readableFlowing = readableFlowing;
+      this.pauseCalls = 0;
+    }
+    setRawMode(value) { this.isRaw = Boolean(value); }
+    isPaused() { return this.readableFlowing === false; }
+    resume() { this.readableFlowing = true; }
+    pause() {
+      this.pauseCalls += 1;
+      this.readableFlowing = false;
+    }
+  }
+
+  const initiallyNeutral = new Input(null);
+  const neutralTui = new RemoteTui({
+    config: { relayUrl: "https://relay.example" },
+    version: "test",
+    output,
+    input: initiallyNeutral,
+    env: { NO_COLOR: "1" },
+  });
+  neutralTui.start();
+  neutralTui.stop();
+  assert.equal(initiallyNeutral.pauseCalls, 1);
+
+  const initiallyFlowing = new Input(true);
+  const flowingTui = new RemoteTui({
+    config: { relayUrl: "https://relay.example" },
+    version: "test",
+    output,
+    input: initiallyFlowing,
+    env: { NO_COLOR: "1" },
+  });
+  flowingTui.start();
+  flowingTui.stop();
+  assert.equal(initiallyFlowing.pauseCalls, 0);
+});
