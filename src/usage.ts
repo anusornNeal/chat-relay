@@ -27,7 +27,7 @@ export type UsageEvent = {
   userId: string;
   agentId?: string;
   timestamp: string;
-  // Kept optional for source compatibility with callers; usage storage no longer persists them.
+  // Kept optional for rolling compatibility; rich fields are folded into hourly aggregates, never raw history.
   tool?: string;
   toolCallId?: string;
   activityId?: string;
@@ -234,6 +234,17 @@ export class Usage extends DurableObject {
         userId: String(body.userId).slice(0, 128),
         agentId: body.agentId ? String(body.agentId).slice(0, 128) : "__relay__",
         timestamp: new Date(timestampMs).toISOString(),
+        ...(body.tool ? { tool: String(body.tool).slice(0, 128) } : {}),
+        durationMs: Number.isFinite(Number(body.durationMs))
+          ? Math.min(120_000, Math.max(0, Math.round(Number(body.durationMs))))
+          : 0,
+        ok: body.ok !== false,
+        ...(body.errorClass ? { errorClass: String(body.errorClass).slice(0, 80) } : {}),
+        ...(body.errorSource ? { errorSource: String(body.errorSource).slice(0, 80) } : {}),
+        ...(body.errorCode ? { errorCode: String(body.errorCode).slice(0, 80) } : {}),
+        ...(body.failureStage ? { failureStage: String(body.failureStage).slice(0, 80) } : {}),
+        ...(Number.isFinite(Number(body.requestBytes)) ? { requestBytes: Math.max(0, Math.round(Number(body.requestBytes))) } : {}),
+        ...(Number.isFinite(Number(body.responseBytes)) ? { responseBytes: Math.max(0, Math.round(Number(body.responseBytes))) } : {}),
       };
 
       await this.aggregates.record(event);
@@ -263,7 +274,8 @@ export class Usage extends DurableObject {
 
       const userId = url.searchParams.get("userId");
       const agentId = url.searchParams.get("agentId");
-      return Response.json(await this.aggregates.window(fromMs, toMs, { userId, agentId }));
+      const includeDetails = url.searchParams.get("details") === "1";
+      return Response.json(await this.aggregates.window(fromMs, toMs, { userId, agentId }, includeDetails));
     }
 
     return Response.json({ error: "not_found" }, { status: 404 });

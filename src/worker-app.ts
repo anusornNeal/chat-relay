@@ -156,7 +156,7 @@ async function activityContextForRequest(request: Request): Promise<ToolActivity
   };
 }
 
-async function recordUsage(env: Env, event: Pick<UsageEvent, "userId" | "agentId" | "timestamp">): Promise<void> {
+async function recordUsage(env: Env, event: UsageEvent): Promise<void> {
   const budget = usageRecordBudget.consume(env.USAGE_RECORD_DAILY_BUDGET);
   if (!budget.allowed) return;
   try {
@@ -243,10 +243,11 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
 async function instrumentTool<T>(
   env: Env,
   user: AuthUser,
-  _tool: string,
+  tool: string,
   args: unknown,
   run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming }>,
 ): Promise<T> {
+  const startedAtMs = Date.now();
   const requestedAgentId = typeof args === "object" && args !== null && typeof (args as any).agentId === "string"
     ? String((args as any).agentId).slice(0, 128)
     : undefined;
@@ -259,6 +260,12 @@ async function instrumentTool<T>(
       userId: user.id,
       ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
       timestamp: new Date().toISOString(),
+      tool,
+      durationMs: Date.now() - startedAtMs,
+      ok: false,
+      errorClass: cause instanceof Error ? cause.name.slice(0, 80) : "tool_exception",
+      errorSource: "worker",
+      errorCode: "tool_exception",
     });
     throw cause;
   } finally {
@@ -267,6 +274,19 @@ async function instrumentTool<T>(
         userId: user.id,
         ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
         timestamp: new Date().toISOString(),
+        tool,
+        durationMs: Date.now() - startedAtMs,
+        ok: outcome.ok,
+        ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
+        ...(outcome.errorSource ? { errorSource: outcome.errorSource } : {}),
+        ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+        ...(outcome.statusCode !== undefined ? { statusCode: outcome.statusCode } : {}),
+        ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}),
+        ...(outcome.timing?.workerOverheadMs !== undefined ? { workerOverheadMs: outcome.timing.workerOverheadMs } : {}),
+        ...(outcome.timing?.relayRoundTripMs !== undefined ? { relayRoundTripMs: outcome.timing.relayRoundTripMs } : {}),
+        ...(outcome.timing?.transportMs !== undefined ? { transportMs: outcome.timing.transportMs } : {}),
+        ...(outcome.timing?.agentQueueWaitMs !== undefined ? { agentQueueWaitMs: outcome.timing.agentQueueWaitMs } : {}),
+        ...(outcome.timing?.agentHandlerMs !== undefined ? { agentHandlerMs: outcome.timing.agentHandlerMs } : {}),
       });
     }
   }

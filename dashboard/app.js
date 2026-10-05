@@ -26,6 +26,8 @@ function dashboardAvailable() { return !document.hidden && navigator.onLine !== 
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtNum = (v) => new Intl.NumberFormat("en-US").format(Number(v || 0));
+const fmtMs = (v) => v === null || v === undefined ? "\u2014" : Number(v || 0) >= 1000 ? (Number(v) / 1000).toFixed(1) + "s" : Math.round(Number(v || 0)) + " ms";
+const fmtPct = (v) => v === null || v === undefined ? "\u2014" : ((Number(v || 0)) * 100).toFixed(1) + "%";
 const bkkTime = (iso) => new Intl.DateTimeFormat("en-GB", {
   timeZone: BKK_TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
 }).format(new Date(iso));
@@ -60,6 +62,26 @@ const ICONS = {
 function icon(name, cls = "") {
   return '<svg class="icon ' + cls + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' + (ICONS[name] || ICONS.info) + "</svg>";
 }
+
+
+const humanTool = (tool) => ({
+  terminal_exec: "One-shot command",
+  terminal_start: "Command session",
+  terminal_start_shell: "Interactive shell",
+  terminal_batch_start: "Terminal batch",
+  terminal_read: "Session output",
+  terminal_write: "Session input",
+  terminal_kill: "End session",
+  read_file: "Read source file",
+  read_multiple_files: "Read source files",
+  list_directory: "List directory",
+  start_search: "Search files",
+  write_file: "Write file",
+  edit_block: "Edit file",
+  screenshot: "Capture desktop",
+  keyboard_input: "Keyboard input",
+  mouse_click: "Mouse input",
+}[tool] || String(tool || "").replaceAll("_", " "));
 
 function liveNodeKey(node) {
   if (!(node instanceof Element)) return "";
@@ -262,7 +284,9 @@ function setLiveState(state) {
 function isAdmin() { return currentUser?.admin === true; }
 
 function navItems() {
-  return [["overview", isAdmin() ? "Usage" : "My usage", "overview"]];
+  return isAdmin()
+    ? [["overview", "Overview", "overview"], ["usage", "Usage", "activity"]]
+    : [["overview", "My Overview", "overview"], ["usage", "My usage", "activity"]];
 }
 function renderNav() {
   $("nav").innerHTML = navItems().map(([id, label, glyph]) =>
@@ -296,6 +320,7 @@ async function loadActive({ patch = false } = {}) {
   setNotice("");
   try {
     if (activeView === "overview") await loadOverview({ patch });
+    else if (activeView === "usage") await loadUsage({ patch });
     clearDataRetry();
     touchFreshness();
     return true;
@@ -445,18 +470,116 @@ function startLiveChannel() {
   setLiveState("connecting");
   connectLiveChannel();
 }
+function metricCard(label, value, meta = "", tone = "") {
+  return '<div class="metric ' + esc(tone) + '"><div class="metric-label">' + esc(label) + '</div>' +
+    '<div class="metric-value">' + esc(value) + '</div><div class="metric-meta">' + esc(meta) + "</div></div>";
+}
 function periodChips(period) {
-  const selected = period?.range || dashboardRange;
-  return '<div class="period-tabs" role="group" aria-label="Usage period">' +
-    [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]].map(([value, label]) =>
-      '<button type="button" class="period-tab ' + (selected === value ? "active" : "") + '" data-overview-range="' + value + '">' + esc(label) + "</button>"
-    ).join("") + "</div>";
+  const current = period?.range || dashboardRange || "today";
+  const ranges = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]];
+  return '<div class="period-chips">' + ranges.map(([value, label]) =>
+    '<button type="button" class="period-chip' + (current === value ? ' primary' : '') + '" data-overview-range="' + value + '">' +
+      (current === value ? icon("clock") : "") + esc(label) + "</button>"
+  ).join("") + "</div>";
 }
 function periodDisplayLabel(range = dashboardRange) {
-  return range === "7d" ? "7 days" : range === "30d" ? "30 days" : "Today";
+  return range === "30d" ? "Last 30 days" : range === "7d" ? "Last 7 days" : "Today";
+}
+function chartMarkup(buckets = [], period = dashboardPeriod) {
+  const byDay = period?.range === "7d" || period?.range === "30d";
+  const max = Math.max(1, ...buckets.map((bucket) => Number(bucket.calls || 0)));
+  const yTicks = [1, .75, .5, .25, 0].map((ratio) => Math.round(max * ratio));
+  const yLabels = '<div class="chart-y-axis" aria-hidden="true">' +
+    yTicks.map((value) => '<span>' + fmtNum(value) + "</span>").join("") +
+    "</div>";
+  const bars = buckets.map((bucket, index) => {
+    const calls = Number(bucket.calls || 0);
+    const errors = Number(bucket.operationalErrors ?? bucket.errors ?? 0);
+    const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
+    const start = bkkHourMinute(bucket.from);
+    const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
+    const label = byDay ? bkkDayLabel(bucket.from) : start + "\u2013" + end;
+    const current = index === buckets.length - 1 ? " current" : "";
+    return '<div class="chart-bar' + current + '" style="--bar-height:' + height + '%" tabindex="0" role="img"' +
+      ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
+      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations \u00b7 ' + fmtNum(errors) + ' operational errors</span><small>Aggregate usage</small></span>' +
+      '<span class="bar-fill"></span>' +
+      "</div>";
+  }).join("");
+  const labelEvery = byDay ? (buckets.length > 14 ? 5 : 1) : 3;
+  const xLabels = buckets.map((bucket, index) => {
+    const show = index % labelEvery === 0 || index === buckets.length - 1;
+    const label = byDay ? bkkDayLabel(bucket.from) : bkkHourMinute(bucket.from);
+    return '<span class="' + (show ? "" : "muted") + '">' + (show ? esc(label) : "") + "</span>";
+  }).join("");
+  return '<div class="chart-frame">' + yLabels +
+    '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div><div class="chart-bars">' + bars +
+    '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
 }
 
 async function loadOverview({ patch = false } = {}) {
+  const requestedPeriodLabel = periodDisplayLabel(dashboardRange);
+  setHeader(
+    isAdmin() ? "System overview" : "My overview",
+    isAdmin() ? requestedPeriodLabel + " across Chat Relay" : requestedPeriodLabel + " \u00b7 your activity",
+  );
+  const data = await api("/admin/api/summary?range=" + encodeURIComponent(dashboardRange));
+  dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
+  dashboardRange = dashboardPeriod.range || dashboardRange;
+  const periodLabel = periodDisplayLabel(dashboardRange);
+  const chartUnit = dashboardRange === "today" ? "hour" : "day";
+  const m = data.usage || {};
+  const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : periodLabel.toLowerCase();
+  const cards = [
+    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
+    metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
+    metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), m.p95Approximate ? "p95 is approximate" : exactMeta),
+    metricCard(
+      isAdmin() ? "Operational error rate" : "My operational error rate",
+      fmtPct(m.operationalErrorRate ?? m.errorRate),
+      fmtNum(m.operationalErrors ?? m.errors) + " infrastructure failures",
+      Number(m.operationalErrors ?? m.errors ?? 0) ? "metric-alert" : "",
+    ),
+  ];
+  if (isAdmin()) {
+    cards.push(metricCard("Online agents", (data.agents?.online || 0) + " / " + (data.agents?.total || 0), "connected agents"));
+    cards.push(metricCard("Active users", fmtNum(data.activeUsers ?? data.users?.enabled), "enabled users"));
+  }
+  const top = Array.isArray(data.topTools) ? data.topTools : [];
+  const boundedNotice = data.bounded
+    ? '<div class="data-warning">' + icon("alert") + '<span>Some detailed history is unavailable. Counts cover retained history.</span></div>'
+    : "";
+  const liveMarkup =
+    '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +
+      '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
+    boundedNotice +
+    '<div class="metric-grid">' + cards.join("") + "</div>" +
+    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by ' + chartUnit + '</h2></div><span class="panel-meta">Aggregate invocations</span></div>' +
+      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>" +
+    '<section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Breakdown</div><h2>Top tools</h2></div></div><div class="list top-tools">' +
+      (top.length ? top.map((item, index) =>
+        '<div class="list-row"><div class="tool-rank">' + (index + 1) + '</div><div class="list-copy"><div class="primary-text">' + esc(item.tool) +
+        '</div><div class="secondary-text">' + esc(humanTool(item.tool)) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + "</strong></div>"
+      ).join("") : '<div class="empty-inline">No tool invocations in this period.</div>') +
+    "</div></section></div>" +
+    (isAdmin() ? '<section class="panel account-usage-panel"><div class="panel-heading"><div><div class="panel-kicker">Accounts</div><h2>Tool invocations by account</h2></div><span class="panel-meta">' + esc(periodLabel) + '</span></div><div class="list account-usage">' +
+      ((data.accountUsage || []).length ? data.accountUsage.map((item) =>
+        '<div class="list-row"><div class="list-copy"><div class="primary-text">' + esc(item.name || item.userId) + '</div><div class="secondary-text">' + esc(item.login || item.userId) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + '</strong></div>'
+      ).join("") : '<div class="empty-inline">No account usage in this period.</div>') +
+    "</div></section>" : "");
+  renderContent(liveMarkup, patch);
+  document.querySelectorAll("[data-overview-range]").forEach((button) => {
+    button.onclick = async () => {
+      const nextRange = button.dataset.overviewRange || "today";
+      if (nextRange === dashboardRange) return;
+      dashboardRange = nextRange;
+      dashboardPeriod = null;
+      await loadOverview();
+    };
+  });
+}
+
+async function loadUsage({ patch = false } = {}) {
   setHeader(isAdmin() ? "Usage" : "My usage", "Tool calls by account and agent");
   const data = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange));
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
@@ -493,7 +616,7 @@ async function loadOverview({ patch = false } = {}) {
       if (nextRange === dashboardRange) return;
       dashboardRange = nextRange;
       dashboardPeriod = null;
-      await loadOverview({ patch: true });
+      await loadUsage({ patch: true });
     };
   });
 }

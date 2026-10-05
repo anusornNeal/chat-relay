@@ -67,6 +67,24 @@ function addRow(target: Map<string, UsageCountRow>, userId: string, agentId: str
   target.set(key, current);
 }
 
+function operationalFailure(event: UsageEvent) {
+  if (event.ok !== false) return false;
+  const stage = String(event.failureStage || "").toLowerCase();
+  const source = String(event.errorSource || "").toLowerCase();
+  const code = String(event.errorCode || "").toLowerCase();
+  if (["timeout", "relay", "worker"].includes(stage) || ["relay", "worker"].includes(source)) return true;
+  return /agent_(timeout|offline|stale|unavailable)/.test(code);
+}
+
+function durationBin(durationMs: number) {
+  if (durationMs <= 0) return 0;
+  return Math.min(400, Math.ceil(Math.log(durationMs) / Math.log(1.1)) + 1);
+}
+
+function jsonPathForKey(key: string) {
+  return '$."' + key.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
 export class UsageAggregates {
   private readonly sql: SqlStorage | null;
 
@@ -81,6 +99,24 @@ export class UsageAggregates {
           calls INTEGER NOT NULL
         ) WITHOUT ROWID
       `);
+      const columns = new Set(
+        this.sql.exec<{ name: string }>(`PRAGMA table_info(${TABLE})`).toArray().map((row) => String(row.name)),
+      );
+      const additions = [
+        ["detail_calls", "INTEGER NOT NULL DEFAULT 0"],
+        ["errors", "INTEGER NOT NULL DEFAULT 0"],
+        ["operational_errors", "INTEGER NOT NULL DEFAULT 0"],
+        ["duration_ms", "INTEGER NOT NULL DEFAULT 0"],
+        ["request_bytes", "INTEGER NOT NULL DEFAULT 0"],
+        ["response_bytes", "INTEGER NOT NULL DEFAULT 0"],
+        ["min_duration_ms", "INTEGER NOT NULL DEFAULT 0"],
+        ["max_duration_ms", "INTEGER NOT NULL DEFAULT 0"],
+        ["histogram_json", "TEXT NOT NULL DEFAULT '{}'"],
+        ["tools_json", "TEXT NOT NULL DEFAULT '{}'"],
+      ] as const;
+      for (const [name, definition] of additions) {
+        if (!columns.has(name)) this.sql.exec(`ALTER TABLE ${TABLE} ADD COLUMN ${name} ${definition}`);
+      }
     }
   }
 
@@ -96,14 +132,75 @@ export class UsageAggregates {
 
     if (this.sql) {
       const bucketKey = `${String(hourMs).padStart(13, "0")}|${encodeURIComponent(userId)}|${encodeURIComponent(agentId)}`;
+      if (!event.tool) {
+        this.sql.exec(
+          `INSERT INTO ${TABLE} (bucket_key, user_id, agent_id, calls)
+           VALUES (?, ?, ?, 1)
+           ON CONFLICT(bucket_key)
+           DO UPDATE SET calls = calls + 1`,
+          bucketKey,
+          userId,
+          agentId,
+        );
+        return;
+      }
+
+      const duration = Math.min(120_000, Math.max(0, Math.round(Number(event.durationMs) || 0)));
+      const errors = event.ok === false ? 1 : 0;
+      const operationalErrors = operationalFailure(event) ? 1 : 0;
+      const requestBytes = Math.max(0, Math.round(Number(event.requestBytes) || 0));
+      const responseBytes = Math.max(0, Math.round(Number(event.responseBytes) || 0));
+      const binKey = "b" + durationBin(duration);
+      const toolKey = String(event.tool).slice(0, 128);
+      const histogramPath = jsonPathForKey(binKey);
+      const toolPath = jsonPathForKey(toolKey);
       this.sql.exec(
-        `INSERT INTO ${TABLE} (bucket_key, user_id, agent_id, calls)
-         VALUES (?, ?, ?, 1)
+        `INSERT INTO ${TABLE} (
+           bucket_key, user_id, agent_id, calls, detail_calls, errors, operational_errors,
+           duration_ms, request_bytes, response_bytes, min_duration_ms, max_duration_ms,
+           histogram_json, tools_json
+         )
+         VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(bucket_key)
-         DO UPDATE SET calls = calls + 1`,
+         DO UPDATE SET
+           calls = calls + 1,
+           detail_calls = detail_calls + 1,
+           errors = errors + excluded.errors,
+           operational_errors = operational_errors + excluded.operational_errors,
+           duration_ms = duration_ms + excluded.duration_ms,
+           request_bytes = request_bytes + excluded.request_bytes,
+           response_bytes = response_bytes + excluded.response_bytes,
+           min_duration_ms = CASE
+             WHEN detail_calls = 0 THEN excluded.min_duration_ms
+             ELSE MIN(min_duration_ms, excluded.min_duration_ms)
+           END,
+           max_duration_ms = MAX(max_duration_ms, excluded.max_duration_ms),
+           histogram_json = json_set(
+             COALESCE(histogram_json, '{}'),
+             ?,
+             COALESCE(json_extract(histogram_json, ?), 0) + 1
+           ),
+           tools_json = json_set(
+             COALESCE(tools_json, '{}'),
+             ?,
+             COALESCE(json_extract(tools_json, ?), 0) + 1
+           )`,
         bucketKey,
         userId,
         agentId,
+        errors,
+        operationalErrors,
+        duration,
+        requestBytes,
+        responseBytes,
+        duration,
+        duration,
+        JSON.stringify({ [binKey]: 1 }),
+        JSON.stringify({ [toolKey]: 1 }),
+        histogramPath,
+        histogramPath,
+        toolPath,
+        toolPath,
       );
       return;
     }
@@ -165,6 +262,144 @@ export class UsageAggregates {
       });
     }
     return { rows: data, firstHour };
+  }
+
+  private sqlDetails(fromMs: number, toMs: number, filters: UsageFilters) {
+    if (!this.sql) return null;
+
+    const startKey = `${String(hourStart(fromMs)).padStart(13, "0")}|`;
+    const endKey = `${String(hourStart(toMs) + HOUR).padStart(13, "0")}|`;
+    const where = ["bucket_key >= ?", "bucket_key < ?"];
+    const bindings: SqlValue[] = [startKey, endKey];
+    if (filters.userId) {
+      where.push("user_id = ?");
+      bindings.push(filters.userId);
+    }
+    if (filters.agentId) {
+      where.push("agent_id = ?");
+      bindings.push(filters.agentId);
+    }
+    const predicate = where.join(" AND ");
+
+    const metric = this.sql.exec<{
+      calls: number | null;
+      detail_calls: number | null;
+      errors: number | null;
+      operational_errors: number | null;
+      duration_ms: number | null;
+      request_bytes: number | null;
+      response_bytes: number | null;
+      min_duration_ms: number | null;
+      max_duration_ms: number | null;
+    }>(
+      `SELECT
+         SUM(calls) AS calls,
+         SUM(detail_calls) AS detail_calls,
+         SUM(errors) AS errors,
+         SUM(operational_errors) AS operational_errors,
+         SUM(duration_ms) AS duration_ms,
+         SUM(request_bytes) AS request_bytes,
+         SUM(response_bytes) AS response_bytes,
+         MIN(CASE WHEN detail_calls > 0 THEN min_duration_ms END) AS min_duration_ms,
+         MAX(CASE WHEN detail_calls > 0 THEN max_duration_ms END) AS max_duration_ms
+       FROM ${TABLE}
+       WHERE ${predicate}`,
+      ...bindings,
+    ).toArray()[0];
+
+    const histogram = this.sql.exec<{ bin: string; count: number | null }>(
+      `SELECT json_each.key AS bin, SUM(CAST(json_each.value AS INTEGER)) AS count
+       FROM ${TABLE}, json_each(histogram_json)
+       WHERE ${predicate}
+       GROUP BY json_each.key`,
+      ...bindings,
+    ).toArray();
+
+    const detailedCalls = Number(metric?.detail_calls || 0);
+    let p95DurationMs: number | null = null;
+    if (detailedCalls > 0) {
+      let rank = Math.ceil(detailedCalls * 0.95);
+      const bins = histogram
+        .map((row) => ({
+          bin: Math.max(0, Number(String(row.bin || "").replace(/^b/, "")) || 0),
+          count: Number(row.count || 0),
+        }))
+        .sort((a, b) => a.bin - b.bin);
+      for (const item of bins) {
+        rank -= item.count;
+        if (rank <= 0) {
+          const estimate = item.bin === 0 ? 0 : Math.ceil(1.1 ** (item.bin - 1));
+          p95DurationMs = Math.min(Number(metric?.max_duration_ms || estimate), estimate);
+          break;
+        }
+      }
+    }
+
+    const topTools = this.sql.exec<{ tool: string; calls: number | null }>(
+      `SELECT json_each.key AS tool, SUM(CAST(json_each.value AS INTEGER)) AS calls
+       FROM ${TABLE}, json_each(tools_json)
+       WHERE ${predicate}
+       GROUP BY json_each.key
+       ORDER BY calls DESC, tool ASC
+       LIMIT 10`,
+      ...bindings,
+    ).toArray().map((row) => ({
+      tool: String(row.tool || ""),
+      calls: Number(row.calls || 0),
+    }));
+
+    const byDay = toMs - fromMs > 36 * HOUR;
+    const bucketSize = byDay ? DAY : HOUR;
+    const bucketExpr = byDay
+      ? `(CAST((CAST(substr(bucket_key, 1, 13) AS INTEGER) + ${BKK}) / ${DAY} AS INTEGER) * ${DAY} - ${BKK})`
+      : "CAST(substr(bucket_key, 1, 13) AS INTEGER)";
+    const bucketRows = this.sql.exec<{
+      start_ms: number;
+      calls: number | null;
+      errors: number | null;
+      operational_errors: number | null;
+    }>(
+      `SELECT
+         ${bucketExpr} AS start_ms,
+         SUM(calls) AS calls,
+         SUM(errors) AS errors,
+         SUM(operational_errors) AS operational_errors
+       FROM ${TABLE}
+       WHERE ${predicate}
+       GROUP BY start_ms
+       ORDER BY start_ms`,
+      ...bindings,
+    ).toArray();
+
+    return {
+      metric: {
+        calls: Number(metric?.calls || 0),
+        errors: Number(metric?.errors || 0),
+        operationalErrors: Number(metric?.operational_errors || 0),
+        durationMs: Number(metric?.duration_ms || 0),
+        requestBytes: Number(metric?.request_bytes || 0),
+        responseBytes: Number(metric?.response_bytes || 0),
+        minDurationMs: detailedCalls ? Number(metric?.min_duration_ms || 0) : null,
+        maxDurationMs: detailedCalls ? Number(metric?.max_duration_ms || 0) : null,
+        avgDurationMs: detailedCalls ? Number(metric?.duration_ms || 0) / detailedCalls : null,
+        errorRate: detailedCalls ? Number(metric?.errors || 0) / detailedCalls : null,
+        operationalErrorRate: detailedCalls ? Number(metric?.operational_errors || 0) / detailedCalls : null,
+        p95DurationMs,
+        p95Approximate: detailedCalls > 0,
+      },
+      buckets: bucketRows.map((row) => {
+        const start = Number(row.start_ms);
+        return {
+          from: new Date(start).toISOString(),
+          to: new Date(start + bucketSize - 1).toISOString(),
+          calls: Number(row.calls || 0),
+          errors: Number(row.errors || 0),
+          operationalErrors: Number(row.operational_errors || 0),
+        };
+      }),
+      topTools,
+      detailSampleSize: detailedCalls,
+    };
   }
 
   private async fallbackRows(fromMs: number, toMs: number, filters: UsageFilters) {
@@ -247,7 +482,7 @@ export class UsageAggregates {
     fromMs: number,
     toMs: number,
     filters: UsageFilters = {},
-    _includeBuckets = false,
+    includeDetails = false,
   ) {
     const sql = this.sqlRows(fromMs, toMs, filters);
     const currentRows = this.sql ? sql.rows : await this.fallbackRows(fromMs, toMs, filters);
@@ -270,12 +505,21 @@ export class UsageAggregates {
       .map(([userId, userCalls]) => ({ userId, calls: userCalls }))
       .sort((a, b) => b.calls - a.calls || a.userId.localeCompare(b.userId));
 
+    const details = includeDetails ? this.sqlDetails(fromMs, toMs, filters) : null;
+    const detailedSampleSize = Number(details?.detailSampleSize || 0);
     return {
-      metric: calls ? { calls } : null,
+      metric: calls
+        ? details
+          ? { ...details.metric, calls }
+          : { calls }
+        : null,
       users,
       agents,
+      buckets: details?.buckets ?? [],
+      topTools: details?.topTools ?? [],
+      detailSampleSize: detailedSampleSize,
       sampleSize: calls,
-      bounded: false,
+      bounded: Boolean(includeDetails && calls > 0 && detailedSampleSize < calls),
       coverage: legacy.length ? "legacy+sql" : "sql",
     };
   }

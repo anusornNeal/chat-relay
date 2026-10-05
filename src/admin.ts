@@ -229,9 +229,15 @@ function dashboardPeriod(range: DashboardRange = "today", nowMs = Date.now()) {
   };
 }
 
-async function usageWindow(env: AdminEnv, period: ReturnType<typeof dashboardPeriod>, userId?: string) {
+async function usageWindow(
+  env: AdminEnv,
+  period: ReturnType<typeof dashboardPeriod>,
+  userId?: string,
+  includeDetails = false,
+) {
   const query = new URLSearchParams({ from: period.from, to: period.to });
   if (userId) query.set("userId", userId);
+  if (includeDetails) query.set("details", "1");
   const response = await usageStub(env).fetch("https://usage.internal/window?" + query);
   if (!response.ok) throw new Error("usage_window_failed");
   return response.json<any>();
@@ -412,7 +418,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   const sessionUser = browserAuth?.ok ? browserAuth.data.user : null;
   const adminAuthorized = operatorAuthorized || sessionUser?.admin === true;
   const selfUserId = sessionUser?.id ? String(sessionUser.id) : "";
-  const selfService = request.method === "GET" && path === "/admin/api/overview";
+  const selfService = request.method === "GET" && ["/admin/api/overview", "/admin/api/summary"].includes(path);
   if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService) {
     return error(403, "admin_required");
   }
@@ -520,6 +526,89 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       status: response.status,
     });
     return Response.json(response.ok ? { ...data, source: "admin" } : data, { status: response.status });
+  }
+
+  if (path === "/admin/api/summary" && request.method === "GET") {
+    const requestedRange = url.searchParams.get("range");
+    const range: DashboardRange = requestedRange === "7d" || requestedRange === "30d" ? requestedRange : "today";
+    const period = dashboardPeriod(range);
+    const usage = await usageWindow(env, period, adminAuthorized ? undefined : selfUserId, true);
+
+    if (!adminAuthorized) {
+      const state = await registryState(env);
+      const allowedIds = new Set(
+        (state.grants ?? [])
+          .filter((grant: any) => grant.userId === selfUserId)
+          .map((grant: any) => grant.agentId),
+      );
+      for (const agent of state.agents ?? []) {
+        if (agent.ownerUserId === selfUserId) allowedIds.add(agent.id);
+      }
+      const allowedAgents = (state.agents ?? []).filter((agent: any) => allowedIds.has(agent.id));
+      const statuses = await onlineAgents(env, allowedAgents, state.users ?? [], state.grants ?? []);
+      const work = statuses.reduce((sum: number, agent: any) => {
+        const snapshot = agent.runtime?.lifecycle?.work || {};
+        return sum + Number(snapshot.activeSessions || 0) + Number(snapshot.activeBatchJobs || 0) + Number(snapshot.activeTerminalExecs || 0);
+      }, 0);
+      return Response.json({
+        role: "user",
+        user: sessionUser,
+        period,
+        usage: usage.metric ?? null,
+        buckets: usage.buckets ?? [],
+        topTools: usage.topTools ?? [],
+        accountUsage: usage.users ?? [],
+        bounded: usage.bounded === true,
+        coverage: usage.coverage,
+        sampleSize: Number(usage.sampleSize || 0),
+        detailSampleSize: Number(usage.detailSampleSize || 0),
+        activeTerminals: work,
+      });
+    }
+
+    const state = await registryState(env);
+    const statuses = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
+    const activeUsers = new Set(
+      (state.users ?? []).filter((user: any) => user.enabled && !user.deletedAt).map((user: any) => user.id),
+    );
+    const usageByUserId = new Map((usage.users ?? []).map((entry: any) => [entry.userId, entry]));
+    const accountUsage = (state.users ?? [])
+      .filter((user: any) => !user.deletedAt)
+      .map((user: any) => {
+        const summary: any = usageByUserId.get(user.id);
+        return {
+          userId: user.id,
+          calls: Number(summary?.calls || 0),
+          errors: 0,
+          operationalErrors: 0,
+          name: user.name || user.login || user.id,
+          login: user.login || "",
+          enabled: user.enabled === true,
+        };
+      })
+      .sort((a: any, b: any) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
+
+    const activeTerminals = statuses.reduce((sum: number, agent: any) => {
+      const work = agent.runtime?.lifecycle?.work || {};
+      return sum + Number(work.activeSessions || 0) + Number(work.activeBatchJobs || 0) + Number(work.activeTerminalExecs || 0);
+    }, 0);
+    return Response.json({
+      role: "admin",
+      period,
+      users: { total: (state.users ?? []).length, enabled: activeUsers.size },
+      agents: { total: statuses.length, online: statuses.filter((agent: any) => agent.online).length },
+      grants: { total: (state.grants ?? []).length },
+      usage: usage.metric ?? null,
+      buckets: usage.buckets ?? [],
+      topTools: usage.topTools ?? [],
+      accountUsage,
+      bounded: usage.bounded === true,
+      coverage: usage.coverage,
+      sampleSize: Number(usage.sampleSize || 0),
+      detailSampleSize: Number(usage.detailSampleSize || 0),
+      activeTerminals,
+      activeUsers: activeUsers.size,
+    });
   }
 
   if (path === "/admin/api/overview" && request.method === "GET") {
