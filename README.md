@@ -4,6 +4,8 @@ Remote MCP relay that lets ChatGPT work with a local Windows or macOS machine th
 
 **Dashboard:** https://chat-relay.anusorn-hank.workers.dev/
 
+**Release status:** v1.0 stable for internal use. Windows and macOS local agents are supported; Linux desktop control is not currently implemented. Post-1.0 fixes and operational hardening are shipped as normal patch releases.
+
 ## Quick start
 
 There are two parts:
