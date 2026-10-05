@@ -644,6 +644,15 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const agents = state.agents ?? [];
     const grants = state.grants ?? [];
     const agentById = new Map(agents.map((agent: any) => [agent.id, agent]));
+    const activeAgentIds = new Set(
+      (usage.agents ?? [])
+        .filter((entry: any) => Number(entry.calls || 0) > 0 && entry.agentId && entry.agentId !== "__relay__")
+        .map((entry: any) => String(entry.agentId)),
+    );
+    const statusRows = activeAgentIds.size
+      ? await onlineAgents(env, agents.filter((agent: any) => activeAgentIds.has(agent.id)), users, grants)
+      : [];
+    const onlineByAgentId = new Map(statusRows.map((agent: any) => [agent.id, agent.online === true]));
     const usageByUserAgent = new Map(
       (usage.agents ?? []).map((entry: any) => [JSON.stringify([entry.userId, entry.agentId]), Number(entry.calls || 0)]),
     );
@@ -673,6 +682,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
           agentId,
           name: agentId === "__relay__" ? "Relay" : agent?.name || agentId,
           calls: Number(usageByUserAgent.get(JSON.stringify([user.id, agentId])) || 0),
+          online: agentId === "__relay__" ? true : onlineByAgentId.get(agentId) === true,
         };
       }).sort((a, b) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
 
