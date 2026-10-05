@@ -1,5 +1,7 @@
 import WebSocket from "ws";
 import { DesktopManager, createDesktopPlatformAdapter } from "./desktop-manager.mjs";
+import { ComputerUseController } from "./computer-use/controller.mjs";
+import { LayaComputerUseDriver } from "./computer-use/laya-driver.mjs";
 import { FileManager } from "./file-manager.mjs";
 import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
@@ -73,11 +75,16 @@ const connectionState = new AgentConnectionState({
 });
 const files = new FileManager(process.env.ALLOWED_ROOTS);
 const processes = new ProcessManager();
-const desktop = new DesktopManager({
+const directDesktop = new DesktopManager({
   enabled: desktopEnabled,
   adapter: desktopAdapter,
   controlMaxQueued: process.env.DESKTOP_CONTROL_MAX_QUEUED,
   controlQueueTimeoutMs: process.env.AGENT_QUEUE_TIMEOUT_MS,
+});
+const desktop = new ComputerUseController({
+  enabled: desktopEnabled && desktopAdapter.supported,
+  direct: directDesktop,
+  laya: new LayaComputerUseDriver(),
 });
 const recentCalls = [];
 const RECENT_TIMING_KEYS = ["queueWaitMs", "inputMs", "explicitWaitMs", "settleMs", "captureMs", "encodeMs", "workerMs", "managerMs", "totalMs", "requestedActions", "executedActions"];
@@ -182,6 +189,10 @@ async function handlePayload(payload) {
       });
     case "agent.recentCalls":
       return recentCalls.slice(-(Math.min(Math.max(Number(payload.limit) || 50, 1), 100)));
+    case "computer_use.mode.status":
+      return { ok: true, computerUse: desktop.status() };
+    case "computer_use.mode.set":
+      return desktop.setMode(payload.mode);
     case "agent.lifecycle.status":
       return { ok: true, lifecycle: lifecycle.snapshot() };
     case "agent.lifecycle.drain":
