@@ -293,3 +293,32 @@ tr:last-child td{border-bottom:0}
 .agent-usage-count{font-size:15px;font-weight:700}
 .account-agent-panel .empty-inline{padding:14px}
 @media(max-width:980px){.account-agent-grid{grid-template-columns:1fr}}
+
+
+/* masonry usage cards */
+.account-agent-grid{
+  display:block;
+  column-count:3;
+  column-gap:10px;
+  margin-top:10px;
+}
+.account-agent-panel{
+  display:inline-block;
+  width:100%;
+  margin:0 0 10px;
+  break-inside:avoid;
+  vertical-align:top;
+}
+.agent-usage-name .agent-dot{
+  width:7px;
+  height:7px;
+}
+.agent-usage-name .agent-dot.online{
+  box-shadow:0 0 0 3px rgba(47,138,91,.10);
+}
+@media(max-width:1280px){
+  .account-agent-grid{column-count:2}
+}
+@media(max-width:760px){
+  .account-agent-grid{column-count:1}
+}
