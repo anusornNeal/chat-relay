@@ -637,6 +637,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
     if (!adminAuthorized) {
       const agentUsage = (usage.agents ?? [])
+        .filter((entry: any) => Boolean(entry.agentId))
         .map((entry: any) => ({
           agentId: entry.agentId,
           name: entry.agentId,
@@ -685,7 +686,9 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     };
     for (const agent of agents) if (agent.ownerUserId && !agent.retiredAt) addAgentId(ownedAgentIdsByUser, agent.ownerUserId, agent.id);
     for (const grant of grants) addAgentId(grantedAgentIdsByUser, grant.userId, grant.agentId);
-    for (const entry of usage.agents ?? []) addAgentId(usageAgentIdsByUser, entry.userId, entry.agentId);
+    for (const entry of usage.agents ?? []) {
+      if (entry.agentId) addAgentId(usageAgentIdsByUser, entry.userId, entry.agentId);
+    }
 
     const accounts = users.map((user: any) => {
       const ids = new Set<string>([

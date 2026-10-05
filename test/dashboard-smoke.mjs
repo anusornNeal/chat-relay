@@ -59,10 +59,10 @@ const onOtherUserMessage=(raw)=>{try{const data=JSON.parse(String(raw));if(data?
 userWsB.on("message",onOtherUserMessage);
 const userAggregate=nextJson(userWsA,(x)=>x.type==="invalidate"&&x.topics?.includes("overview"));
 const adminAggregate=nextJson(ws1,(x)=>x.type==="invalidate"&&x.topics?.includes("overview"));
-const scopedRpc=await req("/mcp?key="+encodeURIComponent(scopeA.token),{method:"POST",headers:{"content-type":"application/json",accept:"application/json, text/event-stream","mcp-session-id":"dashboard-ws-scope"},body:JSON.stringify({jsonrpc:"2.0",id:991,method:"tools/call",params:{name:"whoami",arguments:{secret:"PRIVATE_SCOPE_ARG"}}})});
+const scopedRpc=await req("/mcp?key="+encodeURIComponent(scopeA.token),{method:"POST",headers:{"content-type":"application/json",accept:"application/json, text/event-stream","mcp-session-id":"dashboard-ws-scope"},body:JSON.stringify({jsonrpc:"2.0",id:991,method:"tools/call",params:{name:"ping_agent",arguments:{agentId:"default",secret:"PRIVATE_SCOPE_ARG"}}})});
 if(!scopedRpc.response.ok)throw Error("scoped tool call failed");
 const summaryAfterTool=await admin("/admin/api/summary");
-if(!summaryAfterTool.response.ok||!summaryAfterTool.data.topTools?.some((item)=>item.tool==="whoami"&&item.calls>=1)||!summaryAfterTool.data.buckets?.length||summaryAfterTool.data.detailSampleSize<1)throw Error("dashboard rich overview aggregates missing");
+if(!summaryAfterTool.response.ok||!summaryAfterTool.data.topTools?.some((item)=>item.tool==="ping_agent"&&item.calls>=1)||!summaryAfterTool.data.buckets?.length||summaryAfterTool.data.detailSampleSize<1)throw Error("dashboard rich overview aggregates missing");
 await Promise.all([userAggregate,adminAggregate]);
 await new Promise((resolve)=>setTimeout(resolve,250));
 userWsB.off("message",onOtherUserMessage);

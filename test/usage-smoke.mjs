@@ -181,13 +181,13 @@ const grant = await admin("/admin/grants", "POST", {
   scopes: ["read"],
 });
 if (!grant.response.ok) throw new Error(`grant failed: ${grant.text}`);
-await tool(created.data.token, 5, "whoami");
+await tool(created.data.token, 5, "read_file", { agentId: usageAgentId, path: "usage-reader.txt" });
 
 const readerCookie = await browserLogin(created.data.user.id, "reader");
 const initialOverview = await admin("/admin/api/overview");
 if (!initialOverview.response.ok) throw new Error(`overview query failed: ${initialOverview.text}`);
 const ownerBefore = (initialOverview.data.accounts || []).find((item) => item.userId === "owner");
-if (!ownerBefore || ownerBefore.calls < 6) throw new Error(`owner usage attribution failed: ${initialOverview.text}`);
+if (!ownerBefore || ownerBefore.calls < 5) throw new Error(`owner usage attribution failed: ${initialOverview.text}`);
 const usageAgentBefore = (ownerBefore.agents || []).find((item) => item.agentId === usageAgentId);
 if (!usageAgentBefore || usageAgentBefore.calls < 4) throw new Error(`agent usage attribution failed: ${initialOverview.text}`);
 const missingAgentBefore = (ownerBefore.agents || []).find((item) => item.agentId === "missing-agent");
@@ -207,7 +207,7 @@ await Promise.all([
 ]);
 const aggregateAfterConcurrent = await admin("/admin/api/overview");
 const ownerAggregate = (aggregateAfterConcurrent.data.accounts || []).find((item) => item.userId === "owner");
-if (!aggregateAfterConcurrent.response.ok || !ownerAggregate || ownerAggregate.calls < 1) throw new Error("owner aggregate usage missing");
+if (!aggregateAfterConcurrent.response.ok || !ownerAggregate || ownerAggregate.calls !== ownerBefore.calls) throw new Error("relay-local whoami calls must not change dashboard usage");
 const removedErrors = await admin("/admin/api/errors?limit=100");
 if (removedErrors.response.status !== 404) throw new Error("removed Errors API is still exposed");
 const removedHistory = await admin("/admin/api/tool-calls?state=history&limit=2");
@@ -232,7 +232,7 @@ const bulkCalls = 1005;
 for (let offset = 0; offset < bulkCalls; offset += 25) {
   const count = Math.min(25, bulkCalls - offset);
   await Promise.all(Array.from({ length: count }, (_, index) =>
-    tool(ownerToken, 1000 + offset + index, "whoami", {}, false, "usage-bulk-session")
+    tool(ownerToken, 1000 + offset + index, "ping_agent", { agentId: usageAgentId }, false, "usage-bulk-session")
   ));
 }
 const todayOverview = await admin("/admin/api/overview");

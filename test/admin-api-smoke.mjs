@@ -88,7 +88,7 @@ const revoked = await admin("/admin/api/sessions/revoke", "POST", { userId: crea
 if (!revoked.response.ok || typeof revoked.data.revoked !== "number") throw new Error(`session revoke failed: ${revoked.text}`);
 
 await rpc(ownerToken, 1, "whoami");
-await rpc(createdUsers[0].token, 2, "whoami");
+await rpc(createdUsers[0].token, 2, "ping_agent", { agentId: agent.data.agent.id });
 const removedCalls = await admin("/admin/api/tool-calls");
 if (removedCalls.response.status !== 404) throw new Error("removed tool-call history API is still exposed");
 const aggregateOverview = await admin("/admin/api/overview");
