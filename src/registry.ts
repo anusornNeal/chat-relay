@@ -1215,16 +1215,31 @@ export class Registry extends DurableObject {
       if (isExpired(replay.expiresAt)) await this.ctx.storage.delete(replayKey);
       else if (replay.clientId === clientId && replay.resource === resource) {
         const user = await this.ctx.storage.get<UserRecord>(key.user(replay.userId));
-        return user?.enabled ? json(replay.response) : json({ error: "invalid_grant" }, 400);
-      } else return json({ error: "invalid_grant" }, 400);
+        return user?.enabled
+          ? json(replay.response)
+          : json({ error: "invalid_grant", reason: "user_disabled" }, 400);
+      } else {
+        return json({ error: "invalid_grant", reason: "refresh_replay_mismatch" }, 400);
+      }
     }
     const record = refreshTokenHash ? await this.ctx.storage.get<OAuthTokenRecord>(key.oauthRefresh(refreshTokenHash)) : undefined;
-    if (!record || isExpired(record.expiresAt) || record.clientId !== clientId || record.resource !== resource) {
-      if (record && isExpired(record.expiresAt)) await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
-      return json({ error: "invalid_grant" }, 400);
+    if (!record) {
+      return json({ error: "invalid_grant", reason: "refresh_token_not_found" }, 400);
+    }
+    if (isExpired(record.expiresAt)) {
+      await this.ctx.storage.delete(key.oauthRefresh(refreshTokenHash));
+      return json({ error: "invalid_grant", reason: "refresh_token_expired" }, 400);
+    }
+    if (record.clientId !== clientId) {
+      return json({ error: "invalid_grant", reason: "refresh_client_mismatch" }, 400);
+    }
+    if (record.resource !== resource) {
+      return json({ error: "invalid_grant", reason: "refresh_resource_mismatch" }, 400);
     }
     const user = await this.ctx.storage.get<UserRecord>(key.user(record.userId));
-    if (!user?.enabled) return json({ error: "invalid_grant" }, 400);
+    if (!user?.enabled) {
+      return json({ error: "invalid_grant", reason: "user_disabled" }, 400);
+    }
 
     // Keep the refresh token stable. Connector clients can retry or refresh concurrently,
     // so rotating it here can strand a client on an older token and force re-authorization.
@@ -1426,8 +1441,12 @@ export class Registry extends DurableObject {
 
   private async authUser(body: any): Promise<Response> {
     const tokenHash = String(body?.tokenHash ?? "");
-    if (!tokenHash) return json({ error: "unauthorized" }, 401);
+    const resource = String(body?.resource ?? "");
+    if (!tokenHash) {
+      return json({ error: "unauthorized", reason: "token_missing" }, 401);
+    }
 
+    let expiredSession = false;
     let userId = await this.ctx.storage.get<string>(key.userToken(tokenHash));
     if (!userId) {
       const session = await this.ctx.storage.get<UserSessionRecord>(
@@ -1436,28 +1455,43 @@ export class Registry extends DurableObject {
       if (session && !isExpired(session.expiresAt)) {
         userId = session.userId;
       } else if (session) {
+        expiredSession = true;
         await this.ctx.storage.delete(key.userSession(tokenHash)).catch(() => {});
       }
     }
 
     if (!userId) {
-      const resource = String(body?.resource ?? "");
       const access = await this.ctx.storage.get<OAuthTokenRecord>(
         key.oauthAccess(tokenHash),
       );
-      if (!access || isExpired(access.expiresAt) ||
-          !resource || access.resource !== resource ||
-          !access.scope.includes("mcp")) {
-        if (access && isExpired(access.expiresAt)) {
-          await this.ctx.storage.delete(key.oauthAccess(tokenHash)).catch(() => {});
-        }
-        return json({ error: "unauthorized" }, 401);
+      if (!access) {
+        return json({
+          error: "unauthorized",
+          reason: resource
+            ? "oauth_access_not_found"
+            : (expiredSession ? "session_expired" : "token_not_found"),
+        }, 401);
+      }
+      if (isExpired(access.expiresAt)) {
+        await this.ctx.storage.delete(key.oauthAccess(tokenHash)).catch(() => {});
+        return json({ error: "unauthorized", reason: "oauth_access_expired" }, 401);
+      }
+      if (!resource) {
+        return json({ error: "unauthorized", reason: "oauth_resource_required" }, 401);
+      }
+      if (access.resource !== resource) {
+        return json({ error: "unauthorized", reason: "oauth_resource_mismatch" }, 401);
+      }
+      if (!access.scope.includes("mcp")) {
+        return json({ error: "unauthorized", reason: "oauth_scope_missing" }, 401);
       }
       userId = access.userId;
     }
 
     const user = await this.ctx.storage.get<UserRecord>(key.user(userId));
-    if (!user?.enabled) return json({ error: "unauthorized" }, 401);
+    if (!user?.enabled) {
+      return json({ error: "unauthorized", reason: "user_disabled" }, 401);
+    }
     return json({ ok: true, user: publicUser(user) });
   }
 

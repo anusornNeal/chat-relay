@@ -34,6 +34,19 @@ async function jsonFetch(path, options = {}) {
   return { response, data, text };
 }
 
+async function waitForAudit(action, reason) {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const result = await jsonFetch(
+      "/admin/api/audit?limit=20&action=" + encodeURIComponent(action),
+      { headers: { authorization: "Bearer " + adminToken } },
+    );
+    const match = result.data.items?.find((item) => item.metadata?.reason === reason);
+    if (match) return match;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("audit event not found: " + action + " / " + reason);
+}
+
 function challenge(verifier) {
   return createHash("sha256").update(verifier).digest("base64url");
 }
@@ -301,6 +314,57 @@ const missingClient = await jsonFetch("/token", {
 if (missingClient.data.error !== "invalid_client") {
   throw new Error("unexpected client validation result");
 }
+
+const invalidRefreshValue = "refresh-invalid-" + suffix;
+const invalidRefresh = await jsonFetch("/token", {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: formBody({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    refresh_token: invalidRefreshValue,
+    resource,
+  }),
+});
+if (invalidRefresh.response.status !== 400 ||
+    invalidRefresh.data.error !== "invalid_grant" ||
+    invalidRefresh.data.reason !== "refresh_token_not_found") {
+  throw new Error("invalid refresh telemetry reason missing");
+}
+const refreshAudit = await waitForAudit(
+  "connector.oauth.refresh.failure",
+  "refresh_token_not_found",
+);
+if (JSON.stringify(refreshAudit).includes(invalidRefreshValue)) {
+  throw new Error("refresh credential leaked into audit telemetry");
+}
+
+const invalidAccessValue = "access-invalid-" + suffix;
+const invalidBearer = await fetch(base + "/mcp", {
+  method: "POST",
+  headers: {
+    authorization: "Bearer " + invalidAccessValue,
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+  },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    id: 99,
+    method: "tools/list",
+    params: {},
+  }),
+});
+if (invalidBearer.status !== 401) {
+  throw new Error("invalid OAuth bearer was accepted");
+}
+const accessAudit = await waitForAudit(
+  "connector.mcp.auth.failure",
+  "oauth_access_not_found",
+);
+if (JSON.stringify(accessAudit).includes(invalidAccessValue)) {
+  throw new Error("access credential leaked into audit telemetry");
+}
+console.log("OAuth auth-failure telemetry ok");
 console.log("OAuth negative cases ok");
 
 const bootstrap = await jsonFetch("/admin/bootstrap", {

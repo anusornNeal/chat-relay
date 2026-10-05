@@ -42,6 +42,56 @@ function dashboardStub(env: Env) {
   return env.DASHBOARD.get(env.DASHBOARD.idFromName("global"));
 }
 
+function auditStub(env: Env) {
+  return env.AUDIT.get(env.AUDIT.idFromName("global"));
+}
+
+function safeAuthReason(value: unknown, fallback: string): string {
+  const reason = String(value ?? "").trim().toLowerCase();
+  return /^[a-z][a-z0-9_.:-]{0,79}$/.test(reason) ? reason : fallback;
+}
+
+async function recordConnectorAuthFailure(
+  env: Env,
+  action: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await auditStub(env).fetch(new Request("https://audit.internal/record", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        actor: { kind: "anonymous" },
+        action,
+        target: { type: "connector_auth" },
+        result: "failure",
+        metadata,
+      }),
+    }));
+  } catch {}
+}
+
+async function recordOAuthTokenFailure(
+  env: Env,
+  request: Request,
+  response: Response,
+): Promise<void> {
+  const form = await request.formData().catch(() => null);
+  const data = await response.json<any>().catch(() => ({}));
+  const grantType = safeAuthReason(form?.get("grant_type"), "unknown");
+  const action = grantType === "refresh_token"
+    ? "connector.oauth.refresh.failure"
+    : grantType === "authorization_code"
+      ? "connector.oauth.code_exchange.failure"
+      : "connector.oauth.token.failure";
+  await recordConnectorAuthFailure(env, action, {
+    status: response.status,
+    grantType,
+    reason: safeAuthReason(data.reason ?? data.error, "oauth_token_failure"),
+    oauthError: safeAuthReason(data.error, "unknown"),
+  });
+}
+
 export async function publishDashboard(env: Env, topics: string[]): Promise<void> {
   try {
     await dashboardStub(env).fetch(new Request("https://dashboard.internal/publish", {
@@ -300,7 +350,7 @@ function bearerToken(request: Request): string | null {
 async function authenticateUserResult(
   request: Request,
   env: Env,
-): Promise<{ user: AuthUser | null; response?: Response }> {
+): Promise<{ user: AuthUser | null; response?: Response; reason?: string }> {
   const url = new URL(request.url);
   const queryToken = url.searchParams.get("key");
   const headerToken = bearerToken(request);
@@ -313,11 +363,21 @@ async function authenticateUserResult(
   const cacheKey = tokenHash + "|" + (resource || "");
   const cached = cacheGet(authUserCache, cacheKey);
   if (cached) return { user: cached };
-  const { response, data } = await registryJson<{ user?: AuthUser }>(env, "/auth/user", {
+  const { response, data } = await registryJson<{
+    user?: AuthUser;
+    reason?: string;
+    error?: string;
+  }>(env, "/auth/user", {
     tokenHash,
     ...(resource ? { resource } : {}),
   });
-  if (!response.ok || !data.user) return { user: null, response };
+  if (!response.ok || !data.user) {
+    return {
+      user: null,
+      response,
+      reason: safeAuthReason(data.reason ?? data.error, "unauthorized"),
+    };
+  }
   cachePut(authUserCache, cacheKey, data.user);
   return { user: data.user };
 }
@@ -1478,13 +1538,25 @@ export default {
     const oauthSessionUser = path === "/authorize" && request.method === "GET"
       ? await browserSessionUser(request, env)
       : null;
+    const oauthTelemetryRequest = path === "/token" && request.method === "POST"
+      ? request.clone()
+      : null;
     const oauthResponse = await handleOAuth(
       request,
       (registryPath, body) => registryCall(env, registryPath, body),
       env,
       oauthSessionUser,
     );
-    if (oauthResponse) return oauthResponse;
+    if (oauthResponse) {
+      if (oauthTelemetryRequest && !oauthResponse.ok) {
+        ctx.waitUntil(recordOAuthTokenFailure(
+          env,
+          oauthTelemetryRequest,
+          oauthResponse.clone(),
+        ));
+      }
+      return oauthResponse;
+    }
 
     const authResponse = await handleDeviceAuth(
       request,
@@ -1509,8 +1581,15 @@ export default {
     }
 
     if (path === "/mcp") {
-      const user = await authenticateUser(request, env);
+      const authResult = await authenticateUserResult(request, env);
+      const user = authResult.user;
       if (!user) {
+        if (bearerToken(request)) {
+          ctx.waitUntil(recordConnectorAuthFailure(env, "connector.mcp.auth.failure", {
+            status: authResult.response?.status ?? 401,
+            reason: authResult.reason ?? "unauthorized",
+          }));
+        }
         return Response.json(
           { error: "unauthorized" },
           {
