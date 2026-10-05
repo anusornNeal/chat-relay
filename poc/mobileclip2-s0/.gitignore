@@ -1,0 +1,4 @@
+samples/
+samples-hard/
+*.json
+__pycache__/
