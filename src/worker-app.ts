@@ -418,8 +418,6 @@ function scopeForAction(action: string): Scope {
   if (action.startsWith("terminal.")) return "terminal";
   if (["agent.lifecycle.drain", "agent.lifecycle.resume", "agent.lifecycle.restart", "agent.lifecycle.upgrade"].includes(action)) return "process";
   if (action === "process.kill" || action === "process.list") return "process";
-  if (action === "computer_use.mode.status") return "desktop_read";
-  if (action === "computer_use.mode.set") return "desktop_control";
   if (action === "desktop.screenshot") return "desktop_read";
   if (action === "desktop.mouse.click" || action === "desktop.keyboard.input" || action === "desktop.step") return "desktop_control";
   return "read";
@@ -685,7 +683,7 @@ const terminalSessionIdSchema = z.union([
 ]);
 
 const READ_ONLY_TOOLS = new Set([
-  "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status", "get_computer_use_mode",
+  "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
   "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
   "start_search", "get_more_search_results", "list_processes", "screenshot", "clipboard_read", "list_windows",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
@@ -817,22 +815,6 @@ function createMcpServer(env: Env, user: AuthUser) {
     "read",
     {},
     () => ({ action: "agent.lifecycle.status" }),
-  );
-
-  register(
-    "get_computer_use_mode",
-    "Get the active computer-use mode and optional Laya runtime status. Requires desktop_read permission.",
-    "desktop_read",
-    {},
-    () => ({ action: "computer_use.mode.status" }),
-  );
-
-  register(
-    "set_computer_use_mode",
-    "Switch computer-use mode at runtime without restarting the agent. direct uses the built-in desktop driver; auto remains direct-first; laya is accepted only when a compatible visual Laya runtime is available. Requires desktop_control permission and never enables desktop access by itself.",
-    "desktop_control",
-    { mode: z.enum(["direct", "laya", "auto"]) },
-    ({ mode }) => ({ action: "computer_use.mode.set", mode }),
   );
 
   register(

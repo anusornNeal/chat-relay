@@ -44,7 +44,7 @@ export function getAgentCapabilities(options = {}) {
   }
 
   if (desktopEnabled && ["win32", "darwin"].includes(platform)) {
-    capabilities.push("desktop.screenshot", "desktop.control", "desktop.step", "desktop.mode");
+    capabilities.push("desktop.screenshot", "desktop.control", "desktop.step");
   }
 
   return capabilities;

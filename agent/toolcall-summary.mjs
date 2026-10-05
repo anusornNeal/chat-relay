@@ -174,10 +174,6 @@ export function humanizeToolCall(payload = {}) {
       return "Resume normal work";
     case "agent.lifecycle.restart":
       return "Restart local agent";
-    case "computer_use.mode.status":
-      return "Check computer-use mode";
-    case "computer_use.mode.set":
-      return `Set computer-use mode · ${cleanText(payload.mode, 16)}`;
 
     case "fs.stat":
       return `Inspect ${compactPath(payload.path)}`;
