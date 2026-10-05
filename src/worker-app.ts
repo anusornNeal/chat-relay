@@ -51,9 +51,10 @@ function safeAuthReason(value: unknown, fallback: string): string {
   return /^[a-z][a-z0-9_.:-]{0,79}$/.test(reason) ? reason : fallback;
 }
 
-async function recordConnectorAuthFailure(
+async function recordConnectorAuthEvent(
   env: Env,
   action: string,
+  result: "success" | "failure",
   metadata: Record<string, unknown>,
 ): Promise<void> {
   try {
@@ -64,11 +65,40 @@ async function recordConnectorAuthFailure(
         actor: { kind: "anonymous" },
         action,
         target: { type: "connector_auth" },
-        result: "failure",
+        result,
         metadata,
       }),
     }));
   } catch {}
+}
+
+async function recordConnectorAuthFailure(
+  env: Env,
+  action: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  return recordConnectorAuthEvent(env, action, "failure", metadata);
+}
+
+function connectorAuthorizeTelemetry(
+  request: Request,
+  response: Response,
+  hasBrowserSession: boolean,
+): Record<string, unknown> {
+  const url = new URL(request.url);
+  let redirectHost = "";
+  try {
+    redirectHost = new URL(url.searchParams.get("redirect_uri") || "").hostname.slice(0, 120);
+  } catch {}
+  const userAgent = request.headers.get("user-agent") || "";
+  return {
+    status: response.status,
+    route: url.pathname,
+    mobile: /android|iphone|ipad|mobile/i.test(userAgent),
+    hasBrowserSession,
+    recoveryRequested: url.searchParams.get("recovery") === "1",
+    ...(redirectHost ? { redirectHost } : {}),
+  };
 }
 
 async function recordOAuthTokenFailure(
@@ -1523,6 +1553,10 @@ export default {
     const oauthTelemetryRequest = path === "/token" && request.method === "POST"
       ? request.clone()
       : null;
+    const oauthAuthorizeTelemetryRequest = request.method === "GET" &&
+      (path === "/authorize" || path === "/authorize/google/start")
+      ? request.clone()
+      : null;
     const oauthResponse = await handleOAuth(
       request,
       (registryPath, body) => registryCall(env, registryPath, body),
@@ -1530,6 +1564,21 @@ export default {
       oauthSessionUser,
     );
     if (oauthResponse) {
+      if (oauthAuthorizeTelemetryRequest) {
+        const action = path === "/authorize"
+          ? "connector.oauth.authorize.response"
+          : "connector.oauth.google_start.response";
+        ctx.waitUntil(recordConnectorAuthEvent(
+          env,
+          action,
+          oauthResponse.status < 400 ? "success" : "failure",
+          connectorAuthorizeTelemetry(
+            oauthAuthorizeTelemetryRequest,
+            oauthResponse,
+            Boolean(oauthSessionUser?.id),
+          ),
+        ));
+      }
       if (oauthTelemetryRequest && !oauthResponse.ok) {
         ctx.waitUntil(recordOAuthTokenFailure(
           env,

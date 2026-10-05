@@ -1,4 +1,3 @@
-# Google login
 
 Chat Relay keeps the existing `owner` account as the legacy administrator/recovery account. Dashboard, ChatGPT connector, and local computer device sign-in use the same verified Google identity.
 
@@ -31,3 +30,11 @@ Do not commit the client secret.
 - Normal ChatGPT connector authorization reuses a valid remembered browser session automatically for a previously authorized client; otherwise it shows only `Continue with Google` and never exposes the password form.
 - Google browser sessions are remembered for 30 days to make connector reconnects one-click while server-side revocation and user disablement still invalidate them.
 - Local password authorization remains available only as the explicit owner recovery path (`/authorize?...&recovery=1`); it is not shown in the normal ChatGPT connector flow.
+
+
+## Mobile connector reconnect
+
+- The connector authorization page always exposes **Use owner recovery instead** when Google sign-in is enabled. This keeps a password recovery path inside the same in-app browser instead of requiring a manual switch to Chrome.
+- When Google returns a valid OAuth error or its token/identity validation fails after a valid connector continuation, Relay preserves the signed connector request and offers the same owner-recovery link. PKCE, state, registered redirect URI, resource binding, and scope validation still run again on the recovery request.
+- Relay records bounded audit events for `/authorize` and `/authorize/google/start` responses plus Google callback failures. The telemetry contains only route/status, mobile classification, browser-session presence, recovery flag, and redirect host; it never records OAuth codes, state values, refresh/access tokens, passwords, or the Google authorization code.
+- If no `connector.oauth.authorize.response` event appears for a mobile reconnect attempt, the failure occurred before Relay received the authorization request. That boundary is outside Relay's callback logic and should be investigated in the ChatGPT/mobile browser handoff.

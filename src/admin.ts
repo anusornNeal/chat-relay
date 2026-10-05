@@ -293,7 +293,25 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
 
   if (path === "/admin/google/callback" && request.method === "GET") {
     const google = await finishGoogleLogin(request, env);
-    if (!google.ok) return google.response;
+    if (!google.ok) {
+      const providerErrorRaw = String(url.searchParams.get("error") || "").trim().toLowerCase();
+      const providerError = /^[a-z][a-z0-9_.:-]{0,79}$/.test(providerErrorRaw)
+        ? providerErrorRaw
+        : "none";
+      await recordAudit(
+        env,
+        { kind: "anonymous" },
+        "oauth.google.callback.failure",
+        { type: "connector_auth" },
+        "failure",
+        {
+          status: google.response.status,
+          providerError,
+          hasReturnedState: Boolean(url.searchParams.get("state")),
+        },
+      );
+      return google.response;
+    }
     const identityResponse = await registryCall(env, "/google/upsert", {
       googleSub: google.identity.sub,
       email: google.identity.email,

@@ -116,12 +116,48 @@ function escapeHtml(value: string) {
   );
 }
 
-function googleError(message: string, status = 400) {
+function connectorRecoveryHref(continuation: string) {
+  if (!continuation) return "";
+  try {
+    const payload = JSON.parse(continuation);
+    const params = payload?.kind === "connector-oauth" ? payload.params : null;
+    if (!params ||
+        typeof params.clientId !== "string" ||
+        typeof params.redirectUri !== "string" ||
+        typeof params.responseType !== "string" ||
+        typeof params.codeChallenge !== "string" ||
+        typeof params.codeChallengeMethod !== "string" ||
+        typeof params.scopeRaw !== "string" ||
+        typeof params.resource !== "string" ||
+        typeof params.state !== "string") {
+      return "";
+    }
+    const query = new URLSearchParams({
+      client_id: params.clientId,
+      redirect_uri: params.redirectUri,
+      response_type: params.responseType,
+      code_challenge: params.codeChallenge,
+      code_challenge_method: params.codeChallengeMethod,
+      scope: params.scopeRaw,
+      resource: params.resource,
+      state: params.state,
+      recovery: "1",
+    });
+    return "/authorize?" + query.toString();
+  } catch {
+    return "";
+  }
+}
+
+function googleError(message: string, status = 400, recoveryHref = "") {
+  const recovery = recoveryHref
+    ? '<p><a href="' + escapeHtml(recoveryHref) + '">Use owner recovery in this browser</a></p>'
+    : "";
   return new Response(
     '<!doctype html><meta charset="utf-8"><title>Google sign-in failed</title>' +
       '<main style="font-family:system-ui;max-width:520px;margin:80px auto;padding:24px">' +
       "<h1>Google sign-in failed</h1><p>" + escapeHtml(message) +
-      '</p><p><a href="/dashboard/">Back to dashboard</a></p></main>',
+      "</p>" + recovery + '<p><a href="/dashboard/">Back to dashboard</a></p></main>',
     {
       status,
       headers: {
@@ -191,8 +227,12 @@ export async function finishGoogleLogin(
   const verifier = typeof statePayload?.verifier === "string" ? statePayload.verifier : "";
   const continuation = typeof statePayload?.continuation === "string" ? statePayload.continuation : "";
 
+  const recoveryHref = connectorRecoveryHref(continuation);
   if (providerError) {
-    return { ok: false, response: googleError("Google denied the authorization request.") };
+    if (!state || !returnedState || returnedState !== state) {
+      return { ok: false, response: googleError("Google sign-in state is invalid or expired.") };
+    }
+    return { ok: false, response: googleError("Google denied the authorization request.", 400, recoveryHref) };
   }
   if (!state || !nonce || !verifier || !returnedState || returnedState !== state || !code) {
     return { ok: false, response: googleError("Google sign-in state is invalid or expired.") };
@@ -214,7 +254,7 @@ export async function finishGoogleLogin(
   const tokenData = await tokenResponse.json<any>().catch(() => ({}));
   const idToken = String(tokenData.id_token || "");
   if (!tokenResponse.ok || !idToken) {
-    return { ok: false, response: googleError("Google token exchange failed.", 502) };
+    return { ok: false, response: googleError("Google token exchange failed.", 502, recoveryHref) };
   }
 
   const tokenInfoResponse = await fetch(
@@ -241,7 +281,7 @@ export async function finishGoogleLogin(
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
       !Number.isFinite(expiresAt) ||
       expiresAt * 1000 <= Date.now()) {
-    return { ok: false, response: googleError("Google identity token validation failed.", 401) };
+    return { ok: false, response: googleError("Google identity token validation failed.", 401, recoveryHref) };
   }
 
   const name = String(tokenInfo.name || payload?.name || email.split("@")[0] || email).slice(0, 120);

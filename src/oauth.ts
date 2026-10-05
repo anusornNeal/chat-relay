@@ -219,8 +219,13 @@ function authorizePage(
     state: params.state,
   });
   const showPassword = showRecovery || !googleEnabled;
+  const recoveryQuery = new URLSearchParams(googleQuery);
+  recoveryQuery.set("recovery", "1");
   const googleEntry = googleEnabled
     ? `<a class="google" href="/authorize/google/start?${htmlEscape(googleQuery.toString())}">Continue with Google</a>`
+    : "";
+  const recoveryLink = googleEnabled && !showPassword
+    ? `<p style="margin:14px 0 0;text-align:center;font-size:13px"><a href="/authorize?${htmlEscape(recoveryQuery.toString())}">Use owner recovery instead</a></p>`
     : "";
   const recoveryDivider = googleEnabled && showPassword
     ? `<div class="divider"><span>Owner recovery</span></div>`
@@ -243,6 +248,7 @@ ${hidden}
 <div class="scope">Access: ${htmlEscape(scopeText || "mcp")}.${htmlEscape(offline)}</div>
 ${errorMessage ? `<div class="error">${htmlEscape(errorMessage)}</div>` : ""}
 ${googleEntry}
+${recoveryLink}
 ${recoveryDivider}
 ${recoveryForm}`,
   );
