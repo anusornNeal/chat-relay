@@ -273,3 +273,23 @@ tr:last-child td{border-bottom:0}
 .agent-usage-name strong,.agent-usage-name small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agent-usage-name small{color:var(--muted);margin-top:2px}
 .agent-usage-count{font-size:18px;font-variant-numeric:tabular-nums}
+
+
+/* compact account-agent usage */
+.account-agent-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px;align-items:start}
+.account-agent-panel{padding:0}
+.account-agent-panel .panel-heading{align-items:center;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);background:#fbfcfd}
+.account-agent-panel .panel-heading h2{font-size:13px;margin-top:1px}
+.account-agent-panel .panel-kicker{font-size:8px}
+.account-agent-panel .secondary-text{font-size:10px;margin-top:1px}
+.account-total{flex-direction:row;align-items:baseline;gap:5px;white-space:nowrap}
+.account-total strong{font-size:19px;font-variant-numeric:tabular-nums}
+.account-total span{font-size:10px}
+.agent-usage-list{margin:0;border-top:0}
+.agent-usage-row{min-height:46px;padding:7px 14px;gap:12px;border-bottom:1px solid #edf0f2}
+.agent-usage-name{gap:8px}
+.agent-usage-name strong{font-size:12px;line-height:1.2}
+.agent-usage-name small{font-size:9px;line-height:1.2;margin-top:2px}
+.agent-usage-count{font-size:15px;font-weight:700}
+.account-agent-panel .empty-inline{padding:14px}
+@media(max-width:980px){.account-agent-grid{grid-template-columns:1fr}}

@@ -588,7 +588,9 @@ async function loadUsage({ patch = false } = {}) {
 
   const accountMarkup = accounts.length ? accounts.map((account) => {
     const agents = Array.isArray(account.agents) ? account.agents : [];
-    const agentRows = agents.length ? agents.map((agent) =>
+    const activeAgents = agents.filter((agent) => Number(agent.calls || 0) > 0);
+    const visibleAgents = activeAgents.length ? activeAgents : agents.slice(0, 1);
+    const agentRows = visibleAgents.length ? visibleAgents.map((agent) =>
       '<div class="agent-usage-row" data-live-key="' + esc(account.userId + ":" + agent.agentId) + '">' +
         '<div class="agent-usage-name"><span class="agent-dot"></span><div><strong>' + esc(agent.name || agent.agentId) +
         '</strong><small>' + esc(agent.agentId) + '</small></div></div>' +
