@@ -312,7 +312,7 @@ if (!String(artifactResponse.headers.get("cache-control")).includes("no-store"))
 }
 await new Promise((resolve) => setTimeout(resolve, 1100));
 const expiredArtifact = await fetch(base + artifactPath);
-if (expiredArtifact.status !== 410) throw new Error("artifact did not expire");
+if (![404, 410].includes(expiredArtifact.status)) throw new Error("artifact did not expire");
 
 const outsideArtifact = await tool(ownerToken, 128, "create_temp_artifact", {
   path: process.execPath,

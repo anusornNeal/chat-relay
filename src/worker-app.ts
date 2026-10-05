@@ -185,19 +185,39 @@ type ToolActivityContext = {
 
 const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
 
-const REQUEST_CACHE_TTL_MS = 30_000;
+const SECURITY_CACHE_TTL_MS = 30_000;
+const SECURITY_REVISION_POLL_MS = 5_000;
+const SECURITY_CACHE_MAX_ENTRIES = 512;
+const ADMIN_SECURITY_MUTATION_PATHS = new Set([
+  "/admin/bootstrap",
+  "/admin/users",
+  "/admin/agents",
+  "/admin/grants",
+  "/admin/grants/delete",
+  "/admin/users/enabled",
+  "/admin/agents/enabled",
+  "/admin/users/rotate",
+  "/admin/agents/rotate",
+  "/admin/api/users/soft-delete",
+  "/admin/api/users/restore",
+  "/admin/api/users/admin",
+  "/admin/api/agents/retire",
+  "/admin/api/sessions/revoke",
+]);
 const QUOTA_DISABLED_CACHE_TTL_MS = 5 * 60_000;
-const REQUEST_CACHE_MAX_ENTRIES = 512;
 
-type TimedCacheEntry<T> = { value: T; expiresAt: number };
+type TimedSecurityCacheEntry<T> = { value: T; expiresAt: number };
 type ResolvedAgentAccess = { agentId: string; scopes: string[] };
 
-const authUserCache = new Map<string, TimedCacheEntry<AuthUser>>();
-const resolvedAgentCache = new Map<string, TimedCacheEntry<ResolvedAgentAccess>>();
+const authUserCache = new Map<string, TimedSecurityCacheEntry<AuthUser>>();
+const resolvedAgentCache = new Map<string, TimedSecurityCacheEntry<ResolvedAgentAccess>>();
+let knownSecurityRevision: number | null = null;
+let securityRevisionCheckedAt = 0;
+let securityRevisionCheckPromise: Promise<void> | null = null;
 let quotaDisabledUntil = 0;
 const usageRecordBudget = new DailyOptionalBudget();
 
-function cacheGet<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {
+function securityCacheGet<T>(cache: Map<string, TimedSecurityCacheEntry<T>>, key: string): T | undefined {
   const entry = cache.get(key);
   if (!entry) return undefined;
   if (entry.expiresAt <= Date.now()) {
@@ -207,12 +227,58 @@ function cacheGet<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | u
   return entry.value;
 }
 
-function cachePut<T>(cache: Map<string, TimedCacheEntry<T>>, key: string, value: T) {
-  if (cache.size >= REQUEST_CACHE_MAX_ENTRIES) {
+function securityCachePut<T>(cache: Map<string, TimedSecurityCacheEntry<T>>, key: string, value: T) {
+  if (cache.size >= SECURITY_CACHE_MAX_ENTRIES) {
     const oldest = cache.keys().next().value;
     if (oldest !== undefined) cache.delete(oldest);
   }
-  cache.set(key, { value, expiresAt: Date.now() + REQUEST_CACHE_TTL_MS });
+  cache.set(key, { value, expiresAt: Date.now() + SECURITY_CACHE_TTL_MS });
+}
+
+function invalidateLocalSecurityCaches() {
+  authUserCache.clear();
+  resolvedAgentCache.clear();
+  knownSecurityRevision = null;
+  securityRevisionCheckedAt = 0;
+}
+
+function noteSecurityRevision(value: unknown) {
+  const revision = Number(value);
+  if (!Number.isSafeInteger(revision) || revision < 0) return;
+  if (knownSecurityRevision !== null && knownSecurityRevision !== revision) {
+    authUserCache.clear();
+    resolvedAgentCache.clear();
+  }
+  knownSecurityRevision = revision;
+  securityRevisionCheckedAt = Date.now();
+}
+
+async function ensureSecurityRevisionFresh(env: Env) {
+  const now = Date.now();
+  if (now - securityRevisionCheckedAt < SECURITY_REVISION_POLL_MS) return;
+  if (securityRevisionCheckPromise) return securityRevisionCheckPromise;
+
+  securityRevisionCheckPromise = (async () => {
+    const checkedAt = Date.now();
+    try {
+      const { response, data } = await registryJson<{ revision?: number }>(env, "/security/revision");
+      if (!response.ok || !Number.isSafeInteger(data.revision)) {
+        invalidateLocalSecurityCaches();
+        securityRevisionCheckedAt = checkedAt;
+        return;
+      }
+      noteSecurityRevision(data.revision);
+    } catch {
+      invalidateLocalSecurityCaches();
+      securityRevisionCheckedAt = checkedAt;
+    }
+  })();
+
+  try {
+    await securityRevisionCheckPromise;
+  } finally {
+    securityRevisionCheckPromise = null;
+  }
 }
 
 function grantAllows(scopes: string[], required: Scope) {
@@ -391,16 +457,22 @@ async function authenticateUserResult(
     ? oauthResource(request)
     : undefined;
   const cacheKey = tokenHash + "|" + (resource || "");
-  const cached = cacheGet(authUserCache, cacheKey);
-  if (cached) return { user: cached };
+  const cached = securityCacheGet(authUserCache, cacheKey);
+  if (cached) {
+    await ensureSecurityRevisionFresh(env);
+    const fresh = securityCacheGet(authUserCache, cacheKey);
+    if (fresh) return { user: fresh };
+  }
   const { response, data } = await registryJson<{
     user?: AuthUser;
     reason?: string;
     error?: string;
+    securityRevision?: number;
   }>(env, "/auth/user", {
     tokenHash,
     ...(resource ? { resource } : {}),
   });
+  noteSecurityRevision(data.securityRevision);
   if (!response.ok || !data.user) {
     return {
       user: null,
@@ -408,7 +480,7 @@ async function authenticateUserResult(
       reason: safeAuthReason(data.reason ?? data.error, "unauthorized"),
     };
   }
-  cachePut(authUserCache, cacheKey, data.user);
+  securityCachePut(authUserCache, cacheKey, data.user);
   return { user: data.user };
 }
 
@@ -429,7 +501,7 @@ async function resolveAgent(
   userId: string,
   scope: Scope,
   requestedAgentId?: string,
-): Promise<{ ok: true; agentId: string; scopes: string[] } | { ok: false; response: Response }> {
+): Promise<{ ok: true; agentId: string; scopes: string[]; securityRevision?: number } | { ok: false; response: Response }> {
   const { response, data } = await registryJson<any>(env, "/resolve", {
     userId,
     scope,
@@ -438,7 +510,12 @@ async function resolveAgent(
   if (!response.ok) {
     return { ok: false, response: Response.json(data, { status: response.status }) };
   }
-  return { ok: true, agentId: data.agent.id, scopes: Array.isArray(data.scopes) ? data.scopes : [] };
+  return {
+    ok: true,
+    agentId: data.agent.id,
+    scopes: Array.isArray(data.scopes) ? data.scopes : [],
+    securityRevision: Number.isSafeInteger(data.securityRevision) ? data.securityRevision : undefined,
+  };
 }
 
 function scopeForAction(action: string): Scope {
@@ -459,20 +536,25 @@ async function resolveAgentForScopes(
   scopes: Scope[],
   requestedAgentId?: string,
 ): Promise<{ ok: true; agentId: string } | { ok: false; response: Response }> {
-  const uniqueScopes = [...new Set(scopes)];
-  const cacheKey = userId + "|" + (requestedAgentId || "auto");
-  const cached = cacheGet(resolvedAgentCache, cacheKey);
-  if (cached && uniqueScopes.every(scope => grantAllows(cached.scopes, scope))) {
-    return { ok: true, agentId: cached.agentId };
+  const uniqueScopes = [...new Set(scopes)].sort();
+  const cacheKey = userId + "|" + (requestedAgentId || "auto") + "|" + uniqueScopes.join(",");
+  const cached = securityCacheGet(resolvedAgentCache, cacheKey);
+  if (cached) {
+    await ensureSecurityRevisionFresh(env);
+    const fresh = securityCacheGet(resolvedAgentCache, cacheKey);
+    if (fresh && uniqueScopes.every(scope => grantAllows(fresh.scopes, scope))) {
+      return { ok: true, agentId: fresh.agentId };
+    }
   }
 
   const firstScope = uniqueScopes[0] || "read";
   const resolved = await resolveAgent(env, userId, firstScope, requestedAgentId);
   if (!resolved.ok) return resolved;
+  noteSecurityRevision(resolved.securityRevision);
   if (!uniqueScopes.every(scope => grantAllows(resolved.scopes, scope))) {
     return { ok: false, response: Response.json({ error: "permission_denied" }, { status: 403 }) };
   }
-  cachePut(resolvedAgentCache, cacheKey, { agentId: resolved.agentId, scopes: resolved.scopes });
+  securityCachePut(resolvedAgentCache, cacheKey, { agentId: resolved.agentId, scopes: resolved.scopes });
   return { ok: true, agentId: resolved.agentId };
 }
 
@@ -1598,7 +1680,11 @@ export default {
     if (authResponse) return authResponse;
 
     if (path.startsWith("/admin/")) {
-      return handleAdmin(request, env);
+      const response = await handleAdmin(request, env);
+      if (response.ok && request.method !== "GET" && ADMIN_SECURITY_MUTATION_PATHS.has(path)) {
+        invalidateLocalSecurityCaches();
+      }
+      return response;
     }
 
     if (path === "/agent") {

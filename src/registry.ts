@@ -213,6 +213,7 @@ function isExpired(iso: string): boolean {
 }
 
 const STATE_CACHE_TTL_MS = 30_000;
+const SECURITY_REVISION_KEY = "security:revision";
 const STATE_MUTATION_PATHS = new Set([
   "/bootstrap",
   "/users/create",
@@ -228,7 +229,25 @@ const STATE_MUTATION_PATHS = new Set([
   "/agents/rename",
   "/agents/retire",
   "/google/upsert",
-  "/device/exchange",
+]);
+const SECURITY_MUTATION_PATHS = new Set([
+  "/bootstrap",
+  "/users/create",
+  "/agents/create",
+  "/grants/upsert",
+  "/grants/delete",
+  "/users/set-enabled",
+  "/users/soft-delete",
+  "/users/restore",
+  "/users/set-admin",
+  "/agents/set-enabled",
+  "/agents/retire",
+  "/google/upsert",
+  "/users/rotate",
+  "/agents/rotate",
+  "/session/revoke",
+  "/sessions/revoke-user",
+  "/session/logout-agent",
 ]);
 
 export class Registry extends DurableObject {
@@ -239,6 +258,7 @@ export class Registry extends DurableObject {
     const path = url.pathname;
     const body = request.method === "GET" ? null : await request.json().catch(() => null);
     if (request.method !== "GET" && STATE_MUTATION_PATHS.has(path)) this.stateCache = undefined;
+    if (request.method !== "GET" && SECURITY_MUTATION_PATHS.has(path)) await this.bumpSecurityRevision();
 
     switch (path) {
       case "/bootstrap": return this.bootstrap(body);
@@ -278,6 +298,7 @@ export class Registry extends DurableObject {
       case "/sessions/list": return this.listSessions(body);
       case "/sessions/revoke-user": return this.revokeUserSessions(body);
       case "/session/logout-agent": return this.logoutAgent(body);
+      case "/security/revision": return request.method === "GET" ? this.securityRevision() : json({ error: "method_not_allowed" }, 405);
       case "/auth/user": return this.authUser(body);
       case "/auth/agent": return this.authAgent(body);
       case "/agent-access": return this.agentAccess(body);
@@ -288,6 +309,24 @@ export class Registry extends DurableObject {
       case "/state": return this.state();
       default: return json({ error: "not_found" }, 404);
     }
+  }
+
+  private async readSecurityRevision(): Promise<number> {
+    const value = await this.ctx.storage.get<number>(SECURITY_REVISION_KEY);
+    return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+  }
+
+  private async bumpSecurityRevision(): Promise<number> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const current = await txn.get<number>(SECURITY_REVISION_KEY);
+      const next = (Number.isSafeInteger(current) && Number(current) >= 0 ? Number(current) : 0) + 1;
+      await txn.put(SECURITY_REVISION_KEY, next);
+      return next;
+    });
+  }
+
+  private async securityRevision(): Promise<Response> {
+    return json({ ok: true, revision: await this.readSecurityRevision() });
   }
 
   private async bootstrap(body: any): Promise<Response> {
@@ -855,6 +894,8 @@ export class Registry extends DurableObject {
       key.device(device.deviceCodeHash),
       key.deviceUserCode(device.userCode),
     ]);
+    this.stateCache = undefined;
+    await this.bumpSecurityRevision();
 
     return json({
       ok: true,
@@ -1492,7 +1533,7 @@ export class Registry extends DurableObject {
     if (!user?.enabled) {
       return json({ error: "unauthorized", reason: "user_disabled" }, 401);
     }
-    return json({ ok: true, user: publicUser(user) });
+    return json({ ok: true, user: publicUser(user), securityRevision: await this.readSecurityRevision() });
   }
 
   private async authAgent(body: any): Promise<Response> {
@@ -1573,6 +1614,7 @@ export class Registry extends DurableObject {
         ok: true,
         agent: { id: agent.id, name: agent.name, lastSeenAt: agent.lastSeenAt ?? null },
         scopes: grant.scopes,
+        securityRevision: await this.readSecurityRevision(),
       });
     }
 
@@ -1599,6 +1641,7 @@ export class Registry extends DurableObject {
       ok: true,
       agent: { id: agent.id, name: agent.name, lastSeenAt: agent.lastSeenAt ?? null },
       scopes: grant.scopes,
+      securityRevision: await this.readSecurityRevision(),
     });
   }
 

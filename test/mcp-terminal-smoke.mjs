@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import { AgentConnectionState, computeReconnectDelay } from "../agent/connection-state.mjs";
 import { protocolCompatibility, shouldRestartAgent } from "../cli/remote.mjs";
 import { AgentLifecycle } from "../agent/lifecycle.mjs";
+import { provisionOperatorFixture } from "./operator-fixture.mjs";
 
 function connectionStateTests() {
   const options = { baseMs: 1000, maxMs: 4000, jitterRatio: 0.2, random: () => 0.5 };
@@ -110,7 +112,42 @@ async function schedulerTests() {
 
 await schedulerTests();
 
-const base = "http://127.0.0.1:8794/mcp?key=test-caller";
+const relayBase = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8794").replace(/\/$/, "");
+const suffix = Date.now().toString(36);
+const credentials = await provisionOperatorFixture(relayBase, {
+  userId: `terminal-${suffix}`,
+  name: "Terminal Smoke",
+  agentId: `terminal-${suffix}`,
+  agentName: "Terminal Smoke Agent",
+});
+const localAgent = spawn(process.execPath, ["agent/local-agent.mjs"], {
+  cwd: process.cwd(),
+  env: {
+    ...process.env,
+    RELAY_URL: relayBase,
+    AGENT_ID: credentials.agent.id,
+    AGENT_NAME: credentials.agent.name,
+    AGENT_TOKEN: credentials.agentToken,
+    TERMINAL_ENABLED: "1",
+    DESKTOP_ENABLED: "0",
+    ALLOWED_ROOTS: process.cwd(),
+    CHAT_RELAY_UI: "plain",
+  },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+let agentOutput = "";
+localAgent.stdout.on("data", (chunk) => { agentOutput += chunk.toString(); });
+localAgent.stderr.on("data", (chunk) => { agentOutput += chunk.toString(); });
+for (let attempt = 0; attempt < 80 && !agentOutput.includes("Agent connected"); attempt++) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+if (!agentOutput.includes("Agent connected")) {
+  localAgent.kill();
+  throw new Error(`local agent did not connect: ${agentOutput}`);
+}
+const cleanupAgent = () => { try { localAgent.kill(); } catch {} };
+process.once("exit", cleanupAgent);
+const base = `${relayBase}/mcp?key=${encodeURIComponent(credentials.userToken)}`;
 
 async function rpc(id, method, params = {}) {
   const response = await fetch(base, {
@@ -216,4 +253,5 @@ if (!cancelResult.cancelled) {
   throw new Error(`terminal_batch_cancel failed: ${JSON.stringify(cancelResult)}`);
 }
 console.log("batch cancel ok");
+cleanupAgent();
 console.log("terminal MCP smoke test passed");

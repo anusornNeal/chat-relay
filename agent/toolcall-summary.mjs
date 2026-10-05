@@ -249,9 +249,7 @@ export function humanizeToolCall(payload = {}) {
       return `Focus window · ${cleanText(payload.title ?? payload.windowId ?? payload.handle ?? "", 64)}`;
     case "desktop.mouse.click": {
       const button = cleanText(payload.button || "left", 12);
-      const x = number(payload.x);
-      const y = number(payload.y);
-      return `${button[0]?.toUpperCase() || "L"}${button.slice(1)} click · x ${x}, y ${y}`;
+      return `${button[0]?.toUpperCase() || "L"}${button.slice(1)} click`;
     }
     case "desktop.keyboard.input":
       return `Type on keyboard · ${countKeyboardInput(payload)}`;

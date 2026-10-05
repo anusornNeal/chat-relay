@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import WebSocket from "ws";
 
 const vars = fs.existsSync(".dev.vars")
   ? Object.fromEntries(
@@ -14,6 +15,7 @@ const vars = fs.existsSync(".dev.vars")
 const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8805").replace(/\/$/, "");
 const adminToken = process.env.TEST_ADMIN_TOKEN || vars.ADMIN_TOKEN;
 const callerToken = process.env.TEST_CALLER_TOKEN || vars.CALLER_TOKEN;
+const agentToken = process.env.TEST_AGENT_TOKEN || vars.AGENT_TOKEN;
 const password = "Sensitive-Ops-Password!";
 const login = "ops-owner";
 
@@ -101,6 +103,19 @@ const policy = await admin("/admin/api/limits", "POST", {
 });
 if (!policy.response.ok) throw new Error("quota policy mutation failed");
 
+const usageSocket = new WebSocket(base.replace(/^http/, "ws") + "/agent?agentId=default", {
+  headers: { authorization: `Bearer ${agentToken}` },
+});
+await new Promise((resolve, reject) => {
+  usageSocket.once("open", resolve);
+  usageSocket.once("error", reject);
+});
+usageSocket.on("message", (raw) => {
+  const message = JSON.parse(String(raw));
+  if (!message?.requestId) return;
+  usageSocket.send(JSON.stringify({ requestId: message.requestId, payload: { ok: true, action: "pong" } }));
+});
+
 const rpc = await request("/mcp?key=" + encodeURIComponent(callerToken), {
   method: "POST",
   headers: {
@@ -111,7 +126,7 @@ const rpc = await request("/mcp?key=" + encodeURIComponent(callerToken), {
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
-    params: { name: "whoami", arguments: {} },
+    params: { name: "ping_agent", arguments: { agentId: "default" } },
   }),
 });
 if (!rpc.response.ok) throw new Error("usage fixture MCP call failed: " + rpc.text);
@@ -223,4 +238,5 @@ for (const forbidden of ["command", "arguments", "payload", "stdout", "stderr", 
   if (new RegExp("\\b" + forbidden + "\\b", "i").test(usageType)) throw new Error("content field leaked into UsageEvent: " + forbidden);
 }
 
+try { usageSocket.close(); } catch {}
 console.log("operations/audit/retention smoke test passed");

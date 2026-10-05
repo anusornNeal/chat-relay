@@ -74,11 +74,12 @@ const start = async (agentId = "laptop") => {
   assert.equal(response.status, 200); return response.json();
 };
 const exchange = code => device(jsonPost("/auth/device/token", { deviceCode: code }));
-function callbackFrom(response, account = "alice", overrides = {}) {
+const securityRevision = async () => (await (await registryCall("/security/revision")).json()).revision;
+function callbackFrom(response, account = "alice", overrides = {}, expectedPrompt = "select_account") {
   assert.equal(response.status, 302);
   const google = new URL(response.headers.get("location"));
   assert.equal(google.origin, "https://accounts.google.com");
-  assert.equal(google.searchParams.get("prompt"), "select_account");
+  assert.equal(google.searchParams.get("prompt"), expectedPrompt);
   const code = "mock-" + providers.size;
   providers.set(code, { iss: "https://accounts.google.com", aud: env.GOOGLE_CLIENT_ID,
     sub: account, email: account + "@example.com", name: account, email_verified: true,
@@ -102,7 +103,9 @@ try {
   const html = await page.text();
   assert.match(html, /Continue with Google and authorize computer/);
   assert.doesNotMatch(html, /name="(?:login|password|name)"/);
+  const pendingRevision = await securityRevision();
   assert.equal((await exchange(first.deviceCode)).status, 428); // GET never approves.
+  assert.equal(await securityRevision(), pendingRevision); // Polling must not invalidate security caches.
   for (const field of ["login", "password", "userId", "name"]) {
     const forged = await device(post("/auth/device/approve", { userCode: first.userCode, [field]: "owner" }));
     assert.equal(forged.status, 400);
@@ -124,7 +127,9 @@ try {
   const approved = await handleAdmin(callback, env);
   assert.equal(approved.status, 200); assert.match(approved.headers.get("set-cookie"), /Max-Age=0/);
   assert.equal((await handleAdmin(callback, env)).status, 409); // Signed callback cannot approve twice.
+  const exchangeRevision = await securityRevision();
   const granted = await exchange(first.deviceCode); assert.equal(granted.status, 200);
+  assert.equal(await securityRevision(), exchangeRevision + 1); // Successful exchange changes agent/session access.
   const credentials = await granted.json(); assert.equal(credentials.user.authProvider, "google");
   assert.equal(credentials.user.email, "alice@example.com");
   assert.ok(credentials.userToken && credentials.agentToken);
@@ -141,7 +146,7 @@ try {
     code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
     resource: base + "/mcp", scope: "mcp offline_access", state: "client-state" };
   const connectorStart = await handleOAuth(request("/authorize/google/start?" + new URLSearchParams(params)), registryCall, env);
-  const connector = await handleAdmin(callbackFrom(connectorStart), env);
+  const connector = await handleAdmin(callbackFrom(connectorStart, "alice", {}, null), env);
   assert.equal(connector.status, 302);
   const authCode = new URL(connector.headers.get("location")).searchParams.get("code");
   const codeRecord = await storage.get("oauth-code:" + await hashToken(authCode));
