@@ -112,6 +112,8 @@ function statusStyle(value) {
 }
 
 function relayHealthStyle(health) {
+  const code = Number(health?.code);
+  if (Number.isFinite(code) && code >= 200 && code < 300) return STYLE.green;
   switch (health?.state) {
     case "reachable": return STYLE.green;
     case "checking": return STYLE.yellow;
@@ -120,6 +122,8 @@ function relayHealthStyle(health) {
 }
 
 function relayHealthText(health) {
+  const code = Number(health?.code);
+  if (Number.isFinite(code) && code >= 200 && code < 300) return `● HTTP ${code}`;
   switch (health?.state) {
     case "reachable": return "● Online";
     case "checking": return "◐ Checking";
@@ -238,7 +242,7 @@ function wrapText(value, width, maxLines = 3) {
 export function formatTransactionRows(item, width = 110, { color = false } = {}) {
   const requested = Number(width) || 110;
   const usable = clamp(requested, Math.min(60, Math.max(1, requested)), 180);
-  const status = item.status === "running" ? "●" : item.ok === false ? "✕" : "✓";
+  const status = item.status === "running" ? "🟡" : item.ok === false ? "❌" : "✅";
   if (usable < 32) {
     const compact = truncateCells(`${clock(item.at)} ${status} ${item.summary || item.action || "Tool call"}`, usable);
     if (!color) return [compact];
@@ -246,24 +250,28 @@ export function formatTransactionRows(item, width = 110, { color = false } = {})
     return [paint(compact, glyphStyle)];
   }
   const prefix = `${clock(item.at)}  ${status}  `;
-  const continuationPrefix = " ".repeat(prefix.length);
+  const prefixWidth = terminalCellWidth(prefix);
+  const continuationPrefix = " ".repeat(prefixWidth);
   const duration = formatDuration(item.durationMs, item.status);
   const suffix = "  " + duration.padStart(8);
-  const summaryWidth = Math.max(4, usable - prefix.length - suffix.length);
+  const summaryWidth = Math.max(4, usable - prefixWidth - terminalCellWidth(suffix));
   const summaryLines = wrapText(item.summary || item.action || "Tool call", summaryWidth, 3);
 
   return summaryLines.map((line, index) => {
     if (index === 0) {
-      if (!color) return prefix + line.padEnd(summaryWidth) + suffix;
+      const plainRow = prefix + line.padEnd(summaryWidth) + suffix;
+      if (!color) return plainRow;
+      if (item.ok === false) return paint(plainRow, STYLE.red);
       const time = paint(clock(item.at), STYLE.gray);
-      const glyphStyle = item.status === "running" ? STYLE.yellow : item.ok === false ? STYLE.red : STYLE.green;
+      const glyphStyle = item.status === "running" ? STYLE.yellow : STYLE.green;
       const glyph = paint(status, glyphStyle, STYLE.bold);
       const summary = item.status === "running" ? paint(line.padEnd(summaryWidth), STYLE.bold) : line.padEnd(summaryWidth);
       const timing = paint(suffix, STYLE.gray);
       return `${time}  ${glyph}  ${summary}${timing}`;
     }
     if (!color) return continuationPrefix + line;
-    return " ".repeat(prefix.length) + paint(line, STYLE.dim);
+    if (item.ok === false) return continuationPrefix + paint(line, STYLE.red);
+    return continuationPrefix + paint(line, STYLE.dim);
   });
 }
 

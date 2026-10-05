@@ -75,6 +75,18 @@ test("formats remote header as two columns", () => {
   assert.match(lines[4], /^Desktop\s+enabled\s+Checked\s+just now/);
 });
 
+test("renders successful Relay API HTTP status in green", () => {
+  const output = formatTwoColumnHeader({
+    account: "Anusorn",
+    agent: "Work PC",
+    status: "connected",
+    relayHealth: { state: "unavailable", code: 200, checkedAt: Date.now() },
+    relay: "chat-relay.example.dev",
+  }, 118, { color: true });
+
+  assert.match(output, /\x1b\[32m● HTTP 200\x1b\[0m/);
+});
+
 test("labels agent authorization states separately from sign-in failures", () => {
   const states = [
     [{ state: "unauthorized", code: 401 }, "Sign-in required"],
@@ -104,9 +116,18 @@ test("formats transaction rows and tui selection", () => {
     ok: true,
     durationMs: 34,
   }, 100);
-  assert.match(row, /✓/);
+  assert.match(row, /✅/);
   assert.match(row, /Read cli\/remote\.mjs/);
   assert.match(row, /34ms$/);
+
+  const failedRow = formatTransactionRow({
+    at: "2026-10-05T01:07:01.000Z",
+    summary: "Run terminal UI tests · in chat-relay · Command failed with exit code 1",
+    status: "done",
+    ok: false,
+    durationMs: 100,
+  }, 100, { color: true });
+  assert.match(failedRow, /^\x1b\[31m.*❌.*Command failed with exit code 1.*100ms\x1b\[0m$/);
 
   assert.equal(shouldUseTui({ tuiEnabled: false }, { isTTY: true }), false);
   assert.equal(shouldUseTui({ tuiEnabled: true }, { isTTY: false }), true);
