@@ -22,7 +22,7 @@ test("checks the authenticated relay status endpoint for the configured agent", 
 
   assert.equal(result.state, "reachable");
   assert.equal(result.features.learn, true);
-  assert.equal(requestedUrl, "https://relay.example.dev/status?agentId=device+1");
+  assert.equal(requestedUrl, "https://relay.example.dev/status?agentId=device+1&compact=1");
   assert.equal(requestOptions.method, "GET");
   assert.equal(requestOptions.headers.accept, "application/json");
   assert.equal(requestOptions.headers.authorization, "Bearer user-token");

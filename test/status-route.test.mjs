@@ -43,6 +43,43 @@ test("preserves a successful offline Agent status response", async () => {
   assert.deepEqual(result.data.features, { learn: true });
 });
 
+test("returns a bounded compact status for TUI health checks", async () => {
+  const request = new Request("https://relay.example.dev/status?agentId=desk-1&compact=1");
+  const result = await responseData(await handleStatusRequest(dependencies({
+    request,
+    getRelayStatus: async () => Response.json({
+      online: true,
+      lifecycle: { state: "running" },
+      diagnostics: "x".repeat(12_000),
+    }),
+  })));
+
+  assert.equal(result.status, 200);
+  assert.equal(result.data.online, true);
+  assert.equal(result.data.authorized, true);
+  assert.deepEqual(result.data.features, { learn: true });
+  assert.equal(Object.hasOwn(result.data, "connection"), false);
+  assert.equal(Object.hasOwn(result.data, "lifecycle"), false);
+  assert.ok(JSON.stringify(result.data).length < 4096);
+});
+
+test("keeps full public status under the TUI read cap by omitting diagnostics history", async () => {
+  const result = await responseData(await handleStatusRequest(dependencies({
+    getRelayStatus: async () => Response.json({
+      online: true,
+      protocolVersion: 4,
+      agentVersion: "1.1.1",
+      diagnostics: { events: [{ detail: "x".repeat(12_000) }] },
+    }),
+  })));
+
+  assert.equal(result.status, 200);
+  assert.equal(result.data.connection.protocolVersion, 4);
+  assert.equal(result.data.connection.agentVersion, "1.1.1");
+  assert.equal(Object.hasOwn(result.data.connection, "diagnostics"), false);
+  assert.ok(JSON.stringify(result.data).length < 4096);
+});
+
 test("returns a sanitized unavailable response when Registry authentication is blocked", async () => {
   const result = await responseData(await handleStatusRequest(dependencies({
     authenticate: async () => ({

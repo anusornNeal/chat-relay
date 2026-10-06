@@ -33,7 +33,9 @@ export async function handleStatusRequest({
   if (!authentication.user) return Response.json({ error: "unauthorized" }, { status: 401 });
 
   const user = authentication.user;
-  let agentId = new URL(request.url).searchParams.get("agentId") || undefined;
+  const requestUrl = new URL(request.url);
+  const compact = requestUrl.searchParams.get("compact") === "1";
+  let agentId = requestUrl.searchParams.get("agentId") || undefined;
   if (!agentId) {
     let resolved;
     try {
@@ -74,6 +76,22 @@ export async function handleStatusRequest({
     }
   }
 
+  const connection = { ...relayStatus };
+  delete connection.diagnostics;
+
+  if (compact) {
+    return Response.json({
+      agentId,
+      agentName: access.data.agent?.name ?? agentId,
+      enabled: access.data.agent?.enabled === true,
+      authorized: access.data.authorized === true,
+      reauthorizationRequired: access.data.reauthorizationRequired === true,
+      online: relayStatus.online,
+      features: features && typeof features === "object" ? features : {},
+      expectedProtocolVersion,
+    });
+  }
+
   return Response.json({
     agentId,
     agentName: access.data.agent?.name ?? agentId,
@@ -85,7 +103,7 @@ export async function handleStatusRequest({
     authorized: access.data.authorized === true,
     reauthorizationRequired: access.data.reauthorizationRequired === true,
     online: relayStatus.online,
-    connection: relayStatus,
+    connection,
     lifecycle: relayStatus.lifecycle ?? null,
     features: features && typeof features === "object" ? features : {},
     expectedProtocolVersion,

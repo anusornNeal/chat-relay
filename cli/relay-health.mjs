@@ -101,6 +101,7 @@ export async function checkRelayHealth(relayUrl, {
     healthUrl.pathname = `${healthUrl.pathname.replace(/\/+$/, "")}/status`;
     healthUrl.search = "";
     if (agentId) healthUrl.searchParams.set("agentId", String(agentId));
+    healthUrl.searchParams.set("compact", "1");
     healthUrl.hash = "";
   } catch {
     return { state: "unavailable" };
