@@ -65,6 +65,7 @@ test("formats remote header as two columns", () => {
     reconnects: 12,
     terminal: true,
     desktop: true,
+    learn: true,
   }, 118);
 
   const lines = output.split("\n");
@@ -84,6 +85,7 @@ test("renders combined online status in green", () => {
     status: "connected",
     relayHealth: { state: "unavailable", code: 200, checkedAt: Date.now() },
     relay: "chat-relay.example.dev",
+    learn: true,
   }, 118, { color: true });
 
   assert.match(output, /\x1b\[32m● Online\x1b\[0m/);
@@ -181,6 +183,25 @@ test("tui redraw stays inside terminal bounds and uses alternate screen", () => 
   assert.ok(lines.length <= output.rows - 1);
   assert.ok(lines.every((line) => stripAnsi(line).length <= output.columns - 1));
   assert.match(frame, /\x1b\[36m/);
+});
+
+test("TUI Learn indicator follows Worker capability instead of local config defaults", () => {
+  const tui = new RemoteTui({
+    config: { relayUrl: "https://chat-relay.example.workers.dev", learnEnabled: true },
+    version: "test",
+    output: { isTTY: false, write() {} },
+  });
+
+  let header = formatTwoColumnHeader({ ...tui.state, uptimeMs: 0 }, 118);
+  assert.match(header, /Learn\s+checking/);
+
+  tui.setRelayHealth({ state: "reachable", features: { learn: true } });
+  header = formatTwoColumnHeader({ ...tui.state, uptimeMs: 0 }, 118);
+  assert.match(header, /Learn\s+enabled/);
+
+  tui.setRelayHealth({ state: "reachable", features: { learn: false } });
+  header = formatTwoColumnHeader({ ...tui.state, uptimeMs: 0 }, 118);
+  assert.match(header, /Learn\s+disabled/);
 });
 
 test("TUI keeps agent socket state separate from Worker HTTP health", () => {

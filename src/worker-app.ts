@@ -1951,6 +1951,7 @@ export default {
         }),
         getRelayStatus: (agentId) => env.RELAY.get(env.RELAY.idFromName(agentId))
           .fetch("https://relay.internal/status"),
+        features: { learn: true },
       });
     }
     if (path === "/relay") {
