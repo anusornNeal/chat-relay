@@ -121,6 +121,14 @@ type OAuthConsentRecord = {
   expiresAt: string;
 };
 
+type GoogleOAuthStateRecord = {
+  nonce: string;
+  verifier: string;
+  continuation?: string;
+  createdAt: string;
+  expiresAt: string;
+};
+
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const REMEMBERED_ADMIN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -134,6 +142,7 @@ const OAUTH_ACCESS_TTL_MS = 60 * 60 * 1000;
 const OAUTH_REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const OAUTH_CONSENT_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const OAUTH_REFRESH_REPLAY_TTL_MS = 5 * 60 * 1000;
+const GOOGLE_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const OAUTH_REGISTER_WINDOW_MS = 15 * 60 * 1000;
 const OAUTH_REGISTER_MAX = 60;
 const json = (value: unknown, status = 200) => Response.json(value, { status });
@@ -159,6 +168,7 @@ const key = {
   oauthAccess: (hash: string) => `oauth-access:${hash}`,
   oauthRefresh: (hash: string) => `oauth-refresh:${hash}`,
   oauthRefreshReplay: (hash: string) => `oauth-refresh-replay:${hash}`,
+  googleOAuthState: (state: string) => `google-oauth-state:${state}`,
   oauthRegisterRate: (sourceHash: string) => `oauth-register-rate:${sourceHash}`,
 };
 
@@ -284,6 +294,8 @@ export class Registry extends DurableObject {
       case "/oauth/client/authorized": return this.oauthClientAuthorized(body);
       case "/oauth/password": return this.oauthPassword(body);
       case "/google/upsert": return this.upsertGoogleUser(body);
+      case "/oauth/google-state/create": return this.createGoogleOAuthState(body);
+      case "/oauth/google-state/consume": return this.consumeGoogleOAuthState(body);
       case "/oauth/code/create": return this.createOAuthCode(body);
       case "/oauth/code/exchange": return this.exchangeOAuthCode(body);
       case "/oauth/refresh/exchange": return this.exchangeOAuthRefresh(body);
@@ -678,6 +690,7 @@ export class Registry extends DurableObject {
       { prefix: "oauth-access:", device: false },
       { prefix: "oauth-refresh:", device: false },
       { prefix: "oauth-refresh-replay:", device: false },
+      { prefix: "google-oauth-state:", device: false },
     ];
     let scanned = 0;
     let deletedRecords = 0;
@@ -1194,6 +1207,53 @@ export class Registry extends DurableObject {
       [consentStorageKey]: consent,
     });
     return json({ ok: true });
+  }
+
+  private async createGoogleOAuthState(body: any): Promise<Response> {
+    const state = String(body?.state ?? "");
+    const nonce = String(body?.nonce ?? "");
+    const verifier = String(body?.verifier ?? "");
+    const continuation = String(body?.continuation ?? "");
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(state) ||
+        !/^[A-Za-z0-9_-]{32,128}$/.test(nonce) ||
+        !/^[A-Za-z0-9_-]{43,128}$/.test(verifier) ||
+        continuation.length > 8192) {
+      return json({ error: "invalid_google_oauth_state" }, 400);
+    }
+
+    const now = new Date();
+    const record: GoogleOAuthStateRecord = {
+      nonce,
+      verifier,
+      ...(continuation ? { continuation } : {}),
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + GOOGLE_OAUTH_STATE_TTL_MS).toISOString(),
+    };
+    await this.ctx.storage.put(key.googleOAuthState(state), record);
+    return json({ ok: true, expiresAt: record.expiresAt });
+  }
+
+  private async consumeGoogleOAuthState(body: any): Promise<Response> {
+    const state = String(body?.state ?? "");
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(state)) {
+      return json({ error: "invalid_google_oauth_state" }, 400);
+    }
+
+    const storageKey = key.googleOAuthState(state);
+    const record = await this.ctx.storage.get<GoogleOAuthStateRecord>(storageKey);
+    if (!record) return json({ error: "google_oauth_state_not_found" }, 404);
+    await this.ctx.storage.delete(storageKey);
+    if (isExpired(record.expiresAt)) {
+      return json({ error: "google_oauth_state_expired" }, 410);
+    }
+    return json({
+      ok: true,
+      nonce: record.nonce,
+      verifier: record.verifier,
+      ...(record.continuation ? { continuation: record.continuation } : {}),
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+    });
   }
 
   private async createOAuthTokens(

@@ -466,6 +466,7 @@ export async function handleOAuth(
       googleEnv,
       JSON.stringify({ kind: "connector-oauth", params: validated.params }),
       { selectAccount: false },
+      registryCall,
     );
   }
 

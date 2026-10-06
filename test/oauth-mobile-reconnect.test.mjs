@@ -5,11 +5,15 @@ const oauth = fs.readFileSync(new URL("../src/oauth.ts", import.meta.url), "utf8
 const google = fs.readFileSync(new URL("../src/google-auth.ts", import.meta.url), "utf8");
 const worker = fs.readFileSync(new URL("../src/worker-app.ts", import.meta.url), "utf8");
 const admin = fs.readFileSync(new URL("../src/admin.ts", import.meta.url), "utf8");
+const registry = fs.readFileSync(new URL("../src/registry.ts", import.meta.url), "utf8");
 
 assert.match(oauth, /recoveryQuery\.set\("recovery", "1"\)/);
 assert.match(oauth, /Use owner recovery instead/);
 assert.match(google, /function connectorRecoveryHref\(/);
 assert.match(google, /Use owner recovery in this browser/);
+assert.ok(google.includes('"/oauth/google-state/create"'));
+assert.ok(google.includes('"/oauth/google-state/consume"'));
+assert.match(registry, /googleOAuthState/);
 assert.match(worker, /connector\.oauth\.authorize\.response/);
 assert.match(worker, /connector\.oauth\.google_start\.response/);
 assert.match(admin, /oauth\.google\.callback\.failure/);

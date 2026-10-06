@@ -130,7 +130,7 @@ export async function handleDeviceAuth(
       return page("Authorization rejected", "<h1>Authorization rejected</h1><p>Submit this device code from the relay sign-in page.</p>", 403);
     }
     if (!googleEnv.GOOGLE_CLIENT_ID || !googleEnv.GOOGLE_CLIENT_SECRET) {
-      return startGoogleLogin(request, googleEnv);
+      return startGoogleLogin(request, googleEnv, "", {}, registryCall);
     }
     const form = await request.formData().catch(() => null);
     const userCode = String(form?.get("userCode") ?? "").trim().toUpperCase();
@@ -143,7 +143,7 @@ export async function handleDeviceAuth(
     if (!lookup.ok) return deviceAuthorizationError(userCode, lookup);
     return startGoogleLogin(request, googleEnv, JSON.stringify({
       kind: "device-auth", userCode, sourceHash: networkHash,
-    }));
+    }), {}, registryCall);
   }
 
   if (path === "/auth/device/token" && request.method === "POST") {

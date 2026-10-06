@@ -6,6 +6,7 @@ export type GoogleAuthEnv = {
 };
 
 export type GoogleIdentity = { sub: string; email: string; name: string };
+export type GoogleStateCall = (path: string, body?: unknown) => Promise<Response>;
 
 const GOOGLE_STATE_COOKIE = "chat_relay_google_oauth";
 const GOOGLE_STATE_TTL_SECONDS = 10 * 60;
@@ -169,7 +170,7 @@ function googleError(message: string, status = 400, recoveryHref = "") {
   );
 }
 
-export async function startGoogleLogin(request: Request, env: GoogleAuthEnv, continuation = "", options: { selectAccount?: boolean } = {}): Promise<Response> {
+export async function startGoogleLogin(request: Request, env: GoogleAuthEnv, continuation = "", options: { selectAccount?: boolean } = {}, stateCall?: GoogleStateCall): Promise<Response> {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
     return googleError("Google login is not configured.", 503);
   }
@@ -196,6 +197,16 @@ export async function startGoogleLogin(request: Request, env: GoogleAuthEnv, con
     ...(continuation ? { continuation } : {}),
   });
 
+  if (stateCall) {
+    const stored = await stateCall("/oauth/google-state/create", {
+      state,
+      nonce,
+      verifier,
+      ...(continuation ? { continuation } : {}),
+    }).catch(() => null);
+    if (!stored?.ok) return googleError("Unable to start Google sign-in.", 503);
+  }
+
   return new Response(null, {
     status: 302,
     headers: {
@@ -209,6 +220,7 @@ export async function startGoogleLogin(request: Request, env: GoogleAuthEnv, con
 export async function finishGoogleLogin(
   request: Request,
   env: GoogleAuthEnv,
+  stateCall?: GoogleStateCall,
 ): Promise<{ ok: true; identity: GoogleIdentity; continuation?: string } | { ok: false; response: Response }> {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
     return { ok: false, response: googleError("Google login is not configured.", 503) };
@@ -218,10 +230,25 @@ export async function finishGoogleLogin(
   const returnedState = url.searchParams.get("state") || "";
   const code = url.searchParams.get("code") || "";
   const providerError = url.searchParams.get("error") || "";
-  const statePayload = await readSignedGoogleState(
-    env.GOOGLE_CLIENT_SECRET,
-    cookieValue(request, GOOGLE_STATE_COOKIE),
-  );
+  let statePayload: { state?: unknown; nonce?: unknown; verifier?: unknown; continuation?: unknown } | null = null;
+  if (returnedState && stateCall) {
+    const stored = await stateCall("/oauth/google-state/consume", { state: returnedState }).catch(() => null);
+    if (stored?.ok) {
+      const data = await stored.json<any>().catch(() => ({}));
+      statePayload = {
+        state: returnedState,
+        nonce: data.nonce,
+        verifier: data.verifier,
+        continuation: data.continuation,
+      };
+    }
+  }
+  if (!statePayload) {
+    statePayload = await readSignedGoogleState(
+      env.GOOGLE_CLIENT_SECRET,
+      cookieValue(request, GOOGLE_STATE_COOKIE),
+    );
+  }
   const state = typeof statePayload?.state === "string" ? statePayload.state : "";
   const nonce = typeof statePayload?.nonce === "string" ? statePayload.nonce : "";
   const verifier = typeof statePayload?.verifier === "string" ? statePayload.verifier : "";

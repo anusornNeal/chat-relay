@@ -288,11 +288,11 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   const operatorAuthorized = Boolean(env.ADMIN_TOKEN && authorized(request, env.ADMIN_TOKEN));
 
   if (path === "/admin/google/start" && request.method === "GET") {
-    return startGoogleLogin(request, env);
+    return startGoogleLogin(request, env, "", {}, (path, body) => registryCall(env, path, body));
   }
 
   if (path === "/admin/google/callback" && request.method === "GET") {
-    const google = await finishGoogleLogin(request, env);
+    const google = await finishGoogleLogin(request, env, (path, body) => registryCall(env, path, body));
     if (!google.ok) {
       const providerErrorRaw = String(url.searchParams.get("error") || "").trim().toLowerCase();
       const providerError = /^[a-z][a-z0-9_.:-]{0,79}$/.test(providerErrorRaw)

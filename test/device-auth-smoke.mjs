@@ -75,7 +75,7 @@ const start = async (agentId = "laptop") => {
 };
 const exchange = code => device(jsonPost("/auth/device/token", { deviceCode: code }));
 const securityRevision = async () => (await (await registryCall("/security/revision")).json()).revision;
-function callbackFrom(response, account = "alice", overrides = {}, expectedPrompt = "select_account") {
+function callbackFrom(response, account = "alice", overrides = {}, expectedPrompt = "select_account", includeCookie = true) {
   assert.equal(response.status, 302);
   const google = new URL(response.headers.get("location"));
   assert.equal(google.origin, "https://accounts.google.com");
@@ -85,7 +85,7 @@ function callbackFrom(response, account = "alice", overrides = {}, expectedPromp
     sub: account, email: account + "@example.com", name: account, email_verified: true,
     exp: Math.floor(Date.now()/1000)+600, nonce: google.searchParams.get("nonce"), ...overrides });
   return request("/admin/google/callback?" + new URLSearchParams({ state: google.searchParams.get("state"), code }), {
-    headers: { cookie: response.headers.get("set-cookie").split(";")[0] },
+    headers: includeCookie ? { cookie: response.headers.get("set-cookie").split(";")[0] } : {},
   });
 }
 const approvalStart = code => device(post("/auth/device/approve", { userCode: code }));
@@ -122,7 +122,7 @@ try {
   const wrongState = new URL(callback.url); wrongState.searchParams.set("state", "forged");
   const before = providerRequests;
   assert.equal((await handleAdmin(new Request(wrongState, { headers: callback.headers }), env)).status, 400);
-  assert.equal((await handleAdmin(new Request(callback.url, { headers: { cookie: callback.headers.get("cookie") + "tampered" } }), env)).status, 400);
+  // The callback no longer depends on a browser cookie; the one-time server state is authoritative.
   assert.equal(providerRequests, before);
   const approved = await handleAdmin(callback, env);
   assert.equal(approved.status, 200); assert.match(approved.headers.get("set-cookie"), /Max-Age=0/);
@@ -146,7 +146,7 @@ try {
     code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
     resource: base + "/mcp", scope: "mcp offline_access", state: "client-state" };
   const connectorStart = await handleOAuth(request("/authorize/google/start?" + new URLSearchParams(params)), registryCall, env);
-  const connector = await handleAdmin(callbackFrom(connectorStart, "alice", {}, null), env);
+  const connector = await handleAdmin(callbackFrom(connectorStart, "alice", {}, null, false), env);
   assert.equal(connector.status, 302);
   const authCode = new URL(connector.headers.get("location")).searchParams.get("code");
   const codeRecord = await storage.get("oauth-code:" + await hashToken(authCode));
