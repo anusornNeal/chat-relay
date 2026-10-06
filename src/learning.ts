@@ -430,13 +430,24 @@ export class Learning extends DurableObject {
     const existingRow = this.ctx.storage.sql.exec<any>(`SELECT * FROM ${TABLE} WHERE id = ? LIMIT 1`, id).toArray()[0];
     if (!existingRow) return Response.json({ error: "not_found" }, { status: 404 });
     const existing = rowToRecord(existingRow);
-    const column = value === "positive" ? "positive_feedback" : "negative_feedback";
+    const positiveFeedback = value === "positive" ? 1 : 0;
+    const negativeFeedback = value === "negative" ? 1 : 0;
+    if (existing.positiveFeedback === positiveFeedback && existing.negativeFeedback === negativeFeedback) {
+      return Response.json({ ok: true, changed: false, item: existing });
+    }
+
     const now = new Date().toISOString();
-    this.ctx.storage.sql.exec(`UPDATE ${TABLE} SET ${column} = ${column} + 1, updated_at = ? WHERE id = ?`, now, id);
+    this.ctx.storage.sql.exec(
+      `UPDATE ${TABLE} SET positive_feedback = ?, negative_feedback = ?, updated_at = ? WHERE id = ?`,
+      positiveFeedback,
+      negativeFeedback,
+      now,
+      id,
+    );
     const item: LearnRecord = {
       ...existing,
-      positiveFeedback: existing.positiveFeedback + (value === "positive" ? 1 : 0),
-      negativeFeedback: existing.negativeFeedback + (value === "negative" ? 1 : 0),
+      positiveFeedback,
+      negativeFeedback,
       updatedAt: now,
     };
     const change = this.makeChange({

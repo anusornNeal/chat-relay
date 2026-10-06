@@ -141,17 +141,15 @@ class FakeSql {
       return new Cursor();
     }
 
-    if (q.startsWith("UPDATE learning_memory_v1 SET positive_feedback")) {
-      const [updatedAt,id]=args;
+    if (q.startsWith("UPDATE learning_memory_v1 SET positive_feedback = ?, negative_feedback = ?, updated_at = ? WHERE id = ?")) {
+      const [positiveFeedback,negativeFeedback,updatedAt,id]=args;
       const row=this.rows.get(id);
-      if (row) { row.positive_feedback++; row.updated_at=updatedAt; this.mutations++; }
-      return new Cursor();
-    }
-
-    if (q.startsWith("UPDATE learning_memory_v1 SET negative_feedback")) {
-      const [updatedAt,id]=args;
-      const row=this.rows.get(id);
-      if (row) { row.negative_feedback++; row.updated_at=updatedAt; this.mutations++; }
+      if (row) {
+        row.positive_feedback=Number(positiveFeedback);
+        row.negative_feedback=Number(negativeFeedback);
+        row.updated_at=updatedAt;
+        this.mutations++;
+      }
       return new Cursor();
     }
 
@@ -329,8 +327,16 @@ assert.equal(cappedUpdate.status,200,"existing memories must remain updatable at
 assert.equal(capped.sql.rows.size,512);
 
 const feedback=await a.call("/feedback",{id,value:"positive"});
+assert.equal(feedback.changed,true);
 assert.equal(feedback.item.positiveFeedback,1);
-assert.equal((await a.call("/feedback",{id,value:"negative"})).item.negativeFeedback,1);
+assert.equal(feedback.item.negativeFeedback,0);
+const mutationsAfterPositive=a.sql.mutations;
+const duplicatePositive=await a.call("/feedback",{id,value:"positive"});
+assert.equal(duplicatePositive.changed,false,"selecting the same radio state must be idempotent");
+assert.equal(a.sql.mutations,mutationsAfterPositive,"duplicate radio state must not write");
+const negative=await a.call("/feedback",{id,value:"negative"});
+assert.equal(negative.item.positiveFeedback,0,"negative must clear positive state");
+assert.equal(negative.item.negativeFeedback,1,"negative must become the exclusive state");
 
 assert.equal((await a.call("/put",{key:"bad",kind:"preference",scope:"project",content:"missing scope key"})).status,400);
 assert.equal((await a.call("/put",{key:"bad",kind:"unknown",scope:"global",content:"x"})).status,400);

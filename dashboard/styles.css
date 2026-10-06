@@ -342,10 +342,20 @@ tr:last-child td{border-bottom:0}
 .learn-kind-badge{display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:color-mix(in srgb,var(--learn-accent) 10%,#fff);color:color-mix(in srgb,var(--learn-accent) 78%,#1e262c);font-size:8px;font-weight:800;letter-spacing:.07em;text-transform:uppercase}
 .learn-memory p{margin:0;color:#59646d;font-size:11px;line-height:1.58;overflow-wrap:anywhere}
 .learn-memory-meta{display:flex;flex-wrap:wrap;gap:5px 10px;padding-top:9px;border-top:1px solid #edf0f2;color:#8a939c;font-size:9px}
-.learn-actions{display:flex;gap:6px;flex-wrap:wrap}
+.learn-scope-filter{appearance:none;font:inherit;text-align:left;color:inherit;cursor:pointer;transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
+.learn-scope-filter:hover{border-color:#bcc7d0}
+.learn-scope-filter.active{border-color:#697b8d;background:#fbfcfd;box-shadow:0 0 0 2px rgba(73,91,108,.09)}
+.learn-scope-filter.active::after{content:"";position:absolute;inset:0 auto 0 0;width:3px;border-radius:var(--radius) 0 0 var(--radius);background:#5f7386}
+.learn-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.learn-feedback-options{display:flex;gap:6px;flex-wrap:wrap}
+.learn-radio{display:inline-flex;align-items:center;gap:6px;min-height:29px;padding:4px 9px;border:1px solid #dce2e7;border-radius:999px;background:#fff;color:#5e6871;font-size:9px;cursor:pointer;transition:border-color .15s ease,background .15s ease,color .15s ease}
+.learn-radio input{margin:0;width:12px;height:12px;cursor:pointer}
+.learn-radio.useful input{accent-color:#418a62}
+.learn-radio.not-useful input{accent-color:#b07a26}
+.learn-radio.useful:has(input:checked){border-color:#91c7a7;background:#f1faf5;color:#285e3e}
+.learn-radio.not-useful:has(input:checked){border-color:#d9bb76;background:#fff8e9;color:#765315}
+.learn-radio:hover{border-color:#b9c4cc}
 .button.learn-small{min-height:29px;padding:4px 8px;font-size:9px}
-.button.learn-small.useful:hover{border-color:#9bcbb0;background:#f1faf5}
-.button.learn-small.not-useful:hover{border-color:#d9bd7b;background:#fff9eb}
 .button.learn-small.danger{color:#983c3c}
 .button.learn-small.danger:hover{border-color:#e5aaaa;background:#fff3f3}
 .learn-empty{column-span:all}

@@ -627,6 +627,7 @@ async function loadUsage({ patch = false } = {}) {
 
 let learnProfileSnapshot = null;
 let learnKindFilter = "all";
+let learnScopeFilter = "all";
 
 const LEARN_KIND_ORDER = [
   "workflow",
@@ -640,6 +641,7 @@ const LEARN_KIND_ORDER = [
   "preference",
   "correction",
 ];
+const LEARN_SCOPE_ORDER = ["global", "project", "agent"];
 
 function learnKindLabel(kind) {
   return ({
@@ -676,6 +678,38 @@ function learnSummary(items) {
   return { total: items.length, byScope, byKind };
 }
 
+function sortLearnItems(items) {
+  return [...items].sort((a, b) => {
+    const kindA = LEARN_KIND_ORDER.indexOf(a.kind);
+    const kindB = LEARN_KIND_ORDER.indexOf(b.kind);
+    const normalizedKindA = kindA < 0 ? LEARN_KIND_ORDER.length : kindA;
+    const normalizedKindB = kindB < 0 ? LEARN_KIND_ORDER.length : kindB;
+    if (normalizedKindA !== normalizedKindB) return normalizedKindA - normalizedKindB;
+
+    const scopeA = LEARN_SCOPE_ORDER.indexOf(a.scope);
+    const scopeB = LEARN_SCOPE_ORDER.indexOf(b.scope);
+    if (scopeA !== scopeB) return scopeA - scopeB;
+
+    const updated = String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+    return updated || String(a.key || "").localeCompare(String(b.key || ""));
+  });
+}
+
+function learnScopeItems(items) {
+  return learnScopeFilter === "all"
+    ? items
+    : items.filter((item) => item.scope === learnScopeFilter);
+}
+
+function learnScopeMetric(label, value, meta, scope) {
+  const active = learnScopeFilter === scope ? " active" : "";
+  return '<button class="metric learn-scope-filter' + active + '" type="button" data-learn-scope="' + esc(scope) + '" aria-pressed="' + (learnScopeFilter === scope ? "true" : "false") + '">' +
+    '<div class="metric-label">' + esc(label) + '</div>' +
+    '<div class="metric-value">' + esc(value) + '</div>' +
+    '<div class="metric-meta">' + esc(meta) + '</div>' +
+  '</button>';
+}
+
 function exportLearnProfile() {
   if (!learnProfileSnapshot) return;
   const blob = new Blob([JSON.stringify(learnProfileSnapshot, null, 2)], { type: "application/json" });
@@ -705,7 +739,8 @@ function applyLearnMutation(result) {
     summary: learnSummary(items),
   };
 
-  if (learnKindFilter !== "all" && !items.some((item) => item.kind === learnKindFilter)) {
+  const scopedItems = learnScopeItems(items);
+  if (learnKindFilter !== "all" && !scopedItems.some((item) => item.kind === learnKindFilter)) {
     learnKindFilter = "all";
   }
 }
@@ -721,14 +756,19 @@ function renderLearnProfile({ patch = false } = {}) {
   const items = Array.isArray(data.items) ? data.items : [];
   const summary = data.summary || learnSummary(items);
   const byScope = summary.byScope || {};
-  const byKind = summary.byKind || {};
-  const visibleItems = learnKindFilter === "all"
-    ? items
-    : items.filter((item) => item.kind === learnKindFilter);
+
+  const scopedItems = learnScopeItems(items);
+  const scopedSummary = learnSummary(scopedItems);
+  const byKind = scopedSummary.byKind || {};
+  const visibleItems = sortLearnItems(
+    learnKindFilter === "all"
+      ? scopedItems
+      : scopedItems.filter((item) => item.kind === learnKindFilter),
+  );
 
   const categoryButtons = [
     '<button class="learn-category-filter' + (learnKindFilter === "all" ? " active" : "") + '" type="button" data-learn-kind="all">' +
-      '<span>All types</span><strong>' + esc(items.length) + '</strong></button>',
+      '<span>All types</span><strong>' + esc(scopedItems.length) + '</strong></button>',
     ...LEARN_KIND_ORDER.filter((kind) => Number(byKind[kind]) > 0).map((kind) =>
       '<button class="learn-category-filter ' + esc(learnKindClass(kind)) + (learnKindFilter === kind ? " active" : "") + '" type="button" data-learn-kind="' + esc(kind) + '">' +
         '<span>' + esc(learnKindLabel(kind)) + '</span><strong>' + esc(byKind[kind]) + '</strong></button>'
@@ -737,6 +777,12 @@ function renderLearnProfile({ patch = false } = {}) {
 
   const memoryCards = visibleItems.length ? visibleItems.map((item) => {
     const kindClass = learnKindClass(item.kind);
+    const positive = Number(item.positiveFeedback || 0);
+    const negative = Number(item.negativeFeedback || 0);
+    const positiveChecked = positive > negative ? " checked" : "";
+    const negativeChecked = negative > positive ? " checked" : "";
+    const radioName = "learn-feedback-" + String(item.id).replace(/[^a-z0-9_-]/gi, "-");
+
     return '<article class="learn-memory ' + esc(kindClass) + '" data-kind="' + esc(item.kind) + '" data-live-key="learn-' + esc(item.id) + '">' +
       '<div class="learn-memory-head">' +
         '<div><span class="learn-kind-badge ' + esc(kindClass) + '">' + esc(learnKindLabel(item.kind)) + '</span>' +
@@ -747,29 +793,38 @@ function renderLearnProfile({ patch = false } = {}) {
       '<div class="learn-memory-meta">' +
         '<span>Confidence ' + esc(item.confidence) + '%</span>' +
         '<span>Updated ' + esc(bkkTime(item.updatedAt)) + '</span>' +
-        '<span>👍 ' + esc(item.positiveFeedback || 0) + ' · 👎 ' + esc(item.negativeFeedback || 0) + '</span>' +
       '</div>' +
       '<div class="learn-actions">' +
-        '<button class="button learn-small useful" type="button" data-learn-feedback="positive" data-memory-id="' + esc(item.id) + '" title="Increase this memory’s retrieval priority">👍 Useful</button>' +
-        '<button class="button learn-small not-useful" type="button" data-learn-feedback="negative" data-memory-id="' + esc(item.id) + '" title="Lower this memory’s retrieval priority">👎 Not useful</button>' +
+        '<div class="learn-feedback-options" role="radiogroup" aria-label="Feedback for ' + esc(item.key) + '">' +
+          '<label class="learn-radio useful"><input type="radio" name="' + esc(radioName) + '" value="positive" data-learn-feedback="positive" data-memory-id="' + esc(item.id) + '"' + positiveChecked + '><span>👍 Useful</span></label>' +
+          '<label class="learn-radio not-useful"><input type="radio" name="' + esc(radioName) + '" value="negative" data-learn-feedback="negative" data-memory-id="' + esc(item.id) + '"' + negativeChecked + '><span>👎 Not useful</span></label>' +
+        '</div>' +
         '<button class="button learn-small danger" type="button" data-learn-delete="' + esc(item.id) + '" title="Remove this memory">🗑 Remove</button>' +
       '</div>' +
     '</article>';
-  }).join("") : '<div class="table-empty learn-empty">' + icon("info") + '<strong>No memories in this type</strong><span>Choose another category to see learned preferences and working patterns.</span></div>';
+  }).join("") : '<div class="table-empty learn-empty">' + icon("info") + '<strong>No memories in this filter</strong><span>Choose another level or category to see learned preferences and working patterns.</span></div>';
+
+  const scopeLabel = ({
+    all: "All levels",
+    global: "Global",
+    project: "Projects",
+    agent: "Agents",
+  })[learnScopeFilter] || "All levels";
+  const typeLabel = learnKindFilter === "all" ? "All types" : learnKindLabel(learnKindFilter);
 
   renderContent(
     '<div class="overview-toolbar"><span class="privacy-chip">' + icon("info") + 'Only your Learn profile</span>' +
       '<button id="learnExport" class="button" type="button">Export JSON</button></div>' +
     '<div class="metric-grid learn-metrics">' +
-      metricCard("Learned memories", fmtNum(summary.total || items.length), "current active memories") +
-      metricCard("Global", fmtNum(byScope.global), "shared across apps") +
-      metricCard("Projects", fmtNum(byScope.project), "project-specific") +
-      metricCard("Agents", fmtNum(byScope.agent), "agent-specific") +
+      learnScopeMetric("Learned memories", fmtNum(summary.total || items.length), "all levels", "all") +
+      learnScopeMetric("Global", fmtNum(byScope.global), "shared across apps", "global") +
+      learnScopeMetric("Projects", fmtNum(byScope.project), "project-specific", "project") +
+      learnScopeMetric("Agents", fmtNum(byScope.agent), "agent-specific", "agent") +
     '</div>' +
     '<section class="panel learn-profile-panel">' +
       '<div class="panel-heading"><div><div class="panel-kicker">Categories</div><h2>What Chat Relay learned</h2></div><span class="panel-meta">Loaded only when you open this page</span></div>' +
       '<div class="learn-category-bar">' + categoryButtons + '</div>' +
-      '<div class="learn-results-meta"><strong>' + esc(learnKindFilter === "all" ? "All types" : learnKindLabel(learnKindFilter)) + '</strong><span>' + esc(visibleItems.length) + ' memories</span></div>' +
+      '<div class="learn-results-meta"><strong>' + esc(scopeLabel + " · " + typeLabel) + '</strong><span>Sorted by type · ' + esc(visibleItems.length) + ' memories</span></div>' +
       '<div class="learn-memory-grid">' + memoryCards + '</div>' +
     '</section>',
     patch,
@@ -778,6 +833,17 @@ function renderLearnProfile({ patch = false } = {}) {
   const exportButton = $("learnExport");
   if (exportButton) exportButton.onclick = exportLearnProfile;
 
+  document.querySelectorAll("[data-learn-scope]").forEach((button) => {
+    button.onclick = () => {
+      learnScopeFilter = button.dataset.learnScope || "all";
+      const nextScopedItems = learnScopeItems(items);
+      if (learnKindFilter !== "all" && !nextScopedItems.some((item) => item.kind === learnKindFilter)) {
+        learnKindFilter = "all";
+      }
+      renderLearnProfile({ patch: true });
+    };
+  });
+
   document.querySelectorAll("[data-learn-kind]").forEach((button) => {
     button.onclick = () => {
       learnKindFilter = button.dataset.learnKind || "all";
@@ -785,11 +851,14 @@ function renderLearnProfile({ patch = false } = {}) {
     };
   });
 
-  document.querySelectorAll("[data-learn-feedback]").forEach((button) => {
-    button.onclick = () => mutateLearn("/admin/api/learn/feedback", {
-      id: button.dataset.memoryId,
-      value: button.dataset.learnFeedback,
-    });
+  document.querySelectorAll("input[data-learn-feedback]").forEach((input) => {
+    input.onchange = () => {
+      if (!input.checked) return;
+      mutateLearn("/admin/api/learn/feedback", {
+        id: input.dataset.memoryId,
+        value: input.dataset.learnFeedback,
+      });
+    };
   });
 
   document.querySelectorAll("[data-learn-delete]").forEach((button) => {
