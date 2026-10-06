@@ -221,3 +221,40 @@ The MCP surface is:
 Memories are partitioned by authenticated account using a dedicated Learning Durable Object selected from the server-side `user.id`. Callers cannot provide or override an account id. Supported scopes are `global`, `project`, and `agent`; project and agent memories require a scope key.
 
 The first version is intentionally lightweight: there are no embeddings, vector database, local LLM, transcript ingestion, or per-tool-call writes. A normal tool call causes no Learn storage write. Storage changes happen only when an explicit Learn mutation is requested, while reads are bounded to at most 100 records.
+
+
+## Progressive Learn bootstrap and routing
+
+Learn context is loaded progressively so a fresh ChatGPT conversation does not need to remember to call `learn_get` before using Relay.
+
+```mermaid
+flowchart TD
+    U[User starts or continues a chat] --> M[ChatGPT calls Relay]
+    M --> A[Authenticate account]
+    A --> G{Global context loaded in this MCP session?}
+    G -- No --> LG[Read global Learn once]
+    G -- Yes --> S[Continue]
+    LG --> S
+    S --> P{Concrete project signal? path / cwd / repo}
+    P -- Yes --> PR[Match explicit project-root hint]
+    PR --> LP[Read project Learn once]
+    P -- No --> AG
+    LP --> AG
+    AG{Agent selected or safely resolved?}
+    AG -- Yes --> LA[Read agent Learn once]
+    AG -- No --> E
+    LA --> E
+    E[Attach bounded learnedContext envelope] --> R[ChatGPT chooses action and tool]
+    R --> SEC[Relay enforces auth, grants, allowedRoots and capabilities]
+    SEC --> X[Execute]
+```
+
+The decision boundary is deliberate:
+
+- **Relay decides mechanical routing only:** authenticated account, whether a scope was already loaded, project identity from explicit `project-root:<projectKey>` memories, explicit/resolved agent, and available permissions/capabilities.
+- **ChatGPT decides semantic actions and tools:** whether to read files, search, edit, run terminal commands, use desktop control, or re-plan after a failure.
+- Learned hints never override authorization, grants, allowed roots, destructive-tool policy, or capability checks.
+
+Routing hints are explicit memories. A global `project_context` memory with key `project-root:<projectKey>` stores the concrete project root. A `preferred-agent` memory may exist in project scope (preferred) or global scope (fallback). No project is guessed when no explicit root hint matches.
+
+The intended read budget is bounded: global context at most once per MCP session, each activated project at most once per session, and each activated agent at most once per session. Bootstrap performs no Learn writes.
