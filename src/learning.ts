@@ -112,6 +112,186 @@ function summarizeMemory(content: string) {
   return cleanText(content.replace(/\s+/g, " "), 320);
 }
 
+type ProjectContextBucket = "architecture" | "product" | "ux" | "operations" | "development";
+
+export type LearnCompactionGroup = {
+  bucket: ProjectContextBucket;
+  canonicalKey: string;
+  mergedSourceKeys: string[];
+  removedIds: string[];
+  item: LearnRecord;
+  changed: boolean;
+};
+
+export type LearnCompactionResult = {
+  applied: boolean;
+  scopeKey: string;
+  groups: LearnCompactionGroup[];
+  removedIds: string[];
+  items: LearnRecord[];
+  truncated: boolean;
+};
+
+const PROJECT_CONTEXT_PREFIX = "project-context:";
+const PROJECT_CONTEXT_SCAN_LIMIT = 32;
+const PROJECT_CONTEXT_COMPACT_TRIGGER = 6;
+const PROJECT_CONTEXT_MAX_FACTS = 12;
+const PROJECT_CONTEXT_MAX_CONTENT_CHARS = 3600;
+const PROJECT_CONTEXT_MAX_FACT_CHARS = 560;
+
+const PROJECT_CONTEXT_KEYWORDS: Record<ProjectContextBucket, string[]> = {
+  ux: [
+    "ux", "ui", "dashboard", "tui", "screen", "layout", "visual", "display",
+    "presentation", "map-local", "maplocal", "favorite-domain", "favourite-domain",
+  ],
+  operations: [
+    "durable", "request", "row-read", "row-write", "cost", "performance", "usage",
+    "cache", "poll", "deploy", "ci", "reconnect", "reliability", "quota", "limit",
+    "optimize", "optimization", "latency", "throughput",
+  ],
+  development: [
+    "devflow", "branch", "worktree", "commit", "review", "test", "coding",
+    "development", "convention", "release", "merge", "workflow",
+  ],
+  architecture: [
+    "architecture", "core", "generic", "security", "auth", "permission", "routing",
+    "parallel", "concurrency", "protocol", "agent", "memory", "bootstrap",
+  ],
+  product: [],
+};
+
+function projectContextCanonicalKey(bucket: ProjectContextBucket) {
+  return PROJECT_CONTEXT_PREFIX + bucket;
+}
+
+function canonicalProjectContextBucket(key: string): ProjectContextBucket | null {
+  if (!key.startsWith(PROJECT_CONTEXT_PREFIX)) return null;
+  const value = key.slice(PROJECT_CONTEXT_PREFIX.length) as ProjectContextBucket;
+  return ["architecture", "product", "ux", "operations", "development"].includes(value) ? value : null;
+}
+
+function projectContextBucket(key: string, content: string): ProjectContextBucket {
+  const canonical = canonicalProjectContextBucket(key);
+  if (canonical) return canonical;
+  const haystack = (key + " " + content).toLowerCase().replace(/[_\s]+/g, "-");
+  const tokens = new Set(haystack.split(/[^a-z0-9\u0E00-\u0E7F]+/).filter(Boolean));
+  const matches = (keyword: string) => {
+    if (keyword.includes("-")) return haystack.includes(keyword);
+    if (keyword.length <= 3) return tokens.has(keyword);
+    return haystack.includes(keyword);
+  };
+  for (const bucket of ["ux", "operations", "development", "architecture"] as ProjectContextBucket[]) {
+    if (PROJECT_CONTEXT_KEYWORDS[bucket].some(matches)) return bucket;
+  }
+  return "product";
+}
+
+type ProjectContextFact = {
+  sourceKey: string;
+  text: string;
+  score: number;
+  updatedAt: string;
+};
+
+function compactFactText(value: string) {
+  return cleanText(value.replace(/\s+/g, " "), PROJECT_CONTEXT_MAX_FACT_CHARS);
+}
+
+function projectContextFacts(record: LearnRecord): ProjectContextFact[] {
+  const canonical = canonicalProjectContextBucket(record.key);
+  if (canonical) {
+    const parsed: ProjectContextFact[] = [];
+    for (const line of String(record.content || "").split(/\r?\n/)) {
+      const match = line.match(/^\s*-\s+\[([^\]]{1,160})\]\s+(.+)$/);
+      if (!match) continue;
+      const text = compactFactText(match[2]);
+      if (!text) continue;
+      parsed.push({
+        sourceKey: cleanText(match[1], 160),
+        text,
+        score: record.confidence + record.positiveFeedback * 5 - record.negativeFeedback * 7,
+        updatedAt: record.updatedAt,
+      });
+    }
+    if (parsed.length) return parsed;
+  }
+  const text = compactFactText(record.content);
+  return text ? [{
+    sourceKey: record.key,
+    text,
+    score: record.confidence + record.positiveFeedback * 5 - record.negativeFeedback * 7,
+    updatedAt: record.updatedAt,
+  }] : [];
+}
+
+function mergeProjectContextContent(
+  records: LearnRecord[],
+  incoming?: { key: string; content: string; confidence: number; updatedAt: string },
+) {
+  const bySource = new Map<string, ProjectContextFact>();
+  for (const record of records) {
+    for (const fact of projectContextFacts(record)) {
+      const current = bySource.get(fact.sourceKey);
+      if (!current || fact.updatedAt >= current.updatedAt) bySource.set(fact.sourceKey, fact);
+    }
+  }
+
+  if (incoming) {
+    const incomingRecord: LearnRecord = {
+      id: "incoming",
+      key: incoming.key,
+      kind: "project_context",
+      scope: "project",
+      scopeKey: null,
+      content: incoming.content,
+      confidence: incoming.confidence,
+      positiveFeedback: 0,
+      negativeFeedback: 0,
+      createdAt: incoming.updatedAt,
+      updatedAt: incoming.updatedAt,
+    };
+    for (const fact of projectContextFacts(incomingRecord)) {
+      bySource.set(fact.sourceKey, {
+        ...fact,
+        score: 10_000 + incoming.confidence,
+        updatedAt: incoming.updatedAt,
+      });
+    }
+  }
+
+  const ranked = [...bySource.values()].sort((a, b) =>
+    b.score - a.score ||
+    b.updatedAt.localeCompare(a.updatedAt) ||
+    a.sourceKey.localeCompare(b.sourceKey)
+  );
+
+  const chosen: ProjectContextFact[] = [];
+  const seenText = new Set<string>();
+  for (const fact of ranked) {
+    if (chosen.length >= PROJECT_CONTEXT_MAX_FACTS) break;
+    const normalized = fact.text.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]+/g, " ").trim();
+    if (normalized && seenText.has(normalized)) continue;
+    if (normalized) seenText.add(normalized);
+    chosen.push(fact);
+  }
+
+  chosen.sort((a, b) => a.sourceKey.localeCompare(b.sourceKey));
+  const lines: string[] = [];
+  let used = 0;
+  for (const fact of chosen) {
+    const prefix = "- [" + cleanText(fact.sourceKey, 160) + "] ";
+    const remaining = PROJECT_CONTEXT_MAX_CONTENT_CHARS - used - prefix.length - 1;
+    if (remaining <= 24) break;
+    const text = fact.text.slice(0, remaining);
+    lines.push(prefix + text);
+    used += prefix.length + text.length + 1;
+  }
+  return {
+    content: lines.join("\n"),
+    sourceKeys: chosen.map((fact) => fact.sourceKey),
+  };
+}
+
 export class Learning extends DurableObject {
   private memoryCount: number | null = null;
 
@@ -177,6 +357,182 @@ export class Learning extends DurableObject {
 
   private makeChange(input: Omit<LearnChange, "eventId">): LearnChange {
     return { eventId: "lev_" + crypto.randomUUID().replaceAll("-", ""), ...input };
+  }
+
+  private async putProjectContext(
+    sourceKey: string,
+    incomingContent: string,
+    scopeKey: string,
+    confidence: number,
+  ) {
+    const now = new Date().toISOString();
+    const rows = this.ctx.storage.sql.exec<any>(
+      `SELECT * FROM ${TABLE}
+       WHERE kind = ? AND scope = ? AND scope_key = ?
+       ORDER BY updated_at DESC, id ASC
+       LIMIT ?`,
+      "project_context",
+      "project",
+      scopeKey,
+      PROJECT_CONTEXT_SCAN_LIMIT,
+    ).toArray().map(rowToRecord);
+
+    const incomingBucket = projectContextBucket(sourceKey, incomingContent);
+    const sweepAll = rows.length >= PROJECT_CONTEXT_COMPACT_TRIGGER ||
+      rows.some((record) => canonicalProjectContextBucket(record.key) === null);
+    const buckets = new Set<ProjectContextBucket>([incomingBucket]);
+    if (sweepAll) {
+      for (const record of rows) buckets.add(projectContextBucket(record.key, record.content));
+    }
+
+    const potentialDeletions = rows.filter((record) => canonicalProjectContextBucket(record.key) === null).length;
+    const targetRows = rows.filter((record) => projectContextBucket(record.key, record.content) === incomingBucket);
+    const targetCanonicalKey = projectContextCanonicalKey(incomingBucket);
+    const targetCanonicalId = await recordId("project_context", "project", scopeKey, targetCanonicalKey);
+    const targetCanonicalExists = targetRows.some((record) => record.id === targetCanonicalId || record.key === targetCanonicalKey);
+    if (!targetCanonicalExists && targetRows.length === 0 && potentialDeletions === 0 && !(await this.ensureMemoryCapacity())) {
+      return Response.json({ error: "memory_limit", limit: MAX_MEMORIES }, { status: 409 });
+    }
+
+    const groups: LearnCompactionGroup[] = [];
+    const removedIds: string[] = [];
+    const changedItems: LearnRecord[] = [];
+    let targetItem: LearnRecord | null = null;
+    let targetWasExisting = false;
+
+    for (const bucket of buckets) {
+      const canonicalKey = projectContextCanonicalKey(bucket);
+      const canonicalId = await recordId("project_context", "project", scopeKey, canonicalKey);
+      const bucketRows = rows.filter((record) => projectContextBucket(record.key, record.content) === bucket);
+      const canonicalExisting = bucketRows.find((record) => record.id === canonicalId || record.key === canonicalKey) ?? null;
+      const incoming = bucket === incomingBucket
+        ? { key: sourceKey, content: incomingContent, confidence, updatedAt: now }
+        : undefined;
+      const merged = mergeProjectContextContent(bucketRows, incoming);
+      if (!merged.content) continue;
+
+      const groupConfidence = Math.max(
+        incoming?.confidence ?? 0,
+        ...bucketRows.map((record) => record.confidence),
+      );
+      const feedbackSource = canonicalExisting ??
+        [...bucketRows].sort((a, b) =>
+          b.confidence - a.confidence ||
+          b.updatedAt.localeCompare(a.updatedAt)
+        )[0] ??
+        null;
+      const positiveFeedback = feedbackSource?.positiveFeedback === 1 ? 1 : 0;
+      const negativeFeedback = feedbackSource?.negativeFeedback === 1 && positiveFeedback === 0 ? 1 : 0;
+      const createdAt = canonicalExisting?.createdAt ??
+        bucketRows.map((record) => record.createdAt).sort()[0] ??
+        now;
+
+      const item: LearnRecord = {
+        id: canonicalId,
+        key: canonicalKey,
+        kind: "project_context",
+        scope: "project",
+        scopeKey,
+        content: merged.content,
+        confidence: groupConfidence,
+        positiveFeedback,
+        negativeFeedback,
+        createdAt,
+        updatedAt: now,
+      };
+
+      const fragments = bucketRows.filter((record) => record.id !== canonicalId);
+      const writeNeeded = !canonicalExisting ||
+        canonicalExisting.content !== item.content ||
+        canonicalExisting.confidence !== item.confidence ||
+        canonicalExisting.positiveFeedback !== item.positiveFeedback ||
+        canonicalExisting.negativeFeedback !== item.negativeFeedback;
+      const groupChanged = writeNeeded || fragments.length > 0;
+
+      if (writeNeeded) {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO ${TABLE} (id, memory_key, kind, scope, scope_key, content, confidence, positive_feedback, negative_feedback, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             memory_key=excluded.memory_key,
+             content=excluded.content,
+             confidence=excluded.confidence,
+             positive_feedback=excluded.positive_feedback,
+             negative_feedback=excluded.negative_feedback,
+             updated_at=excluded.updated_at`,
+          item.id,
+          item.key,
+          item.kind,
+          item.scope,
+          item.scopeKey,
+          item.content,
+          item.confidence,
+          item.positiveFeedback,
+          item.negativeFeedback,
+          item.createdAt,
+          item.updatedAt,
+        );
+      } else if (canonicalExisting) {
+        item.updatedAt = canonicalExisting.updatedAt;
+      }
+
+      for (const fragment of fragments) {
+        this.ctx.storage.sql.exec(`DELETE FROM ${TABLE} WHERE id = ?`, fragment.id);
+        removedIds.push(fragment.id);
+      }
+
+      if (this.memoryCount !== null) {
+        if (!canonicalExisting && writeNeeded) this.memoryCount += 1;
+        this.memoryCount = Math.max(0, this.memoryCount - fragments.length);
+      }
+
+      if (groupChanged) changedItems.push(item);
+      groups.push({
+        bucket,
+        canonicalKey,
+        mergedSourceKeys: merged.sourceKeys,
+        removedIds: fragments.map((record) => record.id),
+        item,
+        changed: groupChanged,
+      });
+
+      if (bucket === incomingBucket) {
+        targetItem = item;
+        targetWasExisting = Boolean(canonicalExisting);
+      }
+    }
+
+    if (!targetItem) {
+      return Response.json({ error: "project_context_compaction_failed" }, { status: 500 });
+    }
+
+    const changed = groups.some((group) => group.changed);
+    const compaction: LearnCompactionResult = {
+      applied: changed && (removedIds.length > 0 || groups.some((group) => group.mergedSourceKeys.length > 1)),
+      scopeKey,
+      groups,
+      removedIds,
+      items: changedItems,
+      truncated: rows.length >= PROJECT_CONTEXT_SCAN_LIMIT,
+    };
+
+    if (!changed) {
+      return Response.json({ ok: true, changed: false, item: targetItem, change: null, compaction });
+    }
+
+    const change = this.makeChange({
+      memoryId: targetItem.id,
+      type: targetWasExisting ? "updated" : "created",
+      key: targetItem.key,
+      kind: targetItem.kind,
+      scope: targetItem.scope,
+      scopeKey: targetItem.scopeKey,
+      summary: summarizeMemory(targetItem.content),
+      confidence: targetItem.confidence,
+      previousConfidence: targetWasExisting ? targetItem.confidence : null,
+      at: now,
+    });
+    return Response.json({ ok: true, changed: true, item: targetItem, change, compaction });
   }
 
   private async get(request: Request) {
@@ -314,6 +670,11 @@ export class Learning extends DurableObject {
       return Response.json({ error: "invalid_memory" }, { status: 400 });
     }
 
+    const confidence = boundedInt(body?.confidence, 100, 0, 100);
+    if (kind === "project_context" && scope === "project" && scopeKey) {
+      return this.putProjectContext(key, content, scopeKey, confidence);
+    }
+
     const existingRow = scopeKey === null
       ? this.ctx.storage.sql.exec<any>(
           `SELECT * FROM ${TABLE} WHERE kind = ? AND scope = ? AND scope_key IS NULL AND memory_key = ? LIMIT 1`,
@@ -334,7 +695,6 @@ export class Learning extends DurableObject {
       return Response.json({ error: "memory_limit", limit: MAX_MEMORIES }, { status: 409 });
     }
 
-    const confidence = boundedInt(body?.confidence, 100, 0, 100);
     if (existing && existing.content === content && existing.confidence === confidence) {
       return Response.json({ ok: true, changed: false, item: existing, change: null });
     }

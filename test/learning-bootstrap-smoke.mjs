@@ -106,6 +106,9 @@ const agentRecords = [
   );
   assert.ok(envelope?.items.length <= 16);
   assert.ok(envelope?.items.some((item) => item.scope === "agent"));
+  const longCanonical = memory("canonical-project", "project-context:architecture", "project_context", "project", "chat-relay", "x".repeat(2200), 100);
+  const canonicalEnvelope = buildRelevantLearnEnvelope([longCanonical], [{ scope: "project", scopeKey: "chat-relay" }], ctx);
+  assert.equal(canonicalEnvelope?.items[0].content.length, 2200, "canonical project context should retain more than the legacy 1200-char item limit while staying under the total context cap");
   console.log("PASS relevance ranking, Top-K, and read-time compaction");
 }
 
@@ -169,6 +172,12 @@ const agentRecords = [
   assert.match(worker, /perKind: 4/);
   assert.match(worker, /buildRelevantLearnEnvelope/);
   assert.match(worker, /buildLearnRelevanceContext/);
+  assert.match(worker, /data\.compaction\?\.removedIds/, "compaction must evict superseded memories from the warm session cache");
+  assert.match(worker, /automatically canonicalized\/compacted/, "learn_put must expose project-context compaction semantics");
+  const policy = fs.readFileSync("src/learning-policy.ts", "utf8");
+  assert.match(policy, /LEARN_BASELINE_VERSION = 2/);
+  assert.match(policy, /Keep project_context project-level and canonical/);
+  assert.match(policy, /automatically compacted into bounded canonical buckets/);
   console.log("PASS worker MCP bootstrap wiring contract");
 }
 

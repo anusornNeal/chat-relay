@@ -5,6 +5,7 @@ import { extractRoutingSignals } from "./context-routing";
 const DEFAULT_TOP_K = 16;
 const MAX_CONTENT_CHARS = 12_000;
 const MAX_ITEM_CONTENT_CHARS = 1_200;
+const MAX_CANONICAL_PROJECT_CONTEXT_CHARS = 2_400;
 
 const DEFAULT_KIND_PRIORITY: LearnKind[] = [
   "work_style",
@@ -225,7 +226,10 @@ export function buildRelevantLearnEnvelope(
   let chars = 0;
   for (const record of ranked) {
     if (chars >= MAX_CONTENT_CHARS) break;
-    const content = String(record.content || "").slice(0, Math.min(MAX_ITEM_CONTENT_CHARS, MAX_CONTENT_CHARS - chars));
+    const itemLimit = record.kind === "project_context" && record.key.startsWith("project-context:")
+      ? MAX_CANONICAL_PROJECT_CONTEXT_CHARS
+      : MAX_ITEM_CONTENT_CHARS;
+    const content = String(record.content || "").slice(0, Math.min(itemLimit, MAX_CONTENT_CHARS - chars));
     if (!content) continue;
     chars += content.length;
     items.push({

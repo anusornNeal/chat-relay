@@ -153,6 +153,15 @@ class FakeSql {
       return new Cursor();
     }
 
+    if (q.startsWith("SELECT * FROM learning_memory_v1 WHERE kind = ? AND scope = ? AND scope_key = ? ORDER BY updated_at DESC, id ASC LIMIT ?")) {
+      const [kind,scope,scopeKey,limitRaw]=args;
+      const limit=Number(limitRaw);
+      return new Cursor([...this.rows.values()]
+        .filter((r)=>r.kind===kind && r.scope===scope && r.scope_key===scopeKey)
+        .sort((a,b)=> b.updated_at.localeCompare(a.updated_at) || a.id.localeCompare(b.id))
+        .slice(0,limit));
+    }
+
     if (q.startsWith("SELECT * FROM learning_memory_v1 WHERE scope = ? AND scope_key IS NULL AND kind = ? ORDER BY confidence DESC")) {
       const [scope,kind,limitRaw]=args;
       const limit=Number(limitRaw);
@@ -254,7 +263,8 @@ const bGuess=await b.call("/feedback",{id,value:"positive"});
 assert.equal(bGuess.status,404,"another account instance must not access guessed ids");
 assert.equal((await b.call("/get",{scopes:[{scope:"global"}]})).items.length,0);
 
-await a.call("/put",{key:"relay-root",kind:"project_context",scope:"project",scopeKey:"chat-relay",content:"Repository root is the chat-relay worktree"});
+const relayContext=await a.call("/put",{key:"relay-root",kind:"project_context",scope:"project",scopeKey:"chat-relay",content:"Repository root is the chat-relay worktree"});
+assert.match(relayContext.item.key,/^project-context:/,"project context writes must canonicalize immediately");
 await a.call("/put",{key:"desktop",kind:"agent_context",scope:"agent",scopeKey:"desktop-a",content:"Primary Windows agent"});
 const combined=await a.call("/get",{scopes:[{scope:"global"},{scope:"project",scopeKey:"chat-relay"}],limit:10});
 assert.equal(combined.items.length,2);
@@ -271,6 +281,40 @@ assert.equal(balanced.items.filter((x)=>x.kind==="workflow").length,1);
 assert.equal(balanced.items.find((x)=>x.kind==="workflow")?.key,"workflow-b");
 assert.equal(balanced.items.filter((x)=>x.kind==="coding_style").length,1);
 assert.equal(balanced.items.find((x)=>x.kind==="coding_style")?.key,"coding-a");
+
+const tokenAware=fixture();
+const buildContext=await tokenAware.call("/put",{key:"build-release-pipeline",kind:"project_context",scope:"project",scopeKey:"build-project",content:"Build and release conventions for the project",confidence:90});
+assert.equal(buildContext.item.key,"project-context:development","short keyword ui must not match inside words like build");
+
+const compact=fixture();
+const uxFirst=await compact.call("/put",{key:"tracelocal-map-local-ux",kind:"project_context",scope:"project",scopeKey:"tracelocal",content:"Map Local should use an inline response editor",confidence:98});
+assert.equal(uxFirst.item.key,"project-context:ux");
+assert.match(uxFirst.item.content,/\[tracelocal-map-local-ux\]/);
+assert.equal([...compact.sql.rows.values()].filter((row)=>row.kind==="project_context").length,1);
+const uxSecond=await compact.call("/put",{key:"tracelocal-favorite-domain-ux",kind:"project_context",scope:"project",scopeKey:"tracelocal",content:"Favorite domains stay pinned above non-favorites",confidence:97});
+assert.equal(uxSecond.item.id,uxFirst.item.id,"same project-context bucket must reuse one canonical memory");
+assert.equal(uxSecond.compaction.applied,true);
+assert.deepEqual(uxSecond.compaction.groups.find((group)=>group.bucket==="ux").mergedSourceKeys.sort(),["tracelocal-favorite-domain-ux","tracelocal-map-local-ux"].sort());
+assert.match(uxSecond.item.content,/\[tracelocal-favorite-domain-ux\]/);
+assert.match(uxSecond.item.content,/\[tracelocal-map-local-ux\]/);
+assert.equal([...compact.sql.rows.values()].filter((row)=>row.kind==="project_context").length,1,"feature context must not create another stored project-context row");
+const compactMutations=compact.sql.mutations;
+const uxDuplicate=await compact.call("/put",{key:"tracelocal-favorite-domain-ux",kind:"project_context",scope:"project",scopeKey:"tracelocal",content:"Favorite domains stay pinned above non-favorites",confidence:97});
+assert.equal(uxDuplicate.changed,false,"repeating an already compacted project-context fact must be idempotent");
+assert.equal(compact.sql.mutations,compactMutations,"idempotent compaction must not write");
+
+const legacyProject=fixture({rows:[
+  {id:"legacy-ux-a",memory_key:"tracelocal-map-local-ux",kind:"project_context",scope:"project",scope_key:"tracelocal",content:"Map Local opens inline",confidence:98,positive_feedback:0,negative_feedback:0,created_at:"2026-10-01T00:00:00.000Z",updated_at:"2026-10-01T00:00:00.000Z"},
+  {id:"legacy-ux-b",memory_key:"tracelocal-favorite-domain-ux",kind:"project_context",scope:"project",scope_key:"tracelocal",content:"Favorite domains are pinned",confidence:97,positive_feedback:0,negative_feedback:0,created_at:"2026-10-01T00:00:00.000Z",updated_at:"2026-10-02T00:00:00.000Z"},
+  {id:"legacy-arch",memory_key:"proxy-architecture",kind:"project_context",scope:"project",scope_key:"tracelocal",content:"Proxy core must remain cross-platform",confidence:99,positive_feedback:0,negative_feedback:0,created_at:"2026-10-01T00:00:00.000Z",updated_at:"2026-10-03T00:00:00.000Z"},
+]});
+const legacyCompact=await legacyProject.call("/put",{key:"traffic-list-ux",kind:"project_context",scope:"project",scopeKey:"tracelocal",content:"Traffic details should be easy to scan",confidence:96});
+assert.equal(legacyCompact.compaction.applied,true);
+const compactedRows=[...legacyProject.sql.rows.values()].filter((row)=>row.kind==="project_context"&&row.scope_key==="tracelocal");
+assert.ok(compactedRows.length<=2,"legacy fragments should compact into bounded canonical buckets");
+assert.ok(compactedRows.every((row)=>row.memory_key.startsWith("project-context:")),"legacy fragment keys must be superseded by canonical keys");
+assert.ok(legacyCompact.compaction.removedIds.includes("legacy-ux-a"));
+assert.ok(legacyCompact.compaction.removedIds.includes("legacy-ux-b"));
 
 const upsert=await a.call("/put",{key:"concise",kind:"preference",scope:"global",content:"Prefer concise high-level answers",confidence:100});
 assert.equal(upsert.item.id,id);
@@ -347,6 +391,8 @@ assert.equal((await a.call("/delete",{id})).deleted,false);
 
 const learningSource=fs.readFileSync("src/learning.ts","utf8");
 assert.doesNotMatch(learningSource,/learning_activity_v1/,"Learn activity history must not be persisted");
+assert.match(learningSource,/PROJECT_CONTEXT_SCAN_LIMIT = 32/,"project-context compaction reads must stay bounded");
+assert.match(learningSource,/project-context:|PROJECT_CONTEXT_PREFIX/,"project-context compaction must use canonical buckets");
 
 const worker=fs.readFileSync("src/worker-app.ts","utf8");
 assert.match(worker,/env\.LEARNING\.get\(env\.LEARNING\.idFromName\(user\.id\)\)/,"Learning DO must be derived only from authenticated user.id");

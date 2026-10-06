@@ -340,6 +340,11 @@ type LearningMutationPayload = {
   changed?: boolean;
   item?: LearnRecord;
   change?: LearnChange | null;
+  compaction?: {
+    applied?: boolean;
+    removedIds?: string[];
+    items?: LearnRecord[];
+  };
 };
 
 async function applyLearningMutation(
@@ -355,6 +360,12 @@ async function applyLearningMutation(
 
   const sessionKey = currentLearnSessionKey(user);
   if (sessionKey) {
+    for (const memoryId of data.compaction?.removedIds ?? []) {
+      learnContextSessions.removeRecord(sessionKey, memoryId);
+    }
+    for (const item of data.compaction?.items ?? []) {
+      learnContextSessions.upsertRecord(sessionKey, item);
+    }
     if (data.item) learnContextSessions.upsertRecord(sessionKey, data.item);
     else if (data.change.type === "removed") learnContextSessions.removeRecord(sessionKey, data.change.memoryId);
   }
@@ -1153,7 +1164,7 @@ function createMcpServer(env: Env, user: AuthUser) {
   server.registerTool("learn_get", { description: "Read learned context for this authenticated account. Use it to avoid duplicate memory writes before learning something new.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
 
-  server.registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory for this authenticated account. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
+  server.registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory for this authenticated account. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_put", args, async () => { const call = await learningMutationCall(env, user, "/put", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
 
   server.registerTool("learn_delete", { description: "Remove a learned memory when it is no longer valid or useful.", inputSchema: { id: z.string().min(1).max(400) }, annotations: annotationsForTool("learn_delete"), ...oauthToolSecurity() } as any,
