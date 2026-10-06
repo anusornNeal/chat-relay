@@ -220,7 +220,7 @@ The MCP surface is:
 
 Memories are partitioned by authenticated account using a dedicated Learning Durable Object selected from the server-side `user.id`. Callers cannot provide or override an account id. Supported scopes are `global`, `project`, and `agent`; project and agent memories require a scope key.
 
-The first version is intentionally lightweight: there are no embeddings, vector database, local LLM, transcript ingestion, or per-tool-call writes. A normal tool call causes no Learn storage write. Storage changes happen only when an explicit Learn mutation is requested, while reads are bounded to at most 100 records.
+The first version is intentionally lightweight: there are no embeddings, vector database, local LLM, transcript ingestion, or per-tool-call writes. A normal tool call causes no Learn storage write. Storage changes happen only when an explicit Learn mutation is requested. Each account is capped at 512 memories, each memory content field is capped at 4,000 characters, and reads return at most 100 records. Do not store credentials, tokens, secrets, raw tool payloads, terminal output, file contents, or screenshots in Learn.
 
 
 ## Progressive Learn bootstrap and routing
@@ -257,4 +257,4 @@ The decision boundary is deliberate:
 
 Routing hints are explicit memories. A global `project_context` memory with key `project-root:<projectKey>` stores the concrete project root. A `preferred-agent` memory may exist in project scope (preferred) or global scope (fallback); Relay surfaces it in `routingContext` as guidance and does not execute or retry a tool solely because of that hint. No project is guessed when no explicit root hint matches.
 
-The intended read budget is bounded: global context at most once per MCP session, each activated project at most once per session, and each activated agent at most once per session. Bootstrap performs no Learn writes.
+The intended read budget is bounded by an in-memory warm-cache: global context is normally read once per conversation/session, each activated project once, and each activated agent once. A Worker isolate restart/eviction may cause a scope to be read again; this is intentionally best-effort so bootstrap performs no durable session writes. Learned content is advisory user memory, not system/developer instruction authority.

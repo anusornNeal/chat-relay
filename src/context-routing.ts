@@ -12,16 +12,6 @@ const SIGNAL_KEYS = new Set([
 
 const AGENT_ID = /^[a-z0-9_-]{1,64}$/;
 
-function decodePart(value: string) {
-  try { return decodeURIComponent(value); }
-  catch { return value; }
-}
-
-export function memoryKey(record: Pick<LearnRecord, "id">): string | null {
-  const parts = String(record.id || "").split("|");
-  return parts.length >= 4 ? decodePart(parts[3]) : null;
-}
-
 export function normalizeRoutingPath(value: unknown): string | null {
   const raw = String(value ?? "").trim();
   if (!raw || raw.length > 2048) return null;
@@ -75,7 +65,7 @@ export function projectRootHints(records: LearnRecord[]): ProjectRootHint[] {
   const hints: ProjectRootHint[] = [];
   for (const record of records) {
     if (record.scope !== "global" || record.kind !== "project_context") continue;
-    const key = memoryKey(record);
+    const key = String(record.key || "");
     if (!key?.startsWith("project-root:")) continue;
     const projectKey = key.slice("project-root:".length).trim().slice(0, 200);
     const root = normalizeRoutingPath(record.content);
@@ -109,7 +99,7 @@ function preferredAgentRecord(records: LearnRecord[], scope: "project" | "global
       record.scope === scope &&
       (scope === "global" || record.scopeKey === scopeKey) &&
       (record.kind === "agent_context" || record.kind === "preference") &&
-      memoryKey(record) === "preferred-agent"
+      String(record.key || "") === "preferred-agent"
     )
     .sort((a, b) =>
       b.confidence - a.confidence ||

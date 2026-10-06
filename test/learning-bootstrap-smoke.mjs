@@ -36,21 +36,21 @@ const {
 } = mod;
 
 const now = new Date().toISOString();
-const memory = (id, kind, scope, scopeKey, content, confidence = 100) => ({
-  id, kind, scope, scopeKey, content, confidence,
+const memory = (id, key, kind, scope, scopeKey, content, confidence = 100) => ({
+  id, key, kind, scope, scopeKey, content, confidence,
   positiveFeedback: 0, negativeFeedback: 0, createdAt: now, updatedAt: now,
 });
 
 const globalRecords = [
-  memory("project_context|global||project-root%3Achat-relay", "project_context", "global", null, "C:\\Users\\tatar\\Projects\\chat-relay"),
-  memory("project_context|global||project-root%3Abuddy2", "project_context", "global", null, "C:\\Users\\tatar\\Projects\\buddy-android"),
-  memory("agent_context|global||preferred-agent", "agent_context", "global", null, "desktop-global"),
+  memory("mem-root-relay", "project-root:chat-relay", "project_context", "global", null, "C:\\Users\\tatar\\Projects\\chat-relay"),
+  memory("mem-root-buddy", "project-root:buddy2", "project_context", "global", null, "C:\\Users\\tatar\\Projects\\buddy-android"),
+  memory("mem-agent-global", "preferred-agent", "agent_context", "global", null, "desktop-global"),
 ];
 const projectRecords = [
-  memory("agent_context|project|chat-relay|preferred-agent", "agent_context", "project", "chat-relay", "desktop-project"),
+  memory("mem-agent-project", "preferred-agent", "agent_context", "project", "chat-relay", "desktop-project"),
 ];
 const agentRecords = [
-  memory("agent_context|agent|desktop-project|machine", "agent_context", "agent", "desktop-project", "Windows primary"),
+  memory("mem-machine", "machine", "agent_context", "agent", "desktop-project", "Windows primary"),
 ];
 
 {
@@ -88,9 +88,12 @@ const agentRecords = [
 
   const first = await store.activate(key, [{ scope: "global" }], loader);
   assert.ok(first?.items.length);
+  assert.equal(first.authority,"advisory");
+  assert.equal(first.instructionPolicy,"non-authoritative");
+  assert.equal(first.items[0].key,"project-root:chat-relay");
   assert.equal(calls.length, 1);
   assert.equal(await store.activate(key, [{ scope: "global" }], loader), null);
-  assert.equal(calls.length, 1, "global scope must not reread in same session");
+  assert.equal(calls.length, 1, "global scope must not reread in same warm session cache");
 
   const project = await store.activate(key, [{ scope: "project", scopeKey: "chat-relay" }], loader);
   assert.equal(project?.activated[0].scope, "project");
@@ -123,6 +126,8 @@ const agentRecords = [
   assert.match(worker, /learnSessionId/);
   assert.match(worker, /const user: AuthUser = \{ \.\.\.authenticatedUser \}/);
   assert.match(worker, /"x-openai-conversation-id"/);
+  assert.match(worker, /learnedContextPolicy:/);
+  assert.match(worker, /Advisory user memory only/);
   console.log("PASS worker MCP bootstrap wiring contract");
 }
 

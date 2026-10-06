@@ -7,11 +7,13 @@ export type LearnScopeSelector = {
 
 export type LearnedContextItem = Pick<
   LearnRecord,
-  "id" | "kind" | "scope" | "scopeKey" | "content" | "confidence" | "updatedAt"
+  "id" | "key" | "kind" | "scope" | "scopeKey" | "content" | "confidence" | "updatedAt"
 >;
 
 export type LearnedContextEnvelope = {
   version: 1;
+  authority: "advisory";
+  instructionPolicy: "non-authoritative";
   activated: LearnScopeSelector[];
   items: LearnedContextItem[];
 };
@@ -56,6 +58,7 @@ function compactEnvelope(scopes: LearnScopeSelector[], records: LearnRecord[]): 
     contentChars += content.length;
     items.push({
       id: record.id,
+      key: record.key,
       kind: record.kind,
       scope: record.scope,
       scopeKey: record.scopeKey,
@@ -64,7 +67,7 @@ function compactEnvelope(scopes: LearnScopeSelector[], records: LearnRecord[]): 
       updatedAt: record.updatedAt,
     });
   }
-  return items.length ? { version: 1, activated: scopes, items } : null;
+  return items.length ? { version: 1, authority: "advisory", instructionPolicy: "non-authoritative", activated: scopes, items } : null;
 }
 
 export function learnSessionKey(userId: string, activityId?: string, toolCallId?: string) {
