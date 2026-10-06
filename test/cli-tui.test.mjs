@@ -73,7 +73,7 @@ test("formats remote header as two columns", () => {
   assert.match(lines[1], /^Status\s+○ Offline\s+Relay\s+chat-relay\.anusorn-hank\.workers\.dev/);
   assert.match(lines[2], /^Root\s+C:\\Users\\tatar\\Projects\s+Reconnects\s+12/);
   assert.match(lines[3], /^Session up\s+01:02:03\s+Terminal\s+enabled/);
-  assert.match(lines[4], /^Desktop\s+enabled/);
+  assert.match(lines[4], /^Desktop\s+enabled\s+Learn\s+enabled/);
   assert.doesNotMatch(output, /Checked|Agent link|Relay API/);
 });
 
@@ -87,6 +87,7 @@ test("renders combined online status in green", () => {
   }, 118, { color: true });
 
   assert.match(output, /\x1b\[32m● Online\x1b\[0m/);
+  assert.match(output, /Learn[\s\S]*?\x1b\[32menabled\x1b\[0m/);
 });
 
 test("renders combined status offline when relay health fails", () => {
