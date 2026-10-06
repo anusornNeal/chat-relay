@@ -12,6 +12,7 @@ import { handleStatusRequest } from "./status-route.mjs";
 import { error, hasPayload, readJson } from "./http-utils";
 import { LearnContextSessionStore, learnSessionKey, type LearnScopeSelector, type LearnedContextEnvelope } from "./learning-context";
 import { routingContext } from "./context-routing";
+import { buildLearnRelevanceContext, buildRelevantLearnEnvelope } from "./learning-relevance";
 import type { LearnChange, LearnRecord } from "./learning";
 import { LEARN_BASELINE_CONTEXT } from "./learning-policy";
 import type { AuthUser, Env } from "./env";
@@ -240,51 +241,11 @@ async function loadAutoLearnScopes(
   user: AuthUser,
   scopes: LearnScopeSelector[],
 ): Promise<LearnRecord[]> {
-  const call = await learningCall(env, user, "/get", { scopes, limit: 48 });
+  const call = await learningCall(env, user, "/get", { scopes, limit: 64, perKind: 4, routingReserve: 24 });
   if (!call.ok) throw new Error("learning_unavailable");
   const data = JSON.parse(call.body) as { items?: LearnRecord[] };
   if (!Array.isArray(data.items)) throw new Error("invalid_learning_response");
   return data.items.slice(0, 100);
-}
-
-function mergeLearnEnvelopes(...values: Array<LearnedContextEnvelope | null | undefined>): LearnedContextEnvelope | null {
-  const envelopes = values.filter(Boolean) as LearnedContextEnvelope[];
-  if (!envelopes.length) return null;
-
-  const activated: LearnScopeSelector[] = [];
-  const activatedKeys = new Set<string>();
-  for (const envelope of envelopes) {
-    for (const scope of envelope.activated) {
-      const key = scope.scope + ":" + (scope.scopeKey || "");
-      if (activatedKeys.has(key)) continue;
-      activatedKeys.add(key);
-      activated.push(scope);
-    }
-  }
-
-  const priority = (scope: string) => scope === "agent" ? 0 : scope === "project" ? 1 : 2;
-  const items = envelopes
-    .flatMap((envelope) => envelope.items)
-    .sort((a, b) =>
-      priority(a.scope) - priority(b.scope) ||
-      b.confidence - a.confidence ||
-      b.updatedAt.localeCompare(a.updatedAt) ||
-      a.id.localeCompare(b.id)
-    );
-
-  const unique = new Set<string>();
-  const bounded: typeof items = [];
-  let chars = 0;
-  for (const item of items) {
-    if (unique.has(item.id) || bounded.length >= 16 || chars >= 12_000) continue;
-    unique.add(item.id);
-    const content = item.content.slice(0, Math.min(1_200, 12_000 - chars));
-    if (!content) continue;
-    chars += content.length;
-    bounded.push({ ...item, content });
-  }
-
-  return bounded.length ? { version: 1, authority: "advisory", instructionPolicy: "non-authoritative", activated, items: bounded } : null;
 }
 
 async function prepareAutoLearnContext(
@@ -299,26 +260,26 @@ async function prepareAutoLearnContext(
   if (!sessionKey) return { baseline };
 
   const loader = (scopes: LearnScopeSelector[]) => loadAutoLearnScopes(env, user, scopes);
-  const globalEnvelope = await learnContextSessions.activate(
-    sessionKey,
-    [{ scope: "global" }],
-    loader,
-  );
+  const activeScopes: LearnScopeSelector[] = [{ scope: "global" }];
+  await learnContextSessions.activate(sessionKey, activeScopes, loader);
 
   let records = learnContextSessions.records(sessionKey);
   let route = routingContext(args, records);
-  let projectEnvelope: LearnedContextEnvelope | null = null;
   if (route.projectKey) {
-    projectEnvelope = await learnContextSessions.activate(
-      sessionKey,
-      [{ scope: "project", scopeKey: route.projectKey }],
-      loader,
-    );
+    const projectScope: LearnScopeSelector = { scope: "project", scopeKey: route.projectKey };
+    activeScopes.push(projectScope);
+    await learnContextSessions.activate(sessionKey, [projectScope], loader);
     records = learnContextSessions.records(sessionKey);
     route = routingContext(args, records);
   }
 
-  const envelope = mergeLearnEnvelopes(globalEnvelope, projectEnvelope);
+  const relevance = buildLearnRelevanceContext(
+    tool,
+    args,
+    route.projectKey,
+    route.preferredAgent?.agentId ?? null,
+  );
+  const envelope = buildRelevantLearnEnvelope(records, activeScopes, relevance);
   return {
     baseline,
     ...(envelope ? { envelope } : {}),
@@ -335,17 +296,28 @@ async function prepareAgentLearnContext(
   env: Env,
   user: AuthUser,
   tool: string,
+  args: unknown,
   agentId: string | undefined,
+  projectKey?: string,
 ): Promise<LearnedContextEnvelope | null> {
   if (!agentId || AUTO_LEARN_SKIP_TOOLS.has(tool)) return null;
   const sessionKey = currentLearnSessionKey(user);
   if (!sessionKey) return null;
+
   learnContextSessions.noteAgent(sessionKey, agentId);
-  return learnContextSessions.activate(
+  const agentScope: LearnScopeSelector = { scope: "agent", scopeKey: agentId };
+  await learnContextSessions.activate(
     sessionKey,
-    [{ scope: "agent", scopeKey: agentId }],
+    [agentScope],
     (scopes) => loadAutoLearnScopes(env, user, scopes),
   );
+
+  const records = learnContextSessions.records(sessionKey);
+  const activeScopes: LearnScopeSelector[] = [{ scope: "global" }];
+  if (projectKey) activeScopes.push({ scope: "project", scopeKey: projectKey });
+  activeScopes.push(agentScope);
+  const relevance = buildLearnRelevanceContext(tool, args, projectKey ?? null, agentId);
+  return buildRelevantLearnEnvelope(records, activeScopes, relevance);
 }
 
 function attachLearnedContext<T>(value: T, attachment: AutoLearnAttachment | null): T {
@@ -699,12 +671,18 @@ async function instrumentTool<T>(
     if (outcome.agentId && (outcome.ok || outcome.errorSource === "agent")) {
       noteRecentLearnAgent(user.id, outcome.agentId);
       try {
-        const agentEnvelope = await prepareAgentLearnContext(env, user, tool, outcome.agentId);
-        const merged = mergeLearnEnvelopes(learnedAttachment?.envelope, agentEnvelope);
-        if (merged) {
+        const agentEnvelope = await prepareAgentLearnContext(
+          env,
+          user,
+          tool,
+          args,
+          outcome.agentId,
+          learnedAttachment?.routing?.projectKey,
+        );
+        if (agentEnvelope) {
           learnedAttachment = {
             baseline: learnedAttachment?.baseline ?? LEARN_BASELINE_CONTEXT,
-            envelope: merged,
+            envelope: agentEnvelope,
             ...(learnedAttachment?.routing ? { routing: learnedAttachment.routing } : {}),
           };
         }

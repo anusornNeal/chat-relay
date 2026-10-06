@@ -155,6 +155,24 @@ class FakeSql {
       return new Cursor();
     }
 
+    if (q.startsWith("SELECT * FROM learning_memory_v1 WHERE scope = ? AND scope_key IS NULL AND kind = ? ORDER BY confidence DESC")) {
+      const [scope,kind,limitRaw]=args;
+      const limit=Number(limitRaw);
+      return new Cursor([...this.rows.values()]
+        .filter((r)=>r.scope===scope && r.scope_key==null && r.kind===kind)
+        .sort((a,b)=> b.confidence-a.confidence || b.positive_feedback-a.positive_feedback || a.negative_feedback-b.negative_feedback || b.updated_at.localeCompare(a.updated_at) || a.id.localeCompare(b.id))
+        .slice(0,limit));
+    }
+
+    if (q.startsWith("SELECT * FROM learning_memory_v1 WHERE scope = ? AND scope_key = ? AND kind = ? ORDER BY confidence DESC")) {
+      const [scope,scopeKey,kind,limitRaw]=args;
+      const limit=Number(limitRaw);
+      return new Cursor([...this.rows.values()]
+        .filter((r)=>r.scope===scope && r.scope_key===scopeKey && r.kind===kind)
+        .sort((a,b)=> b.confidence-a.confidence || b.positive_feedback-a.positive_feedback || a.negative_feedback-b.negative_feedback || b.updated_at.localeCompare(a.updated_at) || a.id.localeCompare(b.id))
+        .slice(0,limit));
+    }
+
     if (q.startsWith("SELECT * FROM learning_memory_v1 ORDER BY updated_at DESC, id ASC LIMIT ?")) {
       const limit=Number(args[0]);
       return new Cursor([...this.rows.values()]
@@ -244,6 +262,18 @@ await a.call("/put",{key:"desktop",kind:"agent_context",scope:"agent",scopeKey:"
 const combined=await a.call("/get",{scopes:[{scope:"global"},{scope:"project",scopeKey:"chat-relay"}],limit:10});
 assert.equal(combined.items.length,2);
 assert.ok(combined.items.every((x)=>x.scope==="global" || x.scopeKey==="chat-relay"));
+
+await a.call("/put",{key:"workflow-a",kind:"workflow",scope:"project",scopeKey:"chat-relay",content:"Implement then test",confidence:90});
+await a.call("/put",{key:"workflow-b",kind:"workflow",scope:"project",scopeKey:"chat-relay",content:"Review before merge",confidence:99});
+await a.call("/put",{key:"coding-a",kind:"coding_style",scope:"project",scopeKey:"chat-relay",content:"Prefer small focused patches",confidence:95});
+await a.call("/put",{key:"coding-b",kind:"coding_style",scope:"project",scopeKey:"chat-relay",content:"Keep functions bounded",confidence:80});
+const balanced=await a.call("/get",{scopes:[{scope:"project",scopeKey:"chat-relay"}],perKind:1,limit:10});
+assert.equal(balanced.strategy,"balanced-kind");
+assert.equal(balanced.perKind,1);
+assert.equal(balanced.items.filter((x)=>x.kind==="workflow").length,1);
+assert.equal(balanced.items.find((x)=>x.kind==="workflow")?.key,"workflow-b");
+assert.equal(balanced.items.filter((x)=>x.kind==="coding_style").length,1);
+assert.equal(balanced.items.find((x)=>x.kind==="coding_style")?.key,"coding-a");
 
 const upsert=await a.call("/put",{key:"concise",kind:"preference",scope:"global",content:"Prefer concise high-level answers",confidence:100});
 assert.equal(upsert.item.id,id);

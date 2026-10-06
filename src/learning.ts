@@ -45,7 +45,7 @@ export type LearnChange = {
 
 const TABLE = "learning_memory_v1";
 const ACTIVITY_TABLE = "learning_activity_v1";
-const KINDS = new Set<LearnKind>([
+const KIND_VALUES: LearnKind[] = [
   "preference",
   "response_style",
   "work_style",
@@ -56,7 +56,8 @@ const KINDS = new Set<LearnKind>([
   "workflow",
   "correction",
   "agent_context",
-]);
+];
+const KINDS = new Set<LearnKind>(KIND_VALUES);
 const SCOPES = new Set<LearnScope>(["global", "project", "agent"]);
 const MAX_MEMORIES = 512;
 
@@ -168,6 +169,7 @@ export class Learning extends DurableObject {
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_scope ON ${TABLE}(scope, scope_key, updated_at)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_kind ON ${TABLE}(kind, updated_at)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_identity ON ${TABLE}(kind, scope, scope_key, memory_key)`);
+    this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_retrieval ON ${TABLE}(scope, scope_key, kind, confidence DESC, positive_feedback DESC, negative_feedback ASC, updated_at DESC)`);
 
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS ${ACTIVITY_TABLE} (
@@ -229,31 +231,98 @@ export class Learning extends DurableObject {
   private async get(request: Request) {
     const body = await request.json<any>().catch(() => null);
     if (!body) return Response.json({ error: "invalid_request" }, { status: 400 });
+
+    const scopeSelectors: Array<{ scope: LearnScope; scopeKey: string | null }> = [];
     const scopes = Array.isArray(body.scopes) ? body.scopes.slice(0, 8) : [];
-    const clauses: string[] = [];
-    const args: (string | number)[] = [];
     for (const entry of scopes) {
       const scope = parseScope(entry?.scope);
       if (!scope) continue;
       if (scope === "global") {
-        clauses.push("(scope = ? AND scope_key IS NULL)");
-        args.push(scope);
+        scopeSelectors.push({ scope, scopeKey: null });
       } else {
         const scopeKey = cleanText(entry?.scopeKey, 200);
-        if (!scopeKey) continue;
-        clauses.push("(scope = ? AND scope_key = ?)");
-        args.push(scope, scopeKey);
+        if (scopeKey) scopeSelectors.push({ scope, scopeKey });
       }
     }
-    if (!clauses.length) return Response.json({ items: [], limit: 0 });
+    if (!scopeSelectors.length) return Response.json({ items: [], limit: 0 });
+
     const kind = body.kind == null ? null : parseKind(body.kind);
     if (body.kind != null && !kind) return Response.json({ error: "invalid_kind" }, { status: 400 });
+
+    let kinds = kind ? [kind] : KIND_VALUES;
+    if (!kind && Array.isArray(body.kinds)) {
+      const parsed = body.kinds.slice(0, KIND_VALUES.length).map(parseKind).filter(Boolean) as LearnKind[];
+      if (!parsed.length && body.kinds.length) return Response.json({ error: "invalid_kind" }, { status: 400 });
+      if (parsed.length) kinds = [...new Set(parsed)];
+    }
+
     const limit = boundedInt(body.limit, 50, 1, 100);
+    const perKind = boundedInt(body.perKind, 0, 0, 8);
+    const routingReserve = boundedInt(body.routingReserve, 0, 0, 32);
+
+    if (perKind > 0) {
+      const selected = new Map<string, LearnRecord>();
+      for (const selector of scopeSelectors) {
+        for (const selectedKind of kinds) {
+          const selectedLimit = routingReserve > 0 && selector.scope === "global" && selectedKind === "project_context"
+            ? Math.max(perKind, routingReserve)
+            : perKind;
+          const rows = selector.scopeKey === null
+            ? this.ctx.storage.sql.exec<any>(
+                `SELECT * FROM ${TABLE}
+                 WHERE scope = ? AND scope_key IS NULL AND kind = ?
+                 ORDER BY confidence DESC, positive_feedback DESC, negative_feedback ASC, updated_at DESC, id ASC
+                 LIMIT ?`,
+                selector.scope,
+                selectedKind,
+                selectedLimit,
+              ).toArray()
+            : this.ctx.storage.sql.exec<any>(
+                `SELECT * FROM ${TABLE}
+                 WHERE scope = ? AND scope_key = ? AND kind = ?
+                 ORDER BY confidence DESC, positive_feedback DESC, negative_feedback ASC, updated_at DESC, id ASC
+                 LIMIT ?`,
+                selector.scope,
+                selector.scopeKey,
+                selectedKind,
+                selectedLimit,
+              ).toArray();
+          for (const row of rows) {
+            const record = rowToRecord(row);
+            selected.set(record.id, record);
+          }
+        }
+      }
+
+      const items = [...selected.values()]
+        .sort((a, b) =>
+          b.confidence - a.confidence ||
+          b.positiveFeedback - a.positiveFeedback ||
+          a.negativeFeedback - b.negativeFeedback ||
+          b.updatedAt.localeCompare(a.updatedAt) ||
+          a.id.localeCompare(b.id)
+        )
+        .slice(0, limit);
+      return Response.json({ items, limit, strategy: "balanced-kind", perKind, routingReserve });
+    }
+
+    const clauses: string[] = [];
+    const args: (string | number)[] = [];
+    for (const selector of scopeSelectors) {
+      if (selector.scopeKey === null) {
+        clauses.push("(scope = ? AND scope_key IS NULL)");
+        args.push(selector.scope);
+      } else {
+        clauses.push("(scope = ? AND scope_key = ?)");
+        args.push(selector.scope, selector.scopeKey);
+      }
+    }
+
     const sql = `SELECT * FROM ${TABLE} WHERE (${clauses.join(" OR ")})${kind ? " AND kind = ?" : ""} ORDER BY updated_at DESC, id ASC LIMIT ?`;
     if (kind) args.push(kind);
     args.push(limit);
     const items = this.ctx.storage.sql.exec<any>(sql, ...args).toArray().map(rowToRecord);
-    return Response.json({ items, limit });
+    return Response.json({ items, limit, strategy: "recent" });
   }
 
   private async profile(request: Request) {

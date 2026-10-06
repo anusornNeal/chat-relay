@@ -7,6 +7,7 @@ const bundled = await build({
     contents: [
       'export * from "./src/learning-context";',
       'export * from "./src/context-routing";',
+      'export * from "./src/learning-relevance";',
     ].join("\n"),
     resolveDir: process.cwd(),
   },
@@ -33,6 +34,9 @@ const {
   projectKeyForSignals,
   preferredAgentForContext,
   routingContext,
+  buildLearnRelevanceContext,
+  selectRelevantLearnRecords,
+  buildRelevantLearnEnvelope,
 } = mod;
 
 const now = new Date().toISOString();
@@ -69,6 +73,40 @@ const agentRecords = [
   assert.equal(ctx.projectKey, "chat-relay");
   assert.equal(ctx.preferredAgent.agentId, "desktop-project");
   console.log("PASS deterministic project and preferred-agent routing");
+}
+
+{
+  const relevanceRecords = [
+    memory("global-response", "response-style", "response_style", "global", null, "Prefer concise high-level answers first", 100),
+    memory("global-workflow", "review-flow", "workflow", "global", null, "Implement test review fix", 95),
+    memory("project-workflow", "review-flow", "workflow", "project", "chat-relay", "Implement test review fix", 100),
+    memory("project-code-a", "small-patches", "coding_style", "project", "chat-relay", "Prefer small focused code patches with tests", 99),
+    memory("project-code-b", "focused-patches", "coding_style", "project", "chat-relay", "Prefer small focused code patches with tests", 90),
+    memory("agent-tool", "terminal-batch", "tool_pattern", "agent", "desktop-project", "Batch independent terminal reads when practical", 98),
+    ...Array.from({ length: 24 }, (_, index) =>
+      memory("noise-"+index, "noise-"+index, "project_context", "project", "chat-relay", "Unrelated context "+index, 70-index)
+    ),
+  ];
+  const ctx = buildLearnRelevanceContext(
+    "terminal_batch_start",
+    { cwd: "C:\Users\tatar\Projects\chat-relay", jobs: [{ command: "test" }] },
+    "chat-relay",
+    "desktop-project",
+  );
+  const selected = selectRelevantLearnRecords(relevanceRecords, ctx, 16);
+  assert.ok(selected.some((item) => item.id === "project-code-a"), "coding style should rank for terminal/code work");
+  assert.ok(selected.some((item) => item.id === "global-response"), "global response style should remain represented");
+  assert.ok(selected.some((item) => item.id === "project-workflow"), "project override should be selected");
+  assert.ok(!selected.some((item) => item.id === "global-workflow"), "same kind/key global duplicate should be compacted");
+  assert.ok(!selected.some((item) => item.id === "project-code-b"), "near-identical content should be compacted");
+  const envelope = buildRelevantLearnEnvelope(
+    relevanceRecords,
+    [{ scope: "global" }, { scope: "project", scopeKey: "chat-relay" }, { scope: "agent", scopeKey: "desktop-project" }],
+    ctx,
+  );
+  assert.ok(envelope?.items.length <= 16);
+  assert.ok(envelope?.items.some((item) => item.scope === "agent"));
+  console.log("PASS relevance ranking, Top-K, and read-time compaction");
 }
 
 {
@@ -128,6 +166,9 @@ const agentRecords = [
   assert.match(worker, /"x-openai-conversation-id"/);
   assert.match(worker, /learnedContextPolicy:/);
   assert.match(worker, /Advisory user memory only/);
+  assert.match(worker, /perKind: 4/);
+  assert.match(worker, /buildRelevantLearnEnvelope/);
+  assert.match(worker, /buildLearnRelevanceContext/);
   console.log("PASS worker MCP bootstrap wiring contract");
 }
 
