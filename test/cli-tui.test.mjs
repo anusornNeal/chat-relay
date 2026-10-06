@@ -60,6 +60,7 @@ test("formats remote header as two columns", () => {
     status: "connected",
     relayHealth: { state: "limited", code: 1027, checkedAt: Date.now() },
     relay: "chat-relay.anusorn-hank.workers.dev",
+    root: "C:\\Users\\tatar\\Projects",
     uptimeMs: 3_723_000,
     reconnects: 12,
     terminal: true,
@@ -69,13 +70,14 @@ test("formats remote header as two columns", () => {
   const lines = output.split("\n");
   assert.equal(lines.length, 5);
   assert.match(lines[0], /^Account\s+Anusorn Hankasemsak\s+Agent\s+DESKTOP-5IQPSSC/);
-  assert.match(lines[1], /^Agent link\s+● WebSocket open\s+Relay\s+chat-relay\.anusorn-hank\.workers\.dev/);
-  assert.match(lines[2], /^Relay API\s+✕ Cloudflare 1027\s+Reconnects\s+12/);
+  assert.match(lines[1], /^Status\s+○ Offline\s+Relay\s+chat-relay\.anusorn-hank\.workers\.dev/);
+  assert.match(lines[2], /^Root\s+C:\\Users\\tatar\\Projects\s+Reconnects\s+12/);
   assert.match(lines[3], /^Session up\s+01:02:03\s+Terminal\s+enabled/);
-  assert.match(lines[4], /^Desktop\s+enabled\s+Checked\s+just now/);
+  assert.match(lines[4], /^Desktop\s+enabled/);
+  assert.doesNotMatch(output, /Checked|Agent link|Relay API/);
 });
 
-test("renders successful Relay API HTTP status in green", () => {
+test("renders combined online status in green", () => {
   const output = formatTwoColumnHeader({
     account: "Anusorn",
     agent: "Work PC",
@@ -84,19 +86,19 @@ test("renders successful Relay API HTTP status in green", () => {
     relay: "chat-relay.example.dev",
   }, 118, { color: true });
 
-  assert.match(output, /\x1b\[32m● HTTP 200\x1b\[0m/);
+  assert.match(output, /\x1b\[32m● Online\x1b\[0m/);
 });
 
-test("labels agent authorization states separately from sign-in failures", () => {
+test("renders combined status offline when relay health fails", () => {
   const states = [
-    [{ state: "unauthorized", code: 401 }, "Sign-in required"],
-    [{ state: "unauthorized", code: 403 }, "Access denied"],
-    [{ state: "reauthorize" }, "Agent reauthorization required"],
-    [{ state: "agent-disabled" }, "Agent disabled"],
-    [{ state: "agent-access" }, "Agent access required"],
+    { state: "unauthorized", code: 401 },
+    { state: "unauthorized", code: 403 },
+    { state: "reauthorize" },
+    { state: "agent-disabled" },
+    { state: "agent-access" },
   ];
 
-  for (const [relayHealth, label] of states) {
+  for (const relayHealth of states) {
     const output = formatTwoColumnHeader({
       account: "Anusorn",
       agent: "Work PC",
@@ -104,7 +106,8 @@ test("labels agent authorization states separately from sign-in failures", () =>
       relayHealth: { ...relayHealth, checkedAt: Date.now() },
       relay: "chat-relay.example.dev",
     }, 118);
-    assert.ok(output.split("\n")[2].includes(label), `missing Relay API label: ${label}`);
+    assert.match(output, /Status\s+○ Offline/);
+    assert.doesNotMatch(output, /Relay API|Checked/);
   }
 });
 
@@ -189,9 +192,8 @@ test("TUI keeps agent socket state separate from Worker HTTP health", () => {
   tui.setRelayHealth({ state: "limited", code: 1027 });
 
   const header = formatTwoColumnHeader({ ...tui.state, uptimeMs: 0 }, 118);
-  assert.match(header, /Agent link\s+● WebSocket open/);
-  assert.match(header, /Relay API\s+✕ Cloudflare 1027/);
-  assert.match(header, /Checked\s+just now/);
+  assert.match(header, /Status\s+○ Offline/);
+  assert.doesNotMatch(header, /Agent link|Relay API|Checked/);
 });
 
 test("TUI scrolls with mouse and keyboard and restores interactive stdin", () => {

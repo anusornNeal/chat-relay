@@ -101,58 +101,22 @@ function field(label, value, width, color = false, valueStyle = null) {
   return renderedLabel + renderedValue + " ".repeat(Math.max(0, width - plainLabel.length - plainValue.length));
 }
 
-function statusStyle(value) {
-  switch (String(value || "").toLowerCase()) {
-    case "connected": return STYLE.green;
-    case "connecting":
-    case "reconnecting": return STYLE.yellow;
-    case "offline": return STYLE.red;
-    default: return STYLE.gray;
-  }
-}
-
-function relayHealthStyle(health) {
+function relayIsOnline(health) {
   const code = Number(health?.code);
-  if (Number.isFinite(code) && code >= 200 && code < 300) return STYLE.green;
-  switch (health?.state) {
-    case "reachable": return STYLE.green;
-    case "checking": return STYLE.yellow;
-    default: return STYLE.red;
-  }
+  if (Number.isFinite(code)) return code >= 200 && code < 300;
+  return health?.state === "reachable";
 }
 
-function relayHealthText(health) {
-  const code = Number(health?.code);
-  if (Number.isFinite(code) && code >= 200 && code < 300) return `● HTTP ${code}`;
-  switch (health?.state) {
-    case "reachable": return "● Online";
-    case "checking": return "◐ Checking";
-    case "limited":
-      return health.code === 1027
-        ? "✕ Cloudflare 1027"
-        : `✕ Rate limited (${health.code || "429"})`;
-    case "cloudflare-error": return `✕ Cloudflare ${health.code || "error"}`;
-    case "unauthorized": return health.code === 403 ? "✕ Access denied" : "✕ Sign-in required";
-    case "reauthorize": return "✕ Agent reauthorization required";
-    case "agent-disabled": return "✕ Agent disabled";
-    case "agent-access": return "✕ Agent access required";
-    case "unavailable":
-      if (health.reason === "relay_unavailable") return "✕ Relay unavailable";
-      if (health.reason === "agent_offline") return "✕ Agent offline";
-      return `✕ ${health.code ? `HTTP ${health.code}` : "Unavailable"}`;
-    default: return "? Unknown";
-  }
+function combinedStatusText(status, relayHealth) {
+  return String(status || "").toLowerCase() === "connected" && relayIsOnline(relayHealth)
+    ? "● Online"
+    : "○ Offline";
 }
 
-function relayHealthAge(health, now = Date.now()) {
-  const checkedAt = Number(health?.checkedAt);
-  if (!Number.isFinite(checkedAt)) return "pending";
-  const ageSeconds = Math.max(0, Math.floor((now - checkedAt) / 1000));
-  if (ageSeconds < 10) return "just now";
-  if (ageSeconds < 60) return `${ageSeconds}s ago`;
-  const ageMinutes = Math.floor(ageSeconds / 60);
-  if (ageMinutes < 60) return `${ageMinutes}m ago`;
-  return `${Math.floor(ageMinutes / 60)}h ago`;
+function combinedStatusStyle(status, relayHealth) {
+  return String(status || "").toLowerCase() === "connected" && relayIsOnline(relayHealth)
+    ? STYLE.green
+    : STYLE.red;
 }
 
 export function formatTwoColumnHeader(state, width = 110, { color = false } = {}) {
@@ -161,16 +125,16 @@ export function formatTwoColumnHeader(state, width = 110, { color = false } = {}
   const rightWidth = usable - GAP - leftWidth;
   const rows = [
     ["Account", state.account || "-", "Agent", state.agent || "-"],
-    ["Agent link", statusText(state.status), "Relay", state.relay || "-"],
-    ["Relay API", relayHealthText(state.relayHealth), "Reconnects", String(state.reconnects ?? 0)],
+    ["Status", combinedStatusText(state.status, state.relayHealth), "Relay", state.relay || "-"],
+    ["Root", state.root || "-", "Reconnects", String(state.reconnects ?? 0)],
     ["Session up", formatUptime(state.uptimeMs), "Terminal", state.terminal ? "enabled" : "disabled"],
-    ["Desktop", state.desktop ? "enabled" : "disabled", "Checked", relayHealthAge(state.relayHealth)],
+    ["Desktop", state.desktop ? "enabled" : "disabled", "", ""],
   ];
   return rows
     .map(([leftLabel, leftValue, rightLabel, rightValue]) => {
-      const leftStyle = leftLabel === "Agent link"
-        ? statusStyle(state.status)
-        : leftLabel === "Relay API" ? relayHealthStyle(state.relayHealth) : null;
+      const leftStyle = leftLabel === "Status"
+        ? combinedStatusStyle(state.status, state.relayHealth)
+        : null;
       const rightStyle = rightLabel === "Reconnects" && Number(state.reconnects || 0) > 0 ? STYLE.yellow : null;
       return field(leftLabel, leftValue, leftWidth, color, leftStyle)
         + " ".repeat(GAP)
@@ -318,6 +282,7 @@ export class RemoteTui {
       account: config.user?.name || config.user?.login || "signed in",
       agent: config.agentName || config.agentId || "-",
       relay: normalizeRelay(config.relayUrl),
+      root: config.allowedRoots || "-",
       status: "starting",
       relayHealth: { state: "checking" },
       reconnects: 0,
@@ -527,7 +492,7 @@ export class RemoteTui {
     if (width < MIN_FRAME_WIDTH) {
       const compactHeader = [
         truncateCells(`👤 ${headerState.account || "-"} · 💻 ${headerState.agent || "-"}`, width),
-        truncateCells(`🔗 ${statusText(headerState.status)} · ${relayHealthText(headerState.relayHealth)}`, width),
+        truncateCells(`🔗 ${combinedStatusText(headerState.status, headerState.relayHealth)} · 📁 ${headerState.root || "-"}`, width),
       ];
       headerLines = compactHeader.map((line) => this.colorEnabled ? paint(line, STYLE.gray) : line);
     } else {
