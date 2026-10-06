@@ -10,6 +10,9 @@ import { DailyOptionalBudget } from "./usage-budget.mjs";
 import { AGENT_PROTOCOL_VERSION } from "./agent-state";
 import { handleStatusRequest } from "./status-route.mjs";
 import { error, hasPayload, readJson } from "./http-utils";
+import { LearnContextSessionStore, learnSessionKey, type LearnScopeSelector, type LearnedContextEnvelope } from "./learning-context";
+import { routingContext } from "./context-routing";
+import type { LearnRecord } from "./learning";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
 
@@ -189,10 +192,155 @@ function failureMetadata(call: { ok: boolean; errorSource?: string; errorCode?: 
 type ToolActivityContext = {
   toolCallId: string;
   activityId?: string;
+  learnSessionId?: string;
   startedAt: string;
 };
 
 const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
+
+const learnContextSessions = new LearnContextSessionStore();
+const AUTO_LEARN_SKIP_TOOLS = new Set(["learn_get", "learn_put", "learn_delete", "learn_feedback"]);
+
+type AutoLearnRouting = {
+  projectKey?: string;
+  preferredAgent?: { agentId: string; source: "project" | "global" };
+};
+
+type AutoLearnAttachment = {
+  envelope: LearnedContextEnvelope;
+  routing?: AutoLearnRouting;
+};
+
+function currentLearnSessionKey(user: AuthUser) {
+  const activity = toolActivityContexts.get(user);
+  if (!activity) return null;
+  return learnSessionKey(user.id, activity.learnSessionId || activity.activityId, activity.toolCallId);
+}
+
+async function loadAutoLearnScopes(
+  env: Env,
+  user: AuthUser,
+  scopes: LearnScopeSelector[],
+): Promise<LearnRecord[]> {
+  const call = await learningCall(env, user, "/get", { scopes, limit: 48 });
+  if (!call.ok) throw new Error("learning_unavailable");
+  const data = JSON.parse(call.body) as { items?: LearnRecord[] };
+  if (!Array.isArray(data.items)) throw new Error("invalid_learning_response");
+  return data.items.slice(0, 100);
+}
+
+function mergeLearnEnvelopes(...values: Array<LearnedContextEnvelope | null | undefined>): LearnedContextEnvelope | null {
+  const envelopes = values.filter(Boolean) as LearnedContextEnvelope[];
+  if (!envelopes.length) return null;
+
+  const activated: LearnScopeSelector[] = [];
+  const activatedKeys = new Set<string>();
+  for (const envelope of envelopes) {
+    for (const scope of envelope.activated) {
+      const key = scope.scope + ":" + (scope.scopeKey || "");
+      if (activatedKeys.has(key)) continue;
+      activatedKeys.add(key);
+      activated.push(scope);
+    }
+  }
+
+  const priority = (scope: string) => scope === "agent" ? 0 : scope === "project" ? 1 : 2;
+  const items = envelopes
+    .flatMap((envelope) => envelope.items)
+    .sort((a, b) =>
+      priority(a.scope) - priority(b.scope) ||
+      b.confidence - a.confidence ||
+      b.updatedAt.localeCompare(a.updatedAt) ||
+      a.id.localeCompare(b.id)
+    );
+
+  const unique = new Set<string>();
+  const bounded: typeof items = [];
+  let chars = 0;
+  for (const item of items) {
+    if (unique.has(item.id) || bounded.length >= 16 || chars >= 12_000) continue;
+    unique.add(item.id);
+    const content = item.content.slice(0, Math.min(1_200, 12_000 - chars));
+    if (!content) continue;
+    chars += content.length;
+    bounded.push({ ...item, content });
+  }
+
+  return bounded.length ? { version: 1, activated, items: bounded } : null;
+}
+
+async function prepareAutoLearnContext(
+  env: Env,
+  user: AuthUser,
+  tool: string,
+  args: unknown,
+): Promise<AutoLearnAttachment | null> {
+  if (AUTO_LEARN_SKIP_TOOLS.has(tool)) return null;
+  const sessionKey = currentLearnSessionKey(user);
+  if (!sessionKey) return null;
+
+  const loader = (scopes: LearnScopeSelector[]) => loadAutoLearnScopes(env, user, scopes);
+  const globalEnvelope = await learnContextSessions.activate(
+    sessionKey,
+    [{ scope: "global" }],
+    loader,
+  );
+
+  let records = learnContextSessions.records(sessionKey);
+  let route = routingContext(args, records);
+  let projectEnvelope: LearnedContextEnvelope | null = null;
+  if (route.projectKey) {
+    projectEnvelope = await learnContextSessions.activate(
+      sessionKey,
+      [{ scope: "project", scopeKey: route.projectKey }],
+      loader,
+    );
+    records = learnContextSessions.records(sessionKey);
+    route = routingContext(args, records);
+  }
+
+  const envelope = mergeLearnEnvelopes(globalEnvelope, projectEnvelope);
+  if (!envelope) return null;
+  return {
+    envelope,
+    ...(route.projectKey || route.preferredAgent ? {
+      routing: {
+        ...(route.projectKey ? { projectKey: route.projectKey } : {}),
+        ...(route.preferredAgent ? { preferredAgent: route.preferredAgent } : {}),
+      },
+    } : {}),
+  };
+}
+
+async function prepareAgentLearnContext(
+  env: Env,
+  user: AuthUser,
+  tool: string,
+  agentId: string | undefined,
+): Promise<LearnedContextEnvelope | null> {
+  if (!agentId || AUTO_LEARN_SKIP_TOOLS.has(tool)) return null;
+  const sessionKey = currentLearnSessionKey(user);
+  if (!sessionKey) return null;
+  return learnContextSessions.activate(
+    sessionKey,
+    [{ scope: "agent", scopeKey: agentId }],
+    (scopes) => loadAutoLearnScopes(env, user, scopes),
+  );
+}
+
+function attachLearnedContext<T>(value: T, attachment: AutoLearnAttachment | null): T {
+  if (!attachment || !value || typeof value !== "object") return value;
+  const result = value as any;
+  if (!Array.isArray(result.content)) return value;
+  const text = JSON.stringify({
+    learnedContext: attachment.envelope,
+    ...(attachment.routing ? { routingContext: attachment.routing } : {}),
+  });
+  return {
+    ...result,
+    content: [...result.content, { type: "text" as const, text }],
+  } as T;
+}
 
 const SECURITY_CACHE_TTL_MS = 30_000;
 const SECURITY_REVISION_POLL_MS = 5_000;
@@ -295,18 +443,31 @@ function grantAllows(scopes: string[], required: Scope) {
 }
 
 async function activityContextForRequest(request: Request): Promise<ToolActivityContext> {
-  const source = [
+  const activitySource = [
     "mcp-session-id",
     "x-openai-conversation-id",
     "x-openai-chat-id",
     "x-chatgpt-conversation-id",
   ].map((name) => request.headers.get(name)?.trim()).find(Boolean);
-  const activityId = source
-    ? "act_" + (await hashToken("chat-relay-activity:" + source)).slice(0, 20)
+
+  const conversationSource = [
+    "x-openai-conversation-id",
+    "x-openai-chat-id",
+    "x-chatgpt-conversation-id",
+  ].map((name) => request.headers.get(name)?.trim()).find(Boolean);
+  const learnSource = conversationSource || request.headers.get("mcp-session-id")?.trim();
+
+  const activityId = activitySource
+    ? "act_" + (await hashToken("chat-relay-activity:" + activitySource)).slice(0, 20)
     : undefined;
+  const learnSessionId = learnSource
+    ? "learn_" + (await hashToken("chat-relay-learn-session:" + learnSource)).slice(0, 20)
+    : activityId;
+
   return {
     toolCallId: "tc_" + crypto.randomUUID().replace(/-/g, ""),
     ...(activityId ? { activityId } : {}),
+    ...(learnSessionId ? { learnSessionId } : {}),
     startedAt: new Date().toISOString(),
   };
 }
@@ -406,9 +567,31 @@ async function instrumentTool<T>(
   const requestedAgentId = typeof args === "object" && args !== null && typeof (args as any).agentId === "string"
     ? String((args as any).agentId).slice(0, 128)
     : undefined;
+  let learnedAttachment: AutoLearnAttachment | null = null;
+  try {
+    learnedAttachment = await prepareAutoLearnContext(env, user, tool, args);
+  } catch {}
+
   let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming } | undefined;
   try {
     outcome = await run();
+
+    if (outcome.agentId && (outcome.ok || outcome.errorSource === "agent")) {
+      try {
+        const agentEnvelope = await prepareAgentLearnContext(env, user, tool, outcome.agentId);
+        const merged = mergeLearnEnvelopes(learnedAttachment?.envelope, agentEnvelope);
+        if (merged) {
+          learnedAttachment = {
+            envelope: merged,
+            ...(learnedAttachment?.routing ? { routing: learnedAttachment.routing } : {}),
+          };
+        }
+      } catch {}
+    }
+
+    if (learnedAttachment) {
+      outcome = { ...outcome, value: attachLearnedContext(outcome.value, learnedAttachment) };
+    }
     return outcome.value;
   } catch (cause) {
     await recordUsage(env, {
@@ -1723,8 +1906,8 @@ export default {
 
     if (path === "/mcp") {
       const authResult = await authenticateUserResult(request, env);
-      const user = authResult.user;
-      if (!user) {
+      const authenticatedUser = authResult.user;
+      if (!authenticatedUser) {
         if (bearerToken(request)) {
           ctx.waitUntil(recordConnectorAuthFailure(env, "connector.mcp.auth.failure", {
             status: authResult.response?.status ?? 401,
@@ -1743,6 +1926,7 @@ export default {
         );
       }
 
+      const user: AuthUser = { ...authenticatedUser };
       toolActivityContexts.set(user, await activityContextForRequest(request));
       const quotaResponse = await enforceMcpQuota(request, env, user);
       if (quotaResponse) return quotaResponse;

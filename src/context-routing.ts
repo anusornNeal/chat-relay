@@ -53,7 +53,9 @@ export function extractRoutingSignals(args: unknown, maxSignals = 24): string[] 
     for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>).slice(0, 40)) {
       if (SIGNAL_KEYS.has(entryKey) && typeof entryValue === "string") {
         visit(entryValue, depth + 1, entryKey);
-      } else if (entryKey === "paths" || entryKey === "operations" || entryKey === "jobs") {
+      } else if (entryKey === "paths") {
+        visit(entryValue, depth + 1, "path");
+      } else if (entryKey === "operations" || entryKey === "jobs") {
         visit(entryValue, depth + 1);
       } else if (typeof entryValue === "object" && entryValue !== null && depth < 3) {
         visit(entryValue, depth + 1);

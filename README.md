@@ -255,6 +255,6 @@ The decision boundary is deliberate:
 - **ChatGPT decides semantic actions and tools:** whether to read files, search, edit, run terminal commands, use desktop control, or re-plan after a failure.
 - Learned hints never override authorization, grants, allowed roots, destructive-tool policy, or capability checks.
 
-Routing hints are explicit memories. A global `project_context` memory with key `project-root:<projectKey>` stores the concrete project root. A `preferred-agent` memory may exist in project scope (preferred) or global scope (fallback). No project is guessed when no explicit root hint matches.
+Routing hints are explicit memories. A global `project_context` memory with key `project-root:<projectKey>` stores the concrete project root. A `preferred-agent` memory may exist in project scope (preferred) or global scope (fallback); Relay surfaces it in `routingContext` as guidance and does not execute or retry a tool solely because of that hint. No project is guessed when no explicit root hint matches.
 
 The intended read budget is bounded: global context at most once per MCP session, each activated project at most once per session, and each activated agent at most once per session. Bootstrap performs no Learn writes.

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { build } from "esbuild";
+import fs from "node:fs";
 
 const bundled = await build({
   stdin: {
@@ -56,9 +57,10 @@ const agentRecords = [
   const signals = extractRoutingSignals({
     path: "C:\\Users\\tatar\\Projects\\chat-relay\\src\\worker-app.ts",
     operations: [{ path: "C:\\Users\\tatar\\Projects\\chat-relay\\README.md" }],
+    paths: ["C:\\Users\\tatar\\Projects\\chat-relay\\package.json"],
     content: "C:\\should-not-be-treated-as-path",
   });
-  assert.equal(signals.length, 2);
+  assert.equal(signals.length, 3);
   assert.equal(projectKeyForSignals(signals, globalRecords), "chat-relay");
   assert.equal(projectKeyForSignals(["C:/elsewhere/repo"], globalRecords), null);
   assert.equal(preferredAgentForContext([...globalRecords, ...projectRecords], "chat-relay")?.agentId, "desktop-project");
@@ -109,6 +111,19 @@ const agentRecords = [
   await store.activate(otherUser, [{ scope: "global" }], loader);
   assert.equal(calls.length, 5, "account identity must remain part of the session key");
   console.log("PASS progressive scope activation and read bounds");
+}
+
+{
+  const worker = fs.readFileSync("src/worker-app.ts", "utf8");
+  assert.match(worker, /new LearnContextSessionStore\(\)/);
+  assert.match(worker, /AUTO_LEARN_SKIP_TOOLS/);
+  assert.match(worker, /prepareAutoLearnContext/);
+  assert.match(worker, /prepareAgentLearnContext/);
+  assert.match(worker, /attachLearnedContext/);
+  assert.match(worker, /learnSessionId/);
+  assert.match(worker, /const user: AuthUser = \{ \.\.\.authenticatedUser \}/);
+  assert.match(worker, /"x-openai-conversation-id"/);
+  console.log("PASS worker MCP bootstrap wiring contract");
 }
 
 console.log("learning bootstrap/routing tests passed");
