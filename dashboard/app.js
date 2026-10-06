@@ -626,6 +626,20 @@ async function loadUsage({ patch = false } = {}) {
 
 
 let learnProfileSnapshot = null;
+let learnKindFilter = "all";
+
+const LEARN_KIND_ORDER = [
+  "workflow",
+  "response_style",
+  "work_style",
+  "coding_style",
+  "problem_solving",
+  "tool_pattern",
+  "project_context",
+  "agent_context",
+  "preference",
+  "correction",
+];
 
 function learnKindLabel(kind) {
   return ({
@@ -642,20 +656,24 @@ function learnKindLabel(kind) {
   })[kind] || String(kind || "Learn");
 }
 
-function learnChangeLabel(type) {
-  return ({
-    created: "Learned",
-    updated: "Updated",
-    reinforced: "Reinforced",
-    weakened: "Weakened",
-    removed: "Removed",
-  })[type] || "Changed";
+function learnKindClass(kind) {
+  return "kind-" + String(kind || "learn").replace(/[^a-z0-9_-]/gi, "-");
 }
 
 function learnScopeLabel(item) {
   const scope = String(item?.scope || "");
   if (scope === "global") return "Global";
   return scope.charAt(0).toUpperCase() + scope.slice(1) + (item?.scopeKey ? " · " + item.scopeKey : "");
+}
+
+function learnSummary(items) {
+  const byScope = { global: 0, project: 0, agent: 0 };
+  const byKind = {};
+  for (const item of items) {
+    if (Object.prototype.hasOwnProperty.call(byScope, item.scope)) byScope[item.scope] += 1;
+    byKind[item.kind] = (byKind[item.kind] || 0) + 1;
+  }
+  return { total: items.length, byScope, byKind };
 }
 
 function exportLearnProfile() {
@@ -669,42 +687,75 @@ function exportLearnProfile() {
   setTimeout(() => URL.revokeObjectURL(href), 0);
 }
 
-async function mutateLearn(path, body) {
-  await api(path, { method: "POST", body: JSON.stringify(body) });
-  await loadLearn({ patch: true });
+function applyLearnMutation(result) {
+  if (!learnProfileSnapshot || !result) return;
+  let items = Array.isArray(learnProfileSnapshot.items) ? [...learnProfileSnapshot.items] : [];
+
+  if (result.deleted && result.change?.memoryId) {
+    items = items.filter((item) => item.id !== result.change.memoryId);
+  } else if (result.item) {
+    const index = items.findIndex((item) => item.id === result.item.id);
+    if (index >= 0) items[index] = result.item;
+    else items.unshift(result.item);
+  }
+
+  learnProfileSnapshot = {
+    ...learnProfileSnapshot,
+    items,
+    summary: learnSummary(items),
+  };
+
+  if (learnKindFilter !== "all" && !items.some((item) => item.kind === learnKindFilter)) {
+    learnKindFilter = "all";
+  }
 }
 
-async function loadLearn({ patch = false } = {}) {
-  setHeader("My Learn", "Your adaptive preferences and reusable working patterns");
-  const data = await api("/admin/api/learn?limit=100&activityLimit=50");
-  learnProfileSnapshot = data;
+async function mutateLearn(path, body) {
+  const result = await api(path, { method: "POST", body: JSON.stringify(body) });
+  applyLearnMutation(result);
+  renderLearnProfile({ patch: true });
+}
 
+function renderLearnProfile({ patch = false } = {}) {
+  const data = learnProfileSnapshot || {};
   const items = Array.isArray(data.items) ? data.items : [];
-  const activity = Array.isArray(data.activity) ? data.activity : [];
-  const summary = data.summary || {};
+  const summary = data.summary || learnSummary(items);
   const byScope = summary.byScope || {};
+  const byKind = summary.byKind || {};
+  const visibleItems = learnKindFilter === "all"
+    ? items
+    : items.filter((item) => item.kind === learnKindFilter);
 
-  const memoryCards = items.length ? items.map((item) =>
-    '<article class="learn-memory" data-live-key="learn-' + esc(item.id) + '">' +
-      '<div class="learn-memory-head"><div><span class="learn-kind">' + esc(learnKindLabel(item.kind)) + '</span>' +
-      '<h3>' + esc(item.key) + '</h3></div><span class="soft-pill">' + esc(learnScopeLabel(item)) + '</span></div>' +
+  const categoryButtons = [
+    '<button class="learn-category-filter' + (learnKindFilter === "all" ? " active" : "") + '" type="button" data-learn-kind="all">' +
+      '<span>All types</span><strong>' + esc(items.length) + '</strong></button>',
+    ...LEARN_KIND_ORDER.filter((kind) => Number(byKind[kind]) > 0).map((kind) =>
+      '<button class="learn-category-filter ' + esc(learnKindClass(kind)) + (learnKindFilter === kind ? " active" : "") + '" type="button" data-learn-kind="' + esc(kind) + '">' +
+        '<span>' + esc(learnKindLabel(kind)) + '</span><strong>' + esc(byKind[kind]) + '</strong></button>'
+    ),
+  ].join("");
+
+  const memoryCards = visibleItems.length ? visibleItems.map((item) => {
+    const kindClass = learnKindClass(item.kind);
+    return '<article class="learn-memory ' + esc(kindClass) + '" data-kind="' + esc(item.kind) + '" data-live-key="learn-' + esc(item.id) + '">' +
+      '<div class="learn-memory-head">' +
+        '<div><span class="learn-kind-badge ' + esc(kindClass) + '">' + esc(learnKindLabel(item.kind)) + '</span>' +
+        '<h3>' + esc(item.key) + '</h3></div>' +
+        '<span class="soft-pill">' + esc(learnScopeLabel(item)) + '</span>' +
+      '</div>' +
       '<p>' + esc(item.content) + '</p>' +
-      '<div class="learn-memory-foot"><span>Confidence ' + esc(item.confidence) + '% · updated ' + esc(bkkTime(item.updatedAt)) + '</span>' +
+      '<div class="learn-memory-meta">' +
+        '<span>Confidence ' + esc(item.confidence) + '%</span>' +
+        '<span>Updated ' + esc(bkkTime(item.updatedAt)) + '</span>' +
+        '<span>👍 ' + esc(item.positiveFeedback || 0) + ' · 👎 ' + esc(item.negativeFeedback || 0) + '</span>' +
+      '</div>' +
       '<div class="learn-actions">' +
-        '<button class="button learn-small" type="button" data-learn-feedback="positive" data-memory-id="' + esc(item.id) + '">Useful</button>' +
-        '<button class="button learn-small" type="button" data-learn-feedback="negative" data-memory-id="' + esc(item.id) + '">Less useful</button>' +
-        '<button class="button learn-small danger" type="button" data-learn-delete="' + esc(item.id) + '">Delete</button>' +
-      '</div></div>' +
-    '</article>'
-  ).join("") : '<div class="table-empty">' + icon("info") + '<strong>No learned memories yet</strong><span>Stable preferences and work patterns will appear here as they are learned.</span></div>';
-
-  const activityRows = activity.length ? activity.map((event) =>
-    '<div class="learn-activity-row" data-live-key="' + esc(event.eventId) + '">' +
-      '<span class="learn-event learn-event-' + esc(event.type) + '">' + esc(learnChangeLabel(event.type)) + '</span>' +
-      '<div><strong>' + esc(event.key) + '</strong><span>' + esc(event.summary) + '</span></div>' +
-      '<time>' + esc(bkkTime(event.at)) + '</time>' +
-    '</div>'
-  ).join("") : '<div class="empty-inline">No Learn changes recorded yet.</div>';
+        '<button class="button learn-small useful" type="button" data-learn-feedback="positive" data-memory-id="' + esc(item.id) + '" title="Increase this memory’s retrieval priority">👍 Useful</button>' +
+        '<button class="button learn-small not-useful" type="button" data-learn-feedback="negative" data-memory-id="' + esc(item.id) + '" title="Lower this memory’s retrieval priority">👎 Not useful</button>' +
+        '<button class="button learn-small danger" type="button" data-learn-delete="' + esc(item.id) + '" title="Remove this memory">🗑 Remove</button>' +
+      '</div>' +
+    '</article>';
+  }).join("") : '<div class="table-empty learn-empty">' + icon("info") + '<strong>No memories in this type</strong><span>Choose another category to see learned preferences and working patterns.</span></div>';
 
   renderContent(
     '<div class="overview-toolbar"><span class="privacy-chip">' + icon("info") + 'Only your Learn profile</span>' +
@@ -715,24 +766,45 @@ async function loadLearn({ patch = false } = {}) {
       metricCard("Projects", fmtNum(byScope.project), "project-specific") +
       metricCard("Agents", fmtNum(byScope.agent), "agent-specific") +
     '</div>' +
-    '<div class="learn-layout"><section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Profile</div><h2>What Chat Relay learned</h2></div><span class="panel-meta">Loaded only when you open this page</span></div>' +
-      '<div class="learn-memory-grid">' + memoryCards + '</div></section>' +
-    '<section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Recent Learn changes</h2></div><span class="panel-meta">No background polling</span></div>' +
-      '<div class="learn-activity">' + activityRows + '</div></section></div>',
+    '<section class="panel learn-profile-panel">' +
+      '<div class="panel-heading"><div><div class="panel-kicker">Categories</div><h2>What Chat Relay learned</h2></div><span class="panel-meta">Loaded only when you open this page</span></div>' +
+      '<div class="learn-category-bar">' + categoryButtons + '</div>' +
+      '<div class="learn-results-meta"><strong>' + esc(learnKindFilter === "all" ? "All types" : learnKindLabel(learnKindFilter)) + '</strong><span>' + esc(visibleItems.length) + ' memories</span></div>' +
+      '<div class="learn-memory-grid">' + memoryCards + '</div>' +
+    '</section>',
     patch,
   );
 
   const exportButton = $("learnExport");
   if (exportButton) exportButton.onclick = exportLearnProfile;
+
+  document.querySelectorAll("[data-learn-kind]").forEach((button) => {
+    button.onclick = () => {
+      learnKindFilter = button.dataset.learnKind || "all";
+      renderLearnProfile({ patch: true });
+    };
+  });
+
   document.querySelectorAll("[data-learn-feedback]").forEach((button) => {
     button.onclick = () => mutateLearn("/admin/api/learn/feedback", {
       id: button.dataset.memoryId,
       value: button.dataset.learnFeedback,
     });
   });
+
   document.querySelectorAll("[data-learn-delete]").forEach((button) => {
     button.onclick = () => mutateLearn("/admin/api/learn/delete", { id: button.dataset.learnDelete });
   });
+}
+
+async function loadLearn({ patch = false } = {}) {
+  setHeader("My Learn", "Your adaptive preferences and reusable working patterns");
+  const data = await api("/admin/api/learn?limit=100");
+  learnProfileSnapshot = {
+    ...data,
+    summary: data.summary || learnSummary(Array.isArray(data.items) ? data.items : []),
+  };
+  renderLearnProfile({ patch });
 }
 
 $("logout").onclick = async () => {

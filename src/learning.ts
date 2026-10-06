@@ -44,7 +44,6 @@ export type LearnChange = {
 };
 
 const TABLE = "learning_memory_v1";
-const ACTIVITY_TABLE = "learning_activity_v1";
 const KIND_VALUES: LearnKind[] = [
   "preference",
   "response_style",
@@ -109,21 +108,6 @@ function rowToRecord(row: any): LearnRecord {
     updatedAt: String(row.updated_at),
   };
 }
-function rowToChange(row: any): LearnChange {
-  return {
-    eventId: String(row.event_id),
-    memoryId: String(row.memory_id),
-    type: String(row.change_type) as LearnChangeType,
-    key: String(row.memory_key),
-    kind: String(row.kind) as LearnKind,
-    scope: String(row.scope) as LearnScope,
-    scopeKey: row.scope_key == null ? null : String(row.scope_key),
-    summary: String(row.summary),
-    confidence: row.confidence == null ? null : Number(row.confidence),
-    previousConfidence: row.previous_confidence == null ? null : Number(row.previous_confidence),
-    at: String(row.created_at),
-  };
-}
 function summarizeMemory(content: string) {
   return cleanText(content.replace(/\s+/g, " "), 320);
 }
@@ -171,22 +155,6 @@ export class Learning extends DurableObject {
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_identity ON ${TABLE}(kind, scope, scope_key, memory_key)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_retrieval ON ${TABLE}(scope, scope_key, kind, confidence DESC, positive_feedback DESC, negative_feedback ASC, updated_at DESC)`);
 
-    this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS ${ACTIVITY_TABLE} (
-        event_id TEXT PRIMARY KEY,
-        memory_id TEXT NOT NULL,
-        change_type TEXT NOT NULL,
-        memory_key TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        scope TEXT NOT NULL,
-        scope_key TEXT,
-        summary TEXT NOT NULL,
-        confidence INTEGER,
-        previous_confidence INTEGER,
-        created_at TEXT NOT NULL
-      ) WITHOUT ROWID
-    `);
-    this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_activity_v1_created ON ${ACTIVITY_TABLE}(created_at DESC)`);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -207,25 +175,8 @@ export class Learning extends DurableObject {
     return this.memoryCount < MAX_MEMORIES;
   }
 
-  private recordActivity(input: Omit<LearnChange, "eventId">): LearnChange {
-    const change: LearnChange = { eventId: "lev_" + crypto.randomUUID().replaceAll("-", ""), ...input };
-    this.ctx.storage.sql.exec(
-      `INSERT INTO ${ACTIVITY_TABLE}
-        (event_id, memory_id, change_type, memory_key, kind, scope, scope_key, summary, confidence, previous_confidence, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      change.eventId,
-      change.memoryId,
-      change.type,
-      change.key,
-      change.kind,
-      change.scope,
-      change.scopeKey,
-      change.summary,
-      change.confidence,
-      change.previousConfidence,
-      change.at,
-    );
-    return change;
+  private makeChange(input: Omit<LearnChange, "eventId">): LearnChange {
+    return { eventId: "lev_" + crypto.randomUUID().replaceAll("-", ""), ...input };
   }
 
   private async get(request: Request) {
@@ -328,15 +279,10 @@ export class Learning extends DurableObject {
   private async profile(request: Request) {
     const body = await request.json<any>().catch(() => ({}));
     const limit = boundedInt(body?.limit, 100, 1, 100);
-    const activityLimit = boundedInt(body?.activityLimit, 50, 1, 100);
     const items = this.ctx.storage.sql.exec<any>(
       `SELECT * FROM ${TABLE} ORDER BY updated_at DESC, id ASC LIMIT ?`,
       limit,
     ).toArray().map(rowToRecord);
-    const activity = this.ctx.storage.sql.exec<any>(
-      `SELECT * FROM ${ACTIVITY_TABLE} ORDER BY created_at DESC, event_id ASC LIMIT ?`,
-      activityLimit,
-    ).toArray().map(rowToChange);
 
     const byScope = { global: 0, project: 0, agent: 0 };
     const byKind: Record<string, number> = {};
@@ -346,9 +292,8 @@ export class Learning extends DurableObject {
     }
     return Response.json({
       items,
-      activity,
       summary: { total: items.length, byScope, byKind },
-      limits: { memories: MAX_MEMORIES, returned: limit, activityReturned: activityLimit },
+      limits: { memories: MAX_MEMORIES, returned: limit },
     });
   }
 
@@ -434,7 +379,7 @@ export class Learning extends DurableObject {
       else if (confidence > existing.confidence) type = "reinforced";
       else type = "weakened";
     }
-    const change = this.recordActivity({
+    const change = this.makeChange({
       memoryId: id,
       type,
       key,
@@ -459,7 +404,7 @@ export class Learning extends DurableObject {
     this.ctx.storage.sql.exec(`DELETE FROM ${TABLE} WHERE id = ?`, id);
     if (this.memoryCount !== null) this.memoryCount = Math.max(0, this.memoryCount - 1);
     const now = new Date().toISOString();
-    const change = this.recordActivity({
+    const change = this.makeChange({
       memoryId: existing.id,
       type: "removed",
       key: existing.key,
@@ -494,7 +439,7 @@ export class Learning extends DurableObject {
       negativeFeedback: existing.negativeFeedback + (value === "negative" ? 1 : 0),
       updatedAt: now,
     };
-    const change = this.recordActivity({
+    const change = this.makeChange({
       memoryId: item.id,
       type: value === "positive" ? "reinforced" : "weakened",
       key: item.key,

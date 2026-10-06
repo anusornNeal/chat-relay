@@ -522,8 +522,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   if (path === "/admin/api/learn" && request.method === "GET") {
     if (!selfUserId) return error(403, "browser_user_required");
     const limit = Math.min(100, Math.max(1, Math.floor(Number(url.searchParams.get("limit")) || 100)));
-    const activityLimit = Math.min(100, Math.max(1, Math.floor(Number(url.searchParams.get("activityLimit")) || 50)));
-    const response = await learningCall(env, selfUserId, "/profile", { limit, activityLimit });
+    const response = await learningCall(env, selfUserId, "/profile", { limit });
     return new Response(response.body, {
       status: response.status,
       headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" },

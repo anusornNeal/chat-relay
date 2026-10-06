@@ -234,24 +234,23 @@ assert.equal(put.status,200);
 assert.equal(put.item.key,"concise");
 assert.match(put.item.id,/^mem_[a-f0-9]{64}$/);
 assert.equal(a.sql.mutations,1,"one changed put should write one memory row");
-assert.equal(a.sql.activityMutations,1,"one changed put should append one compact activity row");
+assert.equal(a.sql.activityMutations,0,"Learn mutations must not persist activity rows");
 const id=put.item.id;
 
 const duplicate=await a.call("/put",{key:"concise",kind:"preference",scope:"global",content:"Prefer concise responses",confidence:95});
 assert.equal(duplicate.changed,false,"identical automatic learning must be a no-op");
 assert.equal(a.sql.mutations,1,"duplicate learn must not write memory");
-assert.equal(a.sql.activityMutations,1,"duplicate learn must not append activity");
+assert.equal(a.sql.activityMutations,0,"duplicate learn must not append activity");
 
-const profile=await a.call("/profile",{limit:100,activityLimit:50});
+const profile=await a.call("/profile",{limit:100});
 assert.equal(profile.summary.total,1);
-assert.equal(profile.activity.length,1);
-assert.equal(profile.activity[0].type,"created");
+assert.equal(profile.activity,undefined,"profile should not read or expose activity history");
 
 const aGlobal=await a.call("/get",{scopes:[{scope:"global"}]});
 assert.equal(aGlobal.items.length,1);
 assert.equal(aGlobal.items[0].content,"Prefer concise responses");
 assert.equal(a.sql.mutations,1,"reads must not mutate memory storage");
-assert.equal(a.sql.activityMutations,1,"reads must not mutate activity storage");
+assert.equal(a.sql.activityMutations,0,"reads must not mutate activity storage");
 
 const bGuess=await b.call("/feedback",{id,value:"positive"});
 assert.equal(bGuess.status,404,"another account instance must not access guessed ids");
@@ -339,6 +338,9 @@ assert.equal((await a.call("/put",{key:"too-large",kind:"preference",scope:"glob
 
 assert.equal((await a.call("/delete",{id})).deleted,true);
 assert.equal((await a.call("/delete",{id})).deleted,false);
+
+const learningSource=fs.readFileSync("src/learning.ts","utf8");
+assert.doesNotMatch(learningSource,/learning_activity_v1/,"Learn activity history must not be persisted");
 
 const worker=fs.readFileSync("src/worker-app.ts","utf8");
 assert.match(worker,/env\.LEARNING\.get\(env\.LEARNING\.idFromName\(user\.id\)\)/,"Learning DO must be derived only from authenticated user.id");
