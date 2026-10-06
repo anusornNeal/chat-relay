@@ -96,6 +96,34 @@ function nextUtcDay(nowMs: number) {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
 }
 
+function normalizeUsageEvent(body: any): { event?: UsageEvent; skipped?: true; error?: string } {
+  if (!body?.userId || !body?.timestamp) return { error: "invalid_usage_event" };
+  const timestampMs = Date.parse(String(body.timestamp));
+  if (!Number.isFinite(timestampMs)) return { error: "invalid_usage_timestamp" };
+
+  const agentId = body.agentId ? String(body.agentId).slice(0, 128) : "";
+  if (!agentId || agentId === "__relay__") return { skipped: true };
+
+  return {
+    event: {
+      userId: String(body.userId).slice(0, 128),
+      agentId,
+      timestamp: new Date(timestampMs).toISOString(),
+      ...(body.tool ? { tool: String(body.tool).slice(0, 128) } : {}),
+      durationMs: Number.isFinite(Number(body.durationMs))
+        ? Math.min(120_000, Math.max(0, Math.round(Number(body.durationMs))))
+        : 0,
+      ok: body.ok !== false,
+      ...(body.errorClass ? { errorClass: String(body.errorClass).slice(0, 80) } : {}),
+      ...(body.errorSource ? { errorSource: String(body.errorSource).slice(0, 80) } : {}),
+      ...(body.errorCode ? { errorCode: String(body.errorCode).slice(0, 80) } : {}),
+      ...(body.failureStage ? { failureStage: String(body.failureStage).slice(0, 80) } : {}),
+      ...(Number.isFinite(Number(body.requestBytes)) ? { requestBytes: Math.max(0, Math.round(Number(body.requestBytes))) } : {}),
+      ...(Number.isFinite(Number(body.responseBytes)) ? { responseBytes: Math.max(0, Math.round(Number(body.responseBytes))) } : {}),
+    },
+  };
+}
+
 export class Usage extends DurableObject {
   private readonly usageEnv: UsageEnv;
   private readonly aggregates: UsageAggregates;
@@ -106,6 +134,22 @@ export class Usage extends DurableObject {
     super(ctx, env);
     this.usageEnv = env;
     this.aggregates = new UsageAggregates(ctx.storage);
+  }
+
+  private async publishOverviewForUsers(userIds: Iterable<string>) {
+    const now = Date.now();
+    for (const userId of new Set(userIds)) {
+      const lastPublishedAt = this.lastOverviewPublishAt.get(userId) || 0;
+      if (now - lastPublishedAt < 60_000) continue;
+      this.lastOverviewPublishAt.set(userId, now);
+      const publishBudget = this.dashboardPublishBudget.consume(
+        this.usageEnv.USAGE_DASHBOARD_PUBLISH_DAILY_BUDGET,
+        now,
+      );
+      if (publishBudget.allowed) {
+        await publishDashboard(this.usageEnv, ["overview"], userId);
+      }
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -222,51 +266,38 @@ export class Usage extends DurableObject {
 
     if (url.pathname === "/record" && request.method === "POST") {
       const body = await request.json<UsageEvent>().catch(() => null);
-      if (!body?.userId || !body?.timestamp) {
-        return Response.json({ error: "invalid_usage_event" }, { status: 400 });
-      }
-      const timestampMs = Date.parse(String(body.timestamp));
-      if (!Number.isFinite(timestampMs)) {
-        return Response.json({ error: "invalid_usage_timestamp" }, { status: 400 });
-      }
+      const normalized = normalizeUsageEvent(body);
+      if (normalized.error) return Response.json({ error: normalized.error }, { status: 400 });
+      if (normalized.skipped || !normalized.event) return Response.json({ ok: true, skipped: true });
 
-      const agentId = body.agentId ? String(body.agentId).slice(0, 128) : "";
-      if (!agentId || agentId === "__relay__") {
-        return Response.json({ ok: true, skipped: true });
-      }
-
-      const event: UsageEvent = {
-        userId: String(body.userId).slice(0, 128),
-        agentId,
-        timestamp: new Date(timestampMs).toISOString(),
-        ...(body.tool ? { tool: String(body.tool).slice(0, 128) } : {}),
-        durationMs: Number.isFinite(Number(body.durationMs))
-          ? Math.min(120_000, Math.max(0, Math.round(Number(body.durationMs))))
-          : 0,
-        ok: body.ok !== false,
-        ...(body.errorClass ? { errorClass: String(body.errorClass).slice(0, 80) } : {}),
-        ...(body.errorSource ? { errorSource: String(body.errorSource).slice(0, 80) } : {}),
-        ...(body.errorCode ? { errorCode: String(body.errorCode).slice(0, 80) } : {}),
-        ...(body.failureStage ? { failureStage: String(body.failureStage).slice(0, 80) } : {}),
-        ...(Number.isFinite(Number(body.requestBytes)) ? { requestBytes: Math.max(0, Math.round(Number(body.requestBytes))) } : {}),
-        ...(Number.isFinite(Number(body.responseBytes)) ? { responseBytes: Math.max(0, Math.round(Number(body.responseBytes))) } : {}),
-      };
-
-      await this.aggregates.record(event);
-
-      const now = Date.now();
-      const lastPublishedAt = this.lastOverviewPublishAt.get(event.userId) || 0;
-      if (now - lastPublishedAt >= 60_000) {
-        this.lastOverviewPublishAt.set(event.userId, now);
-        const publishBudget = this.dashboardPublishBudget.consume(
-          this.usageEnv.USAGE_DASHBOARD_PUBLISH_DAILY_BUDGET,
-          now,
-        );
-        if (publishBudget.allowed) {
-          await publishDashboard(this.usageEnv, ["overview"], event.userId);
-        }
-      }
+      await this.aggregates.record(normalized.event);
+      await this.publishOverviewForUsers([normalized.event.userId]);
       return Response.json({ ok: true });
+    }
+
+    if (url.pathname === "/record-batch" && request.method === "POST") {
+      const body = await request.json<{ events?: UsageEvent[] }>().catch(() => null);
+      if (!Array.isArray(body?.events) || body.events.length === 0 || body.events.length > 256) {
+        return Response.json({ error: "invalid_usage_batch" }, { status: 400 });
+      }
+
+      const events: UsageEvent[] = [];
+      let skipped = 0;
+      for (const raw of body.events) {
+        const normalized = normalizeUsageEvent(raw);
+        if (normalized.error) return Response.json({ error: normalized.error }, { status: 400 });
+        if (normalized.skipped || !normalized.event) {
+          skipped += 1;
+          continue;
+        }
+        events.push(normalized.event);
+      }
+
+      if (events.length) {
+        await this.aggregates.recordBatch(events);
+        await this.publishOverviewForUsers(events.map((event) => event.userId));
+      }
+      return Response.json({ ok: true, accepted: events.length, skipped });
     }
 
     if (url.pathname === "/window" && request.method === "GET") {

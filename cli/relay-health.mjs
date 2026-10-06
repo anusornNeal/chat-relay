@@ -1,4 +1,4 @@
-export const RELAY_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+export const RELAY_HEALTH_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 export const RELAY_HEALTH_CHECK_TIMEOUT_MS = 8 * 1000;
 export const RELAY_HEALTH_LIMITED_INTERVAL_MS = 60 * 60 * 1000;
 export const RELAY_HEALTH_CLOUDFLARE_ERROR_INTERVAL_MS = 15 * 60 * 1000;
@@ -136,7 +136,7 @@ export async function checkRelayHealth(relayUrl, {
 
 export function startRelayHealthMonitor(relayUrl, {
   onStatus,
-  // Per active TUI, this adds 288 Worker requests and up to 864 DO fetches daily.
+  // Per active TUI, this adds 96 Worker requests and up to 288 DO fetches daily.
   intervalMs = RELAY_HEALTH_CHECK_INTERVAL_MS,
   ...checkOptions
 } = {}) {

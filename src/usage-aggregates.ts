@@ -125,90 +125,160 @@ export class UsageAggregates {
   }
 
   async record(event: UsageEvent) {
-    const timestampMs = Date.parse(event.timestamp);
-    const hourMs = hourStart(timestampMs);
-    const userId = event.userId;
-    const agentId = event.agentId || "";
+    return this.recordBatch([event]);
+  }
 
-    if (this.sql) {
+  async recordBatch(events: UsageEvent[]) {
+    if (!events.length) return;
+
+    type Batch = {
+      bucketKey: string;
+      hourMs: number;
+      userId: string;
+      agentId: string;
+      calls: number;
+      detailCalls: number;
+      errors: number;
+      operationalErrors: number;
+      durationMs: number;
+      requestBytes: number;
+      responseBytes: number;
+      minDurationMs: number;
+      maxDurationMs: number;
+      histogram: Map<string, number>;
+      tools: Map<string, number>;
+    };
+
+    const batches = new Map<string, Batch>();
+    for (const event of events) {
+      const timestampMs = Date.parse(event.timestamp);
+      if (!Number.isFinite(timestampMs)) continue;
+      const hourMs = hourStart(timestampMs);
+      const userId = event.userId;
+      const agentId = event.agentId || "";
       const bucketKey = `${String(hourMs).padStart(13, "0")}|${encodeURIComponent(userId)}|${encodeURIComponent(agentId)}`;
-      if (!event.tool) {
-        this.sql.exec(
-          `INSERT INTO ${TABLE} (bucket_key, user_id, agent_id, calls)
-           VALUES (?, ?, ?, 1)
-           ON CONFLICT(bucket_key)
-           DO UPDATE SET calls = calls + 1`,
+      let batch = batches.get(bucketKey);
+      if (!batch) {
+        batch = {
           bucketKey,
+          hourMs,
           userId,
           agentId,
-        );
-        return;
+          calls: 0,
+          detailCalls: 0,
+          errors: 0,
+          operationalErrors: 0,
+          durationMs: 0,
+          requestBytes: 0,
+          responseBytes: 0,
+          minDurationMs: 0,
+          maxDurationMs: 0,
+          histogram: new Map(),
+          tools: new Map(),
+        };
+        batches.set(bucketKey, batch);
       }
 
+      batch.calls += 1;
+      if (!event.tool) continue;
+
       const duration = Math.min(120_000, Math.max(0, Math.round(Number(event.durationMs) || 0)));
-      const errors = event.ok === false ? 1 : 0;
-      const operationalErrors = operationalFailure(event) ? 1 : 0;
-      const requestBytes = Math.max(0, Math.round(Number(event.requestBytes) || 0));
-      const responseBytes = Math.max(0, Math.round(Number(event.responseBytes) || 0));
       const binKey = "b" + durationBin(duration);
       const toolKey = String(event.tool).slice(0, 128);
-      const histogramPath = jsonPathForKey(binKey);
-      const toolPath = jsonPathForKey(toolKey);
-      this.sql.exec(
-        `INSERT INTO ${TABLE} (
-           bucket_key, user_id, agent_id, calls, detail_calls, errors, operational_errors,
-           duration_ms, request_bytes, response_bytes, min_duration_ms, max_duration_ms,
-           histogram_json, tools_json
-         )
-         VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(bucket_key)
-         DO UPDATE SET
-           calls = calls + 1,
-           detail_calls = detail_calls + 1,
-           errors = errors + excluded.errors,
-           operational_errors = operational_errors + excluded.operational_errors,
-           duration_ms = duration_ms + excluded.duration_ms,
-           request_bytes = request_bytes + excluded.request_bytes,
-           response_bytes = response_bytes + excluded.response_bytes,
-           min_duration_ms = CASE
-             WHEN detail_calls = 0 THEN excluded.min_duration_ms
-             ELSE MIN(min_duration_ms, excluded.min_duration_ms)
-           END,
-           max_duration_ms = MAX(max_duration_ms, excluded.max_duration_ms),
-           histogram_json = json_set(
-             COALESCE(histogram_json, '{}'),
-             ?,
-             COALESCE(json_extract(histogram_json, ?), 0) + 1
-           ),
-           tools_json = json_set(
-             COALESCE(tools_json, '{}'),
-             ?,
-             COALESCE(json_extract(tools_json, ?), 0) + 1
-           )`,
-        bucketKey,
-        userId,
-        agentId,
-        errors,
-        operationalErrors,
-        duration,
-        requestBytes,
-        responseBytes,
-        duration,
-        duration,
-        JSON.stringify({ [binKey]: 1 }),
-        JSON.stringify({ [toolKey]: 1 }),
-        histogramPath,
-        histogramPath,
-        toolPath,
-        toolPath,
-      );
+      batch.detailCalls += 1;
+      batch.errors += event.ok === false ? 1 : 0;
+      batch.operationalErrors += operationalFailure(event) ? 1 : 0;
+      batch.durationMs += duration;
+      batch.requestBytes += Math.max(0, Math.round(Number(event.requestBytes) || 0));
+      batch.responseBytes += Math.max(0, Math.round(Number(event.responseBytes) || 0));
+      batch.minDurationMs = batch.detailCalls === 1 ? duration : Math.min(batch.minDurationMs, duration);
+      batch.maxDurationMs = Math.max(batch.maxDurationMs, duration);
+      batch.histogram.set(binKey, (batch.histogram.get(binKey) || 0) + 1);
+      batch.tools.set(toolKey, (batch.tools.get(toolKey) || 0) + 1);
+    }
+
+    if (this.sql) {
+      for (const batch of batches.values()) {
+        if (batch.detailCalls === 0) {
+          this.sql.exec(
+            `INSERT INTO ${TABLE} (bucket_key, user_id, agent_id, calls)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(bucket_key)
+             DO UPDATE SET calls = calls + excluded.calls`,
+            batch.bucketKey,
+            batch.userId,
+            batch.agentId,
+            batch.calls,
+          );
+          continue;
+        }
+
+        const histogram = Object.fromEntries(batch.histogram);
+        const tools = Object.fromEntries(batch.tools);
+        let histogramExpr = "COALESCE(histogram_json, '{}')";
+        let toolsExpr = "COALESCE(tools_json, '{}')";
+        const updateBindings: SqlValue[] = [];
+
+        for (const [key, count] of batch.histogram) {
+          const path = jsonPathForKey(key);
+          histogramExpr = `json_set(${histogramExpr}, ?, COALESCE(json_extract(histogram_json, ?), 0) + ?)`;
+          updateBindings.push(path, path, count);
+        }
+        for (const [key, count] of batch.tools) {
+          const path = jsonPathForKey(key);
+          toolsExpr = `json_set(${toolsExpr}, ?, COALESCE(json_extract(tools_json, ?), 0) + ?)`;
+          updateBindings.push(path, path, count);
+        }
+
+        this.sql.exec(
+          `INSERT INTO ${TABLE} (
+             bucket_key, user_id, agent_id, calls, detail_calls, errors, operational_errors,
+             duration_ms, request_bytes, response_bytes, min_duration_ms, max_duration_ms,
+             histogram_json, tools_json
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(bucket_key)
+           DO UPDATE SET
+             calls = calls + excluded.calls,
+             detail_calls = detail_calls + excluded.detail_calls,
+             errors = errors + excluded.errors,
+             operational_errors = operational_errors + excluded.operational_errors,
+             duration_ms = duration_ms + excluded.duration_ms,
+             request_bytes = request_bytes + excluded.request_bytes,
+             response_bytes = response_bytes + excluded.response_bytes,
+             min_duration_ms = CASE
+               WHEN detail_calls = 0 THEN excluded.min_duration_ms
+               ELSE MIN(min_duration_ms, excluded.min_duration_ms)
+             END,
+             max_duration_ms = MAX(max_duration_ms, excluded.max_duration_ms),
+             histogram_json = ${histogramExpr},
+             tools_json = ${toolsExpr}`,
+          batch.bucketKey,
+          batch.userId,
+          batch.agentId,
+          batch.calls,
+          batch.detailCalls,
+          batch.errors,
+          batch.operationalErrors,
+          batch.durationMs,
+          batch.requestBytes,
+          batch.responseBytes,
+          batch.minDurationMs,
+          batch.maxDurationMs,
+          JSON.stringify(histogram),
+          JSON.stringify(tools),
+          ...updateBindings,
+        );
+      }
       return;
     }
 
     // Test/runtime fallback for non-SQL storage. Production Usage is a SQLite DO.
-    const key = `usage:v2:${String(hourMs).padStart(13, "0")}:${encodeURIComponent(userId)}:${encodeURIComponent(agentId)}`;
-    const current = Number(await this.storage.get<number>(key) || 0);
-    await this.storage.put(key, current + 1);
+    for (const batch of batches.values()) {
+      const key = `usage:v2:${String(batch.hourMs).padStart(13, "0")}:${encodeURIComponent(batch.userId)}:${encodeURIComponent(batch.agentId)}`;
+      const current = Number(await this.storage.get<number>(key) || 0);
+      await this.storage.put(key, current + batch.calls);
+    }
   }
 
   private sqlRows(fromMs: number, toMs: number, filters: UsageFilters) {

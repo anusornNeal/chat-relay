@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { build } from "esbuild";
 import { webcrypto } from "node:crypto";
 
@@ -156,6 +157,24 @@ const event = (timestamp, overrides = {}) => ({
 {
   const f = fixture();
   f.reset();
+  const events = Array.from({ length: 50 }, (_, index) => event(
+    `2026-10-04T08:${String(index).padStart(2, "0")}:00Z`,
+    { tool: index % 2 === 0 ? "fs.read" : "terminal.exec", durationMs: 10 + index },
+  ));
+  const batched = await f.call("/record-batch", { events });
+  assert.equal(batched.status, 200);
+  assert.equal(batched.accepted, 50);
+  assert.equal(f.stats.puts, 1, "same hour/user/agent batch must collapse to one fallback row write");
+  const key = [...f.records.keys()].find((value) => value.startsWith("usage:v2:"));
+  assert.equal(f.records.get(key), 50);
+  const window = await f.call("/window?from=2026-10-04T08:00:00Z&to=2026-10-04T08:59:59Z");
+  assert.equal(window.metric.calls, 50);
+  console.log("PASS usage batches collapse 50 tool calls into one bucket write");
+}
+
+{
+  const f = fixture();
+  f.reset();
   const skippedMissing = await f.call("/record", event("2026-10-04T08:00:00Z", { agentId: "" }));
   const skippedRelay = await f.call("/record", event("2026-10-04T08:01:00Z", { agentId: "__relay__" }));
   assert.equal(skippedMissing.skipped, true);
@@ -212,6 +231,16 @@ const event = (timestamp, overrides = {}) => ({
 
 {
   const f = fixture(Registry);
+  f.records.set("security:revision", 7);
+  f.reset();
+  assert.equal((await f.call("/security/revision")).revision, 7);
+  assert.equal((await f.call("/security/revision")).revision, 7);
+  assert.equal(f.stats.gets, 1, "warm Registry revision checks must not reread durable storage");
+  console.log("PASS Registry security revision is cached in-memory");
+}
+
+{
+  const f = fixture(Registry);
   f.records.set("user:u", { id: "u", name: "User", enabled: true, admin: false, createdAt: "2026-10-01T00:00:00Z" });
   f.records.set("agent:a", { id: "a", name: "Agent", tokenHash: "hash", ownerUserId: "u", enabled: true, createdAt: "2026-10-01T00:00:00Z" });
   f.records.set("grant:u:a", { userId: "u", agentId: "a", scopes: ["*"], createdAt: "2026-10-01T00:00:00Z" });
@@ -241,4 +270,15 @@ console.log("usage storage/query optimization tests passed");
   assert.equal(budget.dashboardPublish.used, 1);
   assert.equal(budget.dashboardPublish.suppressed, 1);
   console.log("PASS optional dashboard publish budget adds no durable budget writes");
+}
+
+{
+  const worker = fs.readFileSync("src/worker-app.ts", "utf8");
+  assert.match(worker, /USAGE_BATCH_MAX_EVENTS = 96/);
+  assert.match(worker, /USAGE_BATCH_DELAY_MS = 3_000/);
+  assert.match(worker, /record-batch/);
+  assert.match(worker, /executionCtx\?\.waitUntil\(usageFlushPromise\)/);
+  assert.match(worker, /SECURITY_CACHE_TTL_MS = 30 \* 60_000/);
+  assert.match(worker, /SECURITY_REVISION_POLL_MS = 30_000/);
+  console.log("PASS Worker batches optional usage and bounds security revision polling");
 }

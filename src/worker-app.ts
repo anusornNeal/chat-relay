@@ -195,6 +195,7 @@ type ToolActivityContext = {
   activityId?: string;
   learnSessionId?: string;
   startedAt: string;
+  executionCtx?: ExecutionContext;
 };
 
 const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
@@ -411,8 +412,8 @@ async function learningMutationCall(
   return call;
 }
 
-const SECURITY_CACHE_TTL_MS = 30_000;
-const SECURITY_REVISION_POLL_MS = 5_000;
+const SECURITY_CACHE_TTL_MS = 30 * 60_000;
+const SECURITY_REVISION_POLL_MS = 30_000;
 const SECURITY_CACHE_MAX_ENTRIES = 512;
 const ADMIN_SECURITY_MUTATION_PATHS = new Set([
   "/admin/bootstrap",
@@ -430,7 +431,7 @@ const ADMIN_SECURITY_MUTATION_PATHS = new Set([
   "/admin/api/agents/retire",
   "/admin/api/sessions/revoke",
 ]);
-const QUOTA_DISABLED_CACHE_TTL_MS = 5 * 60_000;
+const QUOTA_DISABLED_CACHE_TTL_MS = 15 * 60_000;
 
 type TimedSecurityCacheEntry<T> = { value: T; expiresAt: number };
 type ResolvedAgentAccess = { agentId: string; scopes: string[] };
@@ -442,6 +443,11 @@ let securityRevisionCheckedAt = 0;
 let securityRevisionCheckPromise: Promise<void> | null = null;
 let quotaDisabledUntil = 0;
 const usageRecordBudget = new DailyOptionalBudget();
+const USAGE_BATCH_MAX_EVENTS = 96;
+const USAGE_BATCH_DELAY_MS = 3_000;
+const usageEventBuffer: UsageEvent[] = [];
+let usageFlushPromise: Promise<void> | null = null;
+let usageFlushWake: (() => void) | null = null;
 
 function securityCacheGet<T>(cache: Map<string, TimedSecurityCacheEntry<T>>, key: string): T | undefined {
   const entry = cache.get(key);
@@ -541,16 +547,60 @@ async function activityContextForRequest(request: Request): Promise<ToolActivity
   };
 }
 
-async function recordUsage(env: Env, event: UsageEvent): Promise<void> {
+async function flushUsageEvents(env: Env) {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (usageFlushWake === done) usageFlushWake = null;
+      resolve();
+    };
+    const timer = setTimeout(done, USAGE_BATCH_DELAY_MS);
+    usageFlushWake = done;
+  });
+
+  while (usageEventBuffer.length) {
+    const events = usageEventBuffer.splice(0, USAGE_BATCH_MAX_EVENTS);
+    try {
+      await usageStub(env).fetch(new Request("https://usage.internal/record-batch", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ events }),
+      }));
+    } catch {}
+  }
+}
+
+async function recordUsage(
+  env: Env,
+  event: UsageEvent,
+  executionCtx?: ExecutionContext,
+): Promise<void> {
   const budget = usageRecordBudget.consume(env.USAGE_RECORD_DAILY_BUDGET);
   if (!budget.allowed) return;
-  try {
-    await usageStub(env).fetch(new Request("https://usage.internal/record", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(event),
-    }));
-  } catch {}
+
+  usageEventBuffer.push(event);
+  if (!usageFlushPromise) {
+    usageFlushPromise = flushUsageEvents(env).finally(() => {
+      usageFlushPromise = null;
+      usageFlushWake = null;
+    });
+  }
+
+  executionCtx?.waitUntil(usageFlushPromise);
+  if (!executionCtx || usageEventBuffer.length >= USAGE_BATCH_MAX_EVENTS) {
+    usageFlushWake?.();
+  }
+}
+
+
+async function flushPendingUsage(env: Env): Promise<void> {
+  const pending = usageFlushPromise;
+  if (!pending) return;
+  usageFlushWake?.();
+  await pending;
 }
 
 type QuotaDecision = {
@@ -633,6 +683,7 @@ async function instrumentTool<T>(
   run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming }>,
 ): Promise<T> {
   const startedAtMs = Date.now();
+  const executionCtx = toolActivityContexts.get(user)?.executionCtx;
   const requestedAgentId = typeof args === "object" && args !== null && typeof (args as any).agentId === "string"
     ? String((args as any).agentId).slice(0, 128)
     : undefined;
@@ -675,7 +726,7 @@ async function instrumentTool<T>(
       errorClass: cause instanceof Error ? cause.name.slice(0, 80) : "tool_exception",
       errorSource: "worker",
       errorCode: "tool_exception",
-    });
+    }, executionCtx);
     throw cause;
   } finally {
     if (outcome) {
@@ -696,7 +747,7 @@ async function instrumentTool<T>(
         ...(outcome.timing?.transportMs !== undefined ? { transportMs: outcome.timing.transportMs } : {}),
         ...(outcome.timing?.agentQueueWaitMs !== undefined ? { agentQueueWaitMs: outcome.timing.agentQueueWaitMs } : {}),
         ...(outcome.timing?.agentHandlerMs !== undefined ? { agentHandlerMs: outcome.timing.agentHandlerMs } : {}),
-      });
+      }, executionCtx);
     }
   }
 }
@@ -1891,6 +1942,11 @@ export default {
           service: "chat-relay",
           version: SERVICE_VERSION,
           optionalUsageBudget: usageRecordBudget.snapshot(env.USAGE_RECORD_DAILY_BUDGET),
+          usageBatch: {
+            pending: usageEventBuffer.length,
+            maxEvents: USAGE_BATCH_MAX_EVENTS,
+            delayMs: USAGE_BATCH_DELAY_MS,
+          },
         })
         : error(405, "method_not_allowed");
     }
@@ -1958,6 +2014,9 @@ export default {
     if (authResponse) return authResponse;
 
     if (path.startsWith("/admin/")) {
+      if (request.method === "GET" && ["/admin/api/overview", "/admin/api/summary"].includes(path)) {
+        await flushPendingUsage(env);
+      }
       const response = await handleAdmin(request, env);
       if (response.ok && request.method !== "GET" && ADMIN_SECURITY_MUTATION_PATHS.has(path)) {
         invalidateLocalSecurityCaches();
@@ -1998,7 +2057,10 @@ export default {
       }
 
       const user: AuthUser = { ...authenticatedUser };
-      toolActivityContexts.set(user, await activityContextForRequest(request));
+      toolActivityContexts.set(user, {
+        ...(await activityContextForRequest(request)),
+        executionCtx: ctx,
+      });
       const quotaResponse = await enforceMcpQuota(request, env, user);
       if (quotaResponse) return quotaResponse;
 

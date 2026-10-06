@@ -32,6 +32,39 @@ const authorized = (request: Request, token: string) =>
 
 const ADMIN_COOKIE = "chat_relay_admin";
 
+const RELAY_STATUS_CACHE_TTL_MS = 30_000;
+const RELAY_STATUS_CACHE_MAX = 512;
+const relayStatusCache = new Map<string, { expiresAt: number; value: any }>();
+const relayStatusInflight = new Map<string, Promise<any>>();
+
+function cacheRelayStatus(agentId: string, value: any) {
+  if (relayStatusCache.size >= RELAY_STATUS_CACHE_MAX) {
+    const oldest = relayStatusCache.keys().next().value;
+    if (oldest !== undefined) relayStatusCache.delete(oldest);
+  }
+  relayStatusCache.delete(agentId);
+  relayStatusCache.set(agentId, { expiresAt: Date.now() + RELAY_STATUS_CACHE_TTL_MS, value });
+  return value;
+}
+
+async function relayStatus(env: AdminEnv, agentId: string) {
+  const cached = relayStatusCache.get(agentId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  if (cached) relayStatusCache.delete(agentId);
+
+  const pending = relayStatusInflight.get(agentId);
+  if (pending) return pending;
+
+  const load = env.RELAY.get(env.RELAY.idFromName(agentId))
+    .fetch("https://relay.internal/status")
+    .then((response) => response.ok ? response.json<any>() : ({ online: false }))
+    .catch(() => ({ online: false }))
+    .then((value) => cacheRelayStatus(agentId, value))
+    .finally(() => relayStatusInflight.delete(agentId));
+  relayStatusInflight.set(agentId, load);
+  return load;
+}
+
 function readCookie(request: Request, name: string) {
   const raw = request.headers.get("cookie") || "";
   for (const part of raw.split(";")) {
@@ -266,10 +299,7 @@ async function onlineAgents(env: AdminEnv, agents: any[], users: any[] = [], gra
 
   return Promise.all(agents.map(async (agent) => {
     const status = agent.enabled && !agent.retiredAt
-      ? await env.RELAY.get(env.RELAY.idFromName(agent.id))
-        .fetch("https://relay.internal/status")
-        .then((response) => response.json<any>())
-        .catch(() => ({ online: false }))
+      ? await relayStatus(env, agent.id)
       : { online: false };
     const owner = agent.ownerUserId ? userById.get(agent.ownerUserId) : null;
     return {

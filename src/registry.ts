@@ -262,6 +262,7 @@ const SECURITY_MUTATION_PATHS = new Set([
 
 export class Registry extends DurableObject {
   private stateCache?: { expiresAt: number; data: any };
+  private securityRevisionCache: number | null = null;
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -324,17 +325,22 @@ export class Registry extends DurableObject {
   }
 
   private async readSecurityRevision(): Promise<number> {
+    if (this.securityRevisionCache !== null) return this.securityRevisionCache;
     const value = await this.ctx.storage.get<number>(SECURITY_REVISION_KEY);
-    return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+    const revision = Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+    this.securityRevisionCache = revision;
+    return revision;
   }
 
   private async bumpSecurityRevision(): Promise<number> {
-    return this.ctx.storage.transaction(async (txn) => {
+    const next = await this.ctx.storage.transaction(async (txn) => {
       const current = await txn.get<number>(SECURITY_REVISION_KEY);
-      const next = (Number.isSafeInteger(current) && Number(current) >= 0 ? Number(current) : 0) + 1;
-      await txn.put(SECURITY_REVISION_KEY, next);
-      return next;
+      const value = (Number.isSafeInteger(current) && Number(current) >= 0 ? Number(current) : 0) + 1;
+      await txn.put(SECURITY_REVISION_KEY, value);
+      return value;
     });
+    this.securityRevisionCache = next;
+    return next;
   }
 
   private async securityRevision(): Promise<Response> {
