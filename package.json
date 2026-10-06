@@ -1,6 +1,6 @@
 {
     "name": "@anusornneal/chat-relay",
-    "version": "1.0.0",
+    "version": "1.1.1",
     "description": "Zero-checkout remote MCP agent for ChatGPT with terminal, filesystem, process, multi-user, and multi-agent support.",
     "type": "module",
     "bin": {
@@ -66,6 +66,7 @@
     "devDependencies": {
         "@modelcontextprotocol/server": "^2.0.0",
         "agents": "^0.24.0",
+        "esbuild": "^0.28.1",
         "wrangler": "^4.143.0",
         "zod": "^4.6.5"
     },

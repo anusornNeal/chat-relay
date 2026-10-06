@@ -19,6 +19,7 @@ export async function handleStatusRequest({
   resolveAgent,
   getAgentAccess,
   getRelayStatus,
+  features = {},
 }) {
   let authentication;
   try {
@@ -86,6 +87,7 @@ export async function handleStatusRequest({
     online: relayStatus.online,
     connection: relayStatus,
     lifecycle: relayStatus.lifecycle ?? null,
+    features: features && typeof features === "object" ? features : {},
     expectedProtocolVersion,
   });
 }

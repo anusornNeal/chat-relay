@@ -64,16 +64,20 @@ function classifyResponse(response, body) {
 
   try {
     const health = JSON.parse(body);
-    if (health?.error === "relay_unavailable") return { state: "unavailable", reason: "relay_unavailable" };
-    if (!response.ok) return { state: "unavailable", code: response.status };
-    if (health?.reauthorizationRequired === true) return { state: "reauthorize" };
+    const features = health?.features && typeof health.features === "object"
+      ? { learn: health.features.learn === true }
+      : null;
+    const withFeatures = (value) => features ? { ...value, features } : value;
+    if (health?.error === "relay_unavailable") return withFeatures({ state: "unavailable", reason: "relay_unavailable" });
+    if (!response.ok) return withFeatures({ state: "unavailable", code: response.status });
+    if (health?.reauthorizationRequired === true) return withFeatures({ state: "reauthorize" });
     if (health?.authorized === false) {
-      return health?.enabled === false
+      return withFeatures(health?.enabled === false
         ? { state: "agent-disabled" }
-        : { state: "agent-access" };
+        : { state: "agent-access" });
     }
-    if (health?.online === true) return { state: "reachable" };
-    if (health?.online === false) return { state: "unavailable", reason: "agent_offline" };
+    if (health?.online === true) return withFeatures({ state: "reachable" });
+    if (health?.online === false) return withFeatures({ state: "unavailable", reason: "agent_offline" });
   } catch {}
   if (!response.ok) return { state: "unavailable", code: response.status };
   return { state: "unavailable", code: response.status };

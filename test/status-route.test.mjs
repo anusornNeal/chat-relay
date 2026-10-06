@@ -11,6 +11,7 @@ function dependencies(overrides = {}) {
   return {
     request: statusRequest(),
     expectedProtocolVersion: 4,
+    features: { learn: true },
     authenticate: async () => ({ user: { id: "user-1", name: "User" } }),
     resolveAgent: async () => ({ ok: true, agentId: "desk-1" }),
     getAgentAccess: async () => ({
@@ -39,6 +40,7 @@ test("preserves a successful offline Agent status response", async () => {
   assert.equal(result.data.online, false);
   assert.equal(result.data.agentName, "Work PC");
   assert.equal(result.data.expectedProtocolVersion, 4);
+  assert.deepEqual(result.data.features, { learn: true });
 });
 
 test("returns a sanitized unavailable response when Registry authentication is blocked", async () => {
