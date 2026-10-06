@@ -16,11 +16,12 @@ test("checks the authenticated relay status endpoint for the configured agent", 
     fetchImpl: async (url, options) => {
       requestedUrl = String(url);
       requestOptions = options;
-      return new Response(JSON.stringify({ online: true }), { status: 200 });
+      return new Response(JSON.stringify({ online: true, features: { learn: true } }), { status: 200 });
     },
   });
 
   assert.equal(result.state, "reachable");
+  assert.equal(result.features.learn, true);
   assert.equal(requestedUrl, "https://relay.example.dev/status?agentId=device+1");
   assert.equal(requestOptions.method, "GET");
   assert.equal(requestOptions.headers.accept, "application/json");

@@ -119,6 +119,24 @@ function combinedStatusStyle(status, relayHealth) {
     : STYLE.red;
 }
 
+function learnStatusText(value) {
+  if (value === true) return "enabled";
+  if (value === false) return "disabled";
+  return "checking";
+}
+
+function learnStatusStyle(value) {
+  if (value === true) return STYLE.green;
+  if (value === false) return STYLE.red;
+  return STYLE.yellow;
+}
+
+function compactLearnStatus(value) {
+  if (value === true) return "on";
+  if (value === false) return "off";
+  return "checking";
+}
+
 export function formatTwoColumnHeader(state, width = 110, { color = false } = {}) {
   const usable = clamp(Number(width) || 110, MIN_FRAME_WIDTH, MAX_FRAME_WIDTH);
   const leftWidth = Math.floor((usable - GAP) / 2);
@@ -128,7 +146,7 @@ export function formatTwoColumnHeader(state, width = 110, { color = false } = {}
     ["Status", combinedStatusText(state.status, state.relayHealth), "Relay", state.relay || "-"],
     ["Root", state.root || "-", "Reconnects", String(state.reconnects ?? 0)],
     ["Session up", formatUptime(state.uptimeMs), "Terminal", state.terminal ? "enabled" : "disabled"],
-    ["Desktop", state.desktop ? "enabled" : "disabled", "Learn", state.learn !== false ? "enabled" : "disabled"],
+    ["Desktop", state.desktop ? "enabled" : "disabled", "Learn", learnStatusText(state.learn)],
   ];
   return rows
     .map(([leftLabel, leftValue, rightLabel, rightValue]) => {
@@ -138,7 +156,7 @@ export function formatTwoColumnHeader(state, width = 110, { color = false } = {}
       const rightStyle = rightLabel === "Reconnects" && Number(state.reconnects || 0) > 0
         ? STYLE.yellow
         : rightLabel === "Learn"
-          ? (state.learn !== false ? STYLE.green : STYLE.red)
+          ? learnStatusStyle(state.learn)
           : null;
       return field(leftLabel, leftValue, leftWidth, color, leftStyle)
         + " ".repeat(GAP)
@@ -292,7 +310,7 @@ export class RemoteTui {
       reconnects: 0,
       terminal: config.terminalEnabled !== false,
       desktop: config.desktopEnabled === true,
-      learn: config.learnEnabled !== false,
+      learn: null,
     };
     this.version = version || "-";
     this.colorEnabled = shouldUseColor(output, env);
@@ -473,6 +491,11 @@ export class RemoteTui {
       ...(health && typeof health === "object" ? health : { state: "unavailable" }),
       checkedAt: Date.now(),
     };
+    if (health?.features && Object.prototype.hasOwnProperty.call(health.features, "learn")) {
+      this.state.learn = health.features.learn === true;
+    } else if (health?.state === "reachable") {
+      this.state.learn = false;
+    }
     this.scheduleRender();
   }
 
@@ -497,7 +520,7 @@ export class RemoteTui {
     if (width < MIN_FRAME_WIDTH) {
       const compactHeader = [
         truncateCells(`👤 ${headerState.account || "-"} · 💻 ${headerState.agent || "-"}`, width),
-        truncateCells(`🔗 ${combinedStatusText(headerState.status, headerState.relayHealth)} · 🧠 Learn ${headerState.learn !== false ? "on" : "off"} · 📁 ${headerState.root || "-"}`, width),
+        truncateCells(`🔗 ${combinedStatusText(headerState.status, headerState.relayHealth)} · 🧠 Learn ${compactLearnStatus(headerState.learn)} · 📁 ${headerState.root || "-"}`, width),
       ];
       headerLines = compactHeader.map((line) => this.colorEnabled ? paint(line, STYLE.gray) : line);
     } else {
