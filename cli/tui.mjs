@@ -473,6 +473,24 @@ export class RemoteTui {
         item.durationMs = message.durationMs;
         if (message.error && message.ok === false) item.summary += ` · ${truncate(message.error, 48)}`;
       }
+    } else if (message.event === "learn") {
+      const change = message.change && typeof message.change === "object" ? message.change : {};
+      const marker = {
+        created: "+",
+        updated: "~",
+        reinforced: "^",
+        weakened: "v",
+        removed: "-",
+      }[String(change.type || "")] || "~";
+      const detail = String(change.summary || change.key || "Learn updated").replace(/\s+/g, " ").trim();
+      this.appendTransaction({
+        requestId: "learn-" + String(change.eventId || Date.now()),
+        at: change.at || message.at || new Date().toISOString(),
+        action: "learn",
+        summary: "Learn " + marker + " " + truncate(detail, 120),
+        status: "done",
+        ok: true,
+      });
     } else if (message.event === "system") {
       this.appendTransaction({
         requestId: "system-" + Date.now() + "-" + Math.random(),

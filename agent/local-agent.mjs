@@ -484,6 +484,10 @@ function connect() {
       }
       return;
     }
+    if (message?.control === "learn_activity") {
+      emitUi("learn", { change: message.change && typeof message.change === "object" ? message.change : {} });
+      return;
+    }
     if (message?.control === "credential_revoked") {
       requireReauthorization("credential_revoked");
       return;

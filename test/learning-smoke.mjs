@@ -38,7 +38,9 @@ class FakeSql {
       "updated_at",
     ]);
     this.rows = new Map(rows.map((row) => [row.id, structuredClone(row)]));
+    this.activity = [];
     this.mutations = 0;
+    this.activityMutations = 0;
   }
 
   exec(sql, ...args) {
@@ -70,16 +72,16 @@ class FakeSql {
       return new Cursor();
     }
 
-    if (q.startsWith("SELECT id FROM learning_memory_v1 WHERE kind = ? AND scope = ? AND scope_key IS NULL AND memory_key = ? LIMIT 1")) {
+    if (q.startsWith("SELECT * FROM learning_memory_v1 WHERE kind = ? AND scope = ? AND scope_key IS NULL AND memory_key = ? LIMIT 1")) {
       const [kind,scope,key]=args;
       const row=[...this.rows.values()].find((r)=>r.kind===kind && r.scope===scope && r.scope_key==null && r.memory_key===key);
-      return new Cursor(row ? [{id:row.id}] : []);
+      return new Cursor(row ? [row] : []);
     }
 
-    if (q.startsWith("SELECT id FROM learning_memory_v1 WHERE kind = ? AND scope = ? AND scope_key = ? AND memory_key = ? LIMIT 1")) {
+    if (q.startsWith("SELECT * FROM learning_memory_v1 WHERE kind = ? AND scope = ? AND scope_key = ? AND memory_key = ? LIMIT 1")) {
       const [kind,scope,scopeKey,key]=args;
       const row=[...this.rows.values()].find((r)=>r.kind===kind && r.scope===scope && r.scope_key===scopeKey && r.memory_key===key);
-      return new Cursor(row ? [{id:row.id}] : []);
+      return new Cursor(row ? [row] : []);
     }
 
     if (q.startsWith("SELECT COUNT(*) AS count FROM learning_memory_v1")) {
@@ -87,7 +89,7 @@ class FakeSql {
     }
 
     if (q.startsWith("INSERT INTO learning_memory_v1")) {
-      const [id,key,kind,scope,scopeKey,content,confidence,createdAt,updatedAt]=args;
+      const [id,key,kind,scope,scopeKey,content,confidence,positiveFeedback,negativeFeedback,createdAt,updatedAt]=args;
       const old=this.rows.get(id);
       this.rows.set(id,{
         id,
@@ -97,12 +99,31 @@ class FakeSql {
         scope_key:scopeKey,
         content,
         confidence,
-        positive_feedback:old?.positive_feedback ?? 0,
-        negative_feedback:old?.negative_feedback ?? 0,
+        positive_feedback:old?.positive_feedback ?? positiveFeedback ?? 0,
+        negative_feedback:old?.negative_feedback ?? negativeFeedback ?? 0,
         created_at:old?.created_at ?? createdAt,
         updated_at:updatedAt,
       });
       this.mutations++;
+      return new Cursor();
+    }
+
+    if (q.startsWith("INSERT INTO learning_activity_v1")) {
+      const [eventId,memoryId,changeType,memoryKey,kind,scope,scopeKey,summary,confidence,previousConfidence,createdAt]=args;
+      this.activity.push({
+        event_id:eventId,
+        memory_id:memoryId,
+        change_type:changeType,
+        memory_key:memoryKey,
+        kind,
+        scope,
+        scope_key:scopeKey,
+        summary,
+        confidence,
+        previous_confidence:previousConfidence,
+        created_at:createdAt,
+      });
+      this.activityMutations++;
       return new Cursor();
     }
 
@@ -132,6 +153,20 @@ class FakeSql {
       const row=this.rows.get(id);
       if (row) { row.negative_feedback++; row.updated_at=updatedAt; this.mutations++; }
       return new Cursor();
+    }
+
+    if (q.startsWith("SELECT * FROM learning_memory_v1 ORDER BY updated_at DESC, id ASC LIMIT ?")) {
+      const limit=Number(args[0]);
+      return new Cursor([...this.rows.values()]
+        .sort((a,b)=> b.updated_at.localeCompare(a.updated_at) || a.id.localeCompare(b.id))
+        .slice(0,limit));
+    }
+
+    if (q.startsWith("SELECT * FROM learning_activity_v1 ORDER BY created_at DESC, event_id ASC LIMIT ?")) {
+      const limit=Number(args[0]);
+      return new Cursor([...this.activity]
+        .sort((a,b)=> b.created_at.localeCompare(a.created_at) || a.event_id.localeCompare(b.event_id))
+        .slice(0,limit));
     }
 
     if (q.startsWith("SELECT * FROM learning_memory_v1 WHERE (")) {
@@ -180,13 +215,25 @@ const put=await a.call("/put",{key:"concise",kind:"preference",scope:"global",co
 assert.equal(put.status,200);
 assert.equal(put.item.key,"concise");
 assert.match(put.item.id,/^mem_[a-f0-9]{64}$/);
-assert.equal(a.sql.mutations,1,"one explicit put should be one logical mutation");
+assert.equal(a.sql.mutations,1,"one changed put should write one memory row");
+assert.equal(a.sql.activityMutations,1,"one changed put should append one compact activity row");
 const id=put.item.id;
+
+const duplicate=await a.call("/put",{key:"concise",kind:"preference",scope:"global",content:"Prefer concise responses",confidence:95});
+assert.equal(duplicate.changed,false,"identical automatic learning must be a no-op");
+assert.equal(a.sql.mutations,1,"duplicate learn must not write memory");
+assert.equal(a.sql.activityMutations,1,"duplicate learn must not append activity");
+
+const profile=await a.call("/profile",{limit:100,activityLimit:50});
+assert.equal(profile.summary.total,1);
+assert.equal(profile.activity.length,1);
+assert.equal(profile.activity[0].type,"created");
 
 const aGlobal=await a.call("/get",{scopes:[{scope:"global"}]});
 assert.equal(aGlobal.items.length,1);
 assert.equal(aGlobal.items[0].content,"Prefer concise responses");
-assert.equal(a.sql.mutations,1,"reads must not mutate storage");
+assert.equal(a.sql.mutations,1,"reads must not mutate memory storage");
+assert.equal(a.sql.activityMutations,1,"reads must not mutate activity storage");
 
 const bGuess=await b.call("/feedback",{id,value:"positive"});
 assert.equal(bGuess.status,404,"another account instance must not access guessed ids");
@@ -265,9 +312,12 @@ assert.equal((await a.call("/delete",{id})).deleted,false);
 
 const worker=fs.readFileSync("src/worker-app.ts","utf8");
 assert.match(worker,/env\.LEARNING\.get\(env\.LEARNING\.idFromName\(user\.id\)\)/,"Learning DO must be derived only from authenticated user.id");
-for (const path of ["/get","/put","/delete","/feedback"]) {
-  assert.ok(worker.includes(`learningCall(env, user, "${path}"`),"Learn tools must call the account Learning DO directly");
+assert.ok(worker.includes('learningCall(env, user, "/get"'),"Learn reads must call the account Learning DO directly");
+for (const path of ["/put","/delete","/feedback"]) {
+  assert.ok(worker.includes(`learningMutationCall(env, user, "${path}"`),"Learn mutations must use the mutation wrapper");
 }
+assert.match(worker,/LEARN_BASELINE_CONTEXT/,"automatic Learn baseline must be surfaced to every Relay app");
+assert.match(worker,/applyLearningMutation/,"changed Learn mutations must update warm context and TUI activity");
 for (const tool of ["learn_get","learn_put","learn_delete","learn_feedback"]) {
   assert.match(worker,new RegExp('"' + tool + '"'));
 }

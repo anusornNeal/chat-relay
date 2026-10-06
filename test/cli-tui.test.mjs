@@ -204,6 +204,31 @@ test("TUI Learn indicator follows Worker capability instead of local config defa
   assert.match(header, /Learn\s+disabled/);
 });
 
+test("TUI shows Learn activity pushed over the existing agent channel", () => {
+  const tui = new RemoteTui({
+    config: { relayUrl: "https://chat-relay.example.workers.dev" },
+    version: "test",
+    output: { isTTY: false, write() {} },
+  });
+
+  tui.handleMessage({
+    type: "chat-relay-ui",
+    event: "learn",
+    change: {
+      eventId: "lev-1",
+      type: "created",
+      key: "physical-device-test",
+      summary: "Test on a physical device before commit",
+      at: "2026-10-06T10:00:00.000Z",
+    },
+  });
+
+  const item = tui.transactions.at(-1);
+  assert.equal(item.action, "learn");
+  assert.equal(item.ok, true);
+  assert.match(item.summary, /^Learn \+ Test on a physical device before commit/);
+});
+
 test("TUI keeps agent socket state separate from Worker HTTP health", () => {
   const tui = new RemoteTui({
     config: { relayUrl: "https://chat-relay.example.workers.dev" },

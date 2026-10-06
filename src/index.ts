@@ -95,9 +95,49 @@ export class Relay extends DurableObject {
       case "/status": return this.agentStatus();
       case "/disconnect": return this.disconnectAgent();
       case "/relay": return this.relay(request);
+      case "/control": return this.control(request);
       case "/temp-shot": return this.storeTempShot(request);
       case "/temp-artifact": return this.storeTempArtifact(request);
       default: return error(404, "not_found");
+    }
+  }
+
+  private async control(request: Request): Promise<Response> {
+    if (request.method !== "POST") return error(405, "method_not_allowed");
+    const body = await request.json<any>().catch(() => null);
+    if (body?.control !== "learn_activity" || !body?.change || typeof body.change !== "object") {
+      return error(400, "invalid_control");
+    }
+    const change = body.change;
+    const types = new Set(["created", "updated", "reinforced", "weakened", "removed"]);
+    const type = types.has(String(change.type)) ? String(change.type) : "";
+    const memoryId = normalizeAgentText(change.memoryId, 160);
+    const key = normalizeAgentText(change.key, 160);
+    const summary = normalizeAgentText(change.summary, 320);
+    if (!type || !memoryId || !key || !summary) return error(400, "invalid_learn_activity");
+
+    const agent = this.resolveAgent();
+    if (!agent) return Response.json({ ok: true, delivered: false });
+    try {
+      agent.send(JSON.stringify({
+        control: "learn_activity",
+        change: {
+          eventId: normalizeAgentText(change.eventId, 160),
+          memoryId,
+          type,
+          key,
+          kind: normalizeAgentText(change.kind, 40),
+          scope: normalizeAgentText(change.scope, 20),
+          scopeKey: normalizeAgentText(change.scopeKey, 200) || null,
+          summary,
+          confidence: Number.isFinite(Number(change.confidence)) ? Number(change.confidence) : null,
+          previousConfidence: Number.isFinite(Number(change.previousConfidence)) ? Number(change.previousConfidence) : null,
+          at: normalizeAgentText(change.at, 64) || new Date().toISOString(),
+        },
+      }));
+      return Response.json({ ok: true, delivered: true });
+    } catch {
+      return Response.json({ ok: true, delivered: false });
     }
   }
 

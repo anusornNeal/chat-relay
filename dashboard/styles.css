@@ -322,3 +322,29 @@ tr:last-child td{border-bottom:0}
 @media(max-width:760px){
   .account-agent-grid{column-count:1}
 }
+
+
+/* learn-profile */
+.learn-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(320px,.75fr);gap:16px;margin-top:16px;align-items:start}
+.learn-memory-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.learn-memory{border:1px solid var(--line);border-radius:13px;padding:13px;background:#fff;display:grid;gap:10px;min-width:0}
+.learn-memory-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.learn-memory h3{margin:4px 0 0;font-size:13px;overflow-wrap:anywhere}
+.learn-kind{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#7a858f;font-weight:700}
+.learn-memory p{margin:0;color:#5d6771;font-size:11px;line-height:1.55;overflow-wrap:anywhere}
+.learn-memory-foot{display:flex;justify-content:space-between;align-items:center;gap:8px;border-top:1px solid #edf0f2;padding-top:9px;color:#8a939c;font-size:9px}
+.learn-actions{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+.button.learn-small{min-height:28px;padding:4px 8px;font-size:9px}
+.button.learn-small.danger{color:#983c3c}
+.learn-activity{display:grid;margin-top:12px}
+.learn-activity-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:9px;align-items:start;padding:10px 0;border-bottom:1px solid #edf0f2}
+.learn-activity-row:last-child{border-bottom:0}
+.learn-activity-row strong{display:block;font-size:10px}
+.learn-activity-row div span{display:block;margin-top:2px;color:#858f98;font-size:9px;line-height:1.4}
+.learn-activity-row time{font-size:9px;color:#9aa2aa;white-space:nowrap}
+.learn-event{display:inline-flex;border:1px solid #e2e6e9;border-radius:999px;padding:3px 6px;font-size:8px;font-weight:700;background:#f7f9fa}
+.learn-event-created,.learn-event-reinforced{color:#2f7954;background:#edf8f1;border-color:#d6eadc}
+.learn-event-weakened{color:#87611b;background:#fff8e8;border-color:#efdfba}
+.learn-event-removed{color:#983c3c;background:#fff1f1;border-color:#efd4d4}
+@media(max-width:1100px){.learn-layout{grid-template-columns:1fr}.learn-memory-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:680px){.learn-memory-grid{grid-template-columns:1fr}.learn-memory-foot{align-items:flex-start;flex-direction:column}.learn-actions{justify-content:flex-start}.learn-activity-row{grid-template-columns:auto minmax(0,1fr)}.learn-activity-row time{grid-column:2}}

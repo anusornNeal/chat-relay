@@ -285,8 +285,8 @@ function isAdmin() { return currentUser?.admin === true; }
 
 function navItems() {
   return isAdmin()
-    ? [["overview", "Overview", "overview"], ["usage", "Usage", "activity"]]
-    : [["overview", "My Overview", "overview"], ["usage", "My usage", "activity"]];
+    ? [["overview", "Overview", "overview"], ["usage", "Usage", "activity"], ["learn", "My Learn", "info"]]
+    : [["overview", "My Overview", "overview"], ["usage", "My usage", "activity"], ["learn", "My Learn", "info"]];
 }
 function renderNav() {
   $("nav").innerHTML = navItems().map(([id, label, glyph]) =>
@@ -321,6 +321,7 @@ async function loadActive({ patch = false } = {}) {
   try {
     if (activeView === "overview") await loadOverview({ patch });
     else if (activeView === "usage") await loadUsage({ patch });
+    else if (activeView === "learn") await loadLearn({ patch });
     clearDataRetry();
     touchFreshness();
     return true;
@@ -382,9 +383,9 @@ function scheduleFallbackPolling() {
     fallbackStartTimer = null;
     if (liveSocket?.readyState === WebSocket.OPEN || !currentUser || !dashboardAvailable()) return;
     setLiveState("fallback");
-    if (!dataRetryTimer) void refreshActiveIncrementally();
+    if (!dataRetryTimer && activeView !== "learn") void refreshActiveIncrementally();
     fallbackPollTimer = setInterval(() => {
-      if (liveSocket?.readyState === WebSocket.OPEN || !dashboardAvailable() || dataRetryTimer) return;
+      if (liveSocket?.readyState === WebSocket.OPEN || !dashboardAvailable() || dataRetryTimer || activeView === "learn") return;
       void refreshActiveIncrementally();
     }, 60000);
   }, 60000);
@@ -623,6 +624,117 @@ async function loadUsage({ patch = false } = {}) {
   });
 }
 
+
+let learnProfileSnapshot = null;
+
+function learnKindLabel(kind) {
+  return ({
+    preference: "Preference",
+    response_style: "Response style",
+    work_style: "Work style",
+    coding_style: "Coding style",
+    problem_solving: "Problem solving",
+    project_context: "Project context",
+    tool_pattern: "Tool pattern",
+    workflow: "Workflow",
+    correction: "Correction",
+    agent_context: "Agent context",
+  })[kind] || String(kind || "Learn");
+}
+
+function learnChangeLabel(type) {
+  return ({
+    created: "Learned",
+    updated: "Updated",
+    reinforced: "Reinforced",
+    weakened: "Weakened",
+    removed: "Removed",
+  })[type] || "Changed";
+}
+
+function learnScopeLabel(item) {
+  const scope = String(item?.scope || "");
+  if (scope === "global") return "Global";
+  return scope.charAt(0).toUpperCase() + scope.slice(1) + (item?.scopeKey ? " · " + item.scopeKey : "");
+}
+
+function exportLearnProfile() {
+  if (!learnProfileSnapshot) return;
+  const blob = new Blob([JSON.stringify(learnProfileSnapshot, null, 2)], { type: "application/json" });
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = "chat-relay-learn-profile.json";
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(href), 0);
+}
+
+async function mutateLearn(path, body) {
+  await api(path, { method: "POST", body: JSON.stringify(body) });
+  await loadLearn({ patch: true });
+}
+
+async function loadLearn({ patch = false } = {}) {
+  setHeader("My Learn", "Your adaptive preferences and reusable working patterns");
+  const data = await api("/admin/api/learn?limit=100&activityLimit=50");
+  learnProfileSnapshot = data;
+
+  const items = Array.isArray(data.items) ? data.items : [];
+  const activity = Array.isArray(data.activity) ? data.activity : [];
+  const summary = data.summary || {};
+  const byScope = summary.byScope || {};
+
+  const memoryCards = items.length ? items.map((item) =>
+    '<article class="learn-memory" data-live-key="learn-' + esc(item.id) + '">' +
+      '<div class="learn-memory-head"><div><span class="learn-kind">' + esc(learnKindLabel(item.kind)) + '</span>' +
+      '<h3>' + esc(item.key) + '</h3></div><span class="soft-pill">' + esc(learnScopeLabel(item)) + '</span></div>' +
+      '<p>' + esc(item.content) + '</p>' +
+      '<div class="learn-memory-foot"><span>Confidence ' + esc(item.confidence) + '% · updated ' + esc(bkkTime(item.updatedAt)) + '</span>' +
+      '<div class="learn-actions">' +
+        '<button class="button learn-small" type="button" data-learn-feedback="positive" data-memory-id="' + esc(item.id) + '">Useful</button>' +
+        '<button class="button learn-small" type="button" data-learn-feedback="negative" data-memory-id="' + esc(item.id) + '">Less useful</button>' +
+        '<button class="button learn-small danger" type="button" data-learn-delete="' + esc(item.id) + '">Delete</button>' +
+      '</div></div>' +
+    '</article>'
+  ).join("") : '<div class="table-empty">' + icon("info") + '<strong>No learned memories yet</strong><span>Stable preferences and work patterns will appear here as they are learned.</span></div>';
+
+  const activityRows = activity.length ? activity.map((event) =>
+    '<div class="learn-activity-row" data-live-key="' + esc(event.eventId) + '">' +
+      '<span class="learn-event learn-event-' + esc(event.type) + '">' + esc(learnChangeLabel(event.type)) + '</span>' +
+      '<div><strong>' + esc(event.key) + '</strong><span>' + esc(event.summary) + '</span></div>' +
+      '<time>' + esc(bkkTime(event.at)) + '</time>' +
+    '</div>'
+  ).join("") : '<div class="empty-inline">No Learn changes recorded yet.</div>';
+
+  renderContent(
+    '<div class="overview-toolbar"><span class="privacy-chip">' + icon("info") + 'Only your Learn profile</span>' +
+      '<button id="learnExport" class="button" type="button">Export JSON</button></div>' +
+    '<div class="metric-grid learn-metrics">' +
+      metricCard("Learned memories", fmtNum(summary.total || items.length), "current active memories") +
+      metricCard("Global", fmtNum(byScope.global), "shared across apps") +
+      metricCard("Projects", fmtNum(byScope.project), "project-specific") +
+      metricCard("Agents", fmtNum(byScope.agent), "agent-specific") +
+    '</div>' +
+    '<div class="learn-layout"><section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Profile</div><h2>What Chat Relay learned</h2></div><span class="panel-meta">Loaded only when you open this page</span></div>' +
+      '<div class="learn-memory-grid">' + memoryCards + '</div></section>' +
+    '<section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Recent Learn changes</h2></div><span class="panel-meta">No background polling</span></div>' +
+      '<div class="learn-activity">' + activityRows + '</div></section></div>',
+    patch,
+  );
+
+  const exportButton = $("learnExport");
+  if (exportButton) exportButton.onclick = exportLearnProfile;
+  document.querySelectorAll("[data-learn-feedback]").forEach((button) => {
+    button.onclick = () => mutateLearn("/admin/api/learn/feedback", {
+      id: button.dataset.memoryId,
+      value: button.dataset.learnFeedback,
+    });
+  });
+  document.querySelectorAll("[data-learn-delete]").forEach((button) => {
+    button.onclick = () => mutateLearn("/admin/api/learn/delete", { id: button.dataset.learnDelete });
+  });
+}
+
 $("logout").onclick = async () => {
   try { await api("/admin/session/logout", { method: "POST", body: "{}" }); } catch {}
   signOutUi();
@@ -670,7 +782,7 @@ function updateDashboardAvailability() {
   }
   if (!currentUser) return;
   connectLiveChannel();
-  void refreshActiveIncrementally();
+  if (activeView !== "learn") void refreshActiveIncrementally();
 }
 window.addEventListener("online", updateDashboardAvailability);
 window.addEventListener("offline", updateDashboardAvailability);

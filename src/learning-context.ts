@@ -25,6 +25,7 @@ type SessionState = {
   loaded: Set<string>;
   inflight: Map<string, Promise<void>>;
   records: Map<string, LearnRecord>;
+  lastAgentId?: string;
 };
 
 const DEFAULT_TTL_MS = 30 * 60_000;
@@ -121,10 +122,41 @@ export class LearnContextSessionStore {
     return [...state.records.values()];
   }
 
+  upsertRecord(sessionKey: string, record: LearnRecord) {
+    const state = this.state(sessionKey);
+    state.records.set(record.id, record);
+    if (state.records.size > MAX_CACHED_RECORDS) {
+      const oldest = state.records.keys().next().value;
+      if (oldest !== undefined) state.records.delete(oldest);
+    }
+  }
+
+  removeRecord(sessionKey: string, memoryId: string) {
+    const state = this.sessions.get(sessionKey);
+    if (!state) return;
+    state.records.delete(memoryId);
+    state.touchedAt = Date.now();
+  }
+
   hasScope(sessionKey: string, selector: LearnScopeSelector) {
     const normalized = normalizeSelector(selector);
     if (!normalized) return false;
     return this.sessions.get(sessionKey)?.loaded.has(scopeKeyOf(normalized)) ?? false;
+  }
+
+  noteAgent(sessionKey: string, agentId: string) {
+    const value = String(agentId ?? "").trim().slice(0, 128);
+    if (!value) return;
+    const state = this.state(sessionKey);
+    state.lastAgentId = value;
+    state.touchedAt = Date.now();
+  }
+
+  lastAgent(sessionKey: string) {
+    const state = this.sessions.get(sessionKey);
+    if (!state?.lastAgentId) return null;
+    state.touchedAt = Date.now();
+    return state.lastAgentId;
   }
 
   async activate(

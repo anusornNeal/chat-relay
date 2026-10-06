@@ -1,7 +1,19 @@
 import { DurableObject } from "cloudflare:workers";
 
 export type LearnScope = "global" | "project" | "agent";
-export type LearnKind = "preference" | "project_context" | "tool_pattern" | "workflow" | "correction" | "agent_context";
+export type LearnKind =
+  | "preference"
+  | "response_style"
+  | "work_style"
+  | "coding_style"
+  | "problem_solving"
+  | "project_context"
+  | "tool_pattern"
+  | "workflow"
+  | "correction"
+  | "agent_context";
+
+export type LearnChangeType = "created" | "updated" | "reinforced" | "weakened" | "removed";
 
 export type LearnRecord = {
   id: string;
@@ -17,9 +29,35 @@ export type LearnRecord = {
   updatedAt: string;
 };
 
+export type LearnChange = {
+  eventId: string;
+  memoryId: string;
+  type: LearnChangeType;
+  key: string;
+  kind: LearnKind;
+  scope: LearnScope;
+  scopeKey: string | null;
+  summary: string;
+  confidence: number | null;
+  previousConfidence: number | null;
+  at: string;
+};
+
 const TABLE = "learning_memory_v1";
-const KINDS = new Set<LearnKind>(["preference","project_context","tool_pattern","workflow","correction","agent_context"]);
-const SCOPES = new Set<LearnScope>(["global","project","agent"]);
+const ACTIVITY_TABLE = "learning_activity_v1";
+const KINDS = new Set<LearnKind>([
+  "preference",
+  "response_style",
+  "work_style",
+  "coding_style",
+  "problem_solving",
+  "project_context",
+  "tool_pattern",
+  "workflow",
+  "correction",
+  "agent_context",
+]);
+const SCOPES = new Set<LearnScope>(["global", "project", "agent"]);
 const MAX_MEMORIES = 512;
 
 function cleanText(value: unknown, max: number) {
@@ -70,8 +108,28 @@ function rowToRecord(row: any): LearnRecord {
     updatedAt: String(row.updated_at),
   };
 }
+function rowToChange(row: any): LearnChange {
+  return {
+    eventId: String(row.event_id),
+    memoryId: String(row.memory_id),
+    type: String(row.change_type) as LearnChangeType,
+    key: String(row.memory_key),
+    kind: String(row.kind) as LearnKind,
+    scope: String(row.scope) as LearnScope,
+    scopeKey: row.scope_key == null ? null : String(row.scope_key),
+    summary: String(row.summary),
+    confidence: row.confidence == null ? null : Number(row.confidence),
+    previousConfidence: row.previous_confidence == null ? null : Number(row.previous_confidence),
+    at: String(row.created_at),
+  };
+}
+function summarizeMemory(content: string) {
+  return cleanText(content.replace(/\s+/g, " "), 320);
+}
 
 export class Learning extends DurableObject {
+  private memoryCount: number | null = null;
+
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
@@ -110,15 +168,62 @@ export class Learning extends DurableObject {
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_scope ON ${TABLE}(scope, scope_key, updated_at)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_kind ON ${TABLE}(kind, updated_at)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_identity ON ${TABLE}(kind, scope, scope_key, memory_key)`);
+
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS ${ACTIVITY_TABLE} (
+        event_id TEXT PRIMARY KEY,
+        memory_id TEXT NOT NULL,
+        change_type TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        scope_key TEXT,
+        summary TEXT NOT NULL,
+        confidence INTEGER,
+        previous_confidence INTEGER,
+        created_at TEXT NOT NULL
+      ) WITHOUT ROWID
+    `);
+    this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_activity_v1_created ON ${ACTIVITY_TABLE}(created_at DESC)`);
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/get" && request.method === "POST") return this.get(request);
+    if (url.pathname === "/profile" && request.method === "POST") return this.profile(request);
     if (url.pathname === "/put" && request.method === "POST") return this.put(request);
     if (url.pathname === "/delete" && request.method === "POST") return this.delete(request);
     if (url.pathname === "/feedback" && request.method === "POST") return this.feedback(request);
     return Response.json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async ensureMemoryCapacity() {
+    if (this.memoryCount === null) {
+      const countRow = this.ctx.storage.sql.exec<any>(`SELECT COUNT(*) AS count FROM ${TABLE}`).toArray()[0];
+      this.memoryCount = Number(countRow?.count ?? 0);
+    }
+    return this.memoryCount < MAX_MEMORIES;
+  }
+
+  private recordActivity(input: Omit<LearnChange, "eventId">): LearnChange {
+    const change: LearnChange = { eventId: "lev_" + crypto.randomUUID().replaceAll("-", ""), ...input };
+    this.ctx.storage.sql.exec(
+      `INSERT INTO ${ACTIVITY_TABLE}
+        (event_id, memory_id, change_type, memory_key, kind, scope, scope_key, summary, confidence, previous_confidence, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      change.eventId,
+      change.memoryId,
+      change.type,
+      change.key,
+      change.kind,
+      change.scope,
+      change.scopeKey,
+      change.summary,
+      change.confidence,
+      change.previousConfidence,
+      change.at,
+    );
+    return change;
   }
 
   private async get(request: Request) {
@@ -151,6 +256,33 @@ export class Learning extends DurableObject {
     return Response.json({ items, limit });
   }
 
+  private async profile(request: Request) {
+    const body = await request.json<any>().catch(() => ({}));
+    const limit = boundedInt(body?.limit, 100, 1, 100);
+    const activityLimit = boundedInt(body?.activityLimit, 50, 1, 100);
+    const items = this.ctx.storage.sql.exec<any>(
+      `SELECT * FROM ${TABLE} ORDER BY updated_at DESC, id ASC LIMIT ?`,
+      limit,
+    ).toArray().map(rowToRecord);
+    const activity = this.ctx.storage.sql.exec<any>(
+      `SELECT * FROM ${ACTIVITY_TABLE} ORDER BY created_at DESC, event_id ASC LIMIT ?`,
+      activityLimit,
+    ).toArray().map(rowToChange);
+
+    const byScope = { global: 0, project: 0, agent: 0 };
+    const byKind: Record<string, number> = {};
+    for (const item of items) {
+      byScope[item.scope] += 1;
+      byKind[item.kind] = (byKind[item.kind] || 0) + 1;
+    }
+    return Response.json({
+      items,
+      activity,
+      summary: { total: items.length, byScope, byKind },
+      limits: { memories: MAX_MEMORIES, returned: limit, activityReturned: activityLimit },
+    });
+  }
+
   private async put(request: Request) {
     const body = await request.json<any>().catch(() => null);
     const kind = parseKind(body?.kind);
@@ -168,63 +300,143 @@ export class Learning extends DurableObject {
       return Response.json({ error: "invalid_memory" }, { status: 400 });
     }
 
-    const existing = scopeKey === null
+    const existingRow = scopeKey === null
       ? this.ctx.storage.sql.exec<any>(
-          `SELECT id FROM ${TABLE} WHERE kind = ? AND scope = ? AND scope_key IS NULL AND memory_key = ? LIMIT 1`,
+          `SELECT * FROM ${TABLE} WHERE kind = ? AND scope = ? AND scope_key IS NULL AND memory_key = ? LIMIT 1`,
           kind,
           scope,
           key,
         ).toArray()[0]
       : this.ctx.storage.sql.exec<any>(
-          `SELECT id FROM ${TABLE} WHERE kind = ? AND scope = ? AND scope_key = ? AND memory_key = ? LIMIT 1`,
+          `SELECT * FROM ${TABLE} WHERE kind = ? AND scope = ? AND scope_key = ? AND memory_key = ? LIMIT 1`,
           kind,
           scope,
           scopeKey,
           key,
         ).toArray()[0];
+    const existing = existingRow ? rowToRecord(existingRow) : null;
 
-    if (!existing?.id) {
-      const countRow = this.ctx.storage.sql.exec<any>(`SELECT COUNT(*) AS count FROM ${TABLE}`).toArray()[0];
-      if (Number(countRow?.count ?? 0) >= MAX_MEMORIES) {
-        return Response.json({ error: "memory_limit", limit: MAX_MEMORIES }, { status: 409 });
-      }
+    if (!existing && !(await this.ensureMemoryCapacity())) {
+      return Response.json({ error: "memory_limit", limit: MAX_MEMORIES }, { status: 409 });
     }
 
     const confidence = boundedInt(body?.confidence, 100, 0, 100);
-    const id = existing?.id ? String(existing.id) : await recordId(kind, scope, scopeKey, key);
+    if (existing && existing.content === content && existing.confidence === confidence) {
+      return Response.json({ ok: true, changed: false, item: existing, change: null });
+    }
+
+    const id = existing?.id ?? await recordId(kind, scope, scopeKey, key);
     const now = new Date().toISOString();
+    const item: LearnRecord = {
+      id,
+      key,
+      kind,
+      scope,
+      scopeKey,
+      content,
+      confidence,
+      positiveFeedback: existing?.positiveFeedback ?? 0,
+      negativeFeedback: existing?.negativeFeedback ?? 0,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+
     this.ctx.storage.sql.exec(
-      `INSERT INTO ${TABLE} (id, memory_key, kind, scope, scope_key, content, confidence, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO ${TABLE} (id, memory_key, kind, scope, scope_key, content, confidence, positive_feedback, negative_feedback, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET memory_key=excluded.memory_key, content=excluded.content, confidence=excluded.confidence, updated_at=excluded.updated_at`,
-      id, key, kind, scope, scopeKey, content, confidence, now, now,
+      id,
+      key,
+      kind,
+      scope,
+      scopeKey,
+      content,
+      confidence,
+      item.positiveFeedback,
+      item.negativeFeedback,
+      item.createdAt,
+      now,
     );
-    const row = this.ctx.storage.sql.exec<any>(`SELECT * FROM ${TABLE} WHERE id = ? LIMIT 1`, id).toArray()[0];
-    return Response.json({ ok: true, item: rowToRecord(row) });
+    if (!existing && this.memoryCount !== null) this.memoryCount += 1;
+
+    let type: LearnChangeType = "created";
+    if (existing) {
+      if (existing.content !== content) type = "updated";
+      else if (confidence > existing.confidence) type = "reinforced";
+      else type = "weakened";
+    }
+    const change = this.recordActivity({
+      memoryId: id,
+      type,
+      key,
+      kind,
+      scope,
+      scopeKey,
+      summary: summarizeMemory(content),
+      confidence,
+      previousConfidence: existing?.confidence ?? null,
+      at: now,
+    });
+    return Response.json({ ok: true, changed: true, item, change });
   }
 
   private async delete(request: Request) {
     const body = await request.json<any>().catch(() => null);
     const id = cleanText(body?.id, 400);
     if (!id) return Response.json({ error: "id_required" }, { status: 400 });
-    const existing = this.ctx.storage.sql.exec<any>(`SELECT id FROM ${TABLE} WHERE id = ? LIMIT 1`, id).toArray();
-    if (!existing.length) return Response.json({ ok: true, deleted: false });
+    const existingRow = this.ctx.storage.sql.exec<any>(`SELECT * FROM ${TABLE} WHERE id = ? LIMIT 1`, id).toArray()[0];
+    if (!existingRow) return Response.json({ ok: true, changed: false, deleted: false, change: null });
+    const existing = rowToRecord(existingRow);
     this.ctx.storage.sql.exec(`DELETE FROM ${TABLE} WHERE id = ?`, id);
-    return Response.json({ ok: true, deleted: true });
+    if (this.memoryCount !== null) this.memoryCount = Math.max(0, this.memoryCount - 1);
+    const now = new Date().toISOString();
+    const change = this.recordActivity({
+      memoryId: existing.id,
+      type: "removed",
+      key: existing.key,
+      kind: existing.kind,
+      scope: existing.scope,
+      scopeKey: existing.scopeKey,
+      summary: summarizeMemory(existing.content),
+      confidence: null,
+      previousConfidence: existing.confidence,
+      at: now,
+    });
+    return Response.json({ ok: true, changed: true, deleted: true, change });
   }
 
   private async feedback(request: Request) {
     const body = await request.json<any>().catch(() => null);
     const id = cleanText(body?.id, 400);
     const value = cleanText(body?.value, 16);
-    if (!id || !["positive","negative"].includes(value)) {
+    if (!id || !["positive", "negative"].includes(value)) {
       return Response.json({ error: "invalid_feedback" }, { status: 400 });
     }
+
+    const existingRow = this.ctx.storage.sql.exec<any>(`SELECT * FROM ${TABLE} WHERE id = ? LIMIT 1`, id).toArray()[0];
+    if (!existingRow) return Response.json({ error: "not_found" }, { status: 404 });
+    const existing = rowToRecord(existingRow);
     const column = value === "positive" ? "positive_feedback" : "negative_feedback";
     const now = new Date().toISOString();
     this.ctx.storage.sql.exec(`UPDATE ${TABLE} SET ${column} = ${column} + 1, updated_at = ? WHERE id = ?`, now, id);
-    const row = this.ctx.storage.sql.exec<any>(`SELECT * FROM ${TABLE} WHERE id = ? LIMIT 1`, id).toArray()[0];
-    if (!row) return Response.json({ error: "not_found" }, { status: 404 });
-    return Response.json({ ok: true, item: rowToRecord(row) });
+    const item: LearnRecord = {
+      ...existing,
+      positiveFeedback: existing.positiveFeedback + (value === "positive" ? 1 : 0),
+      negativeFeedback: existing.negativeFeedback + (value === "negative" ? 1 : 0),
+      updatedAt: now,
+    };
+    const change = this.recordActivity({
+      memoryId: item.id,
+      type: value === "positive" ? "reinforced" : "weakened",
+      key: item.key,
+      kind: item.kind,
+      scope: item.scope,
+      scopeKey: item.scopeKey,
+      summary: summarizeMemory(item.content),
+      confidence: item.confidence,
+      previousConfidence: item.confidence,
+      at: now,
+    });
+    return Response.json({ ok: true, changed: true, item, change });
   }
 }

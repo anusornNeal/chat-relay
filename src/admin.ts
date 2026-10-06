@@ -10,6 +10,7 @@ type AdminEnv = {
   USAGE: DurableObjectNamespace;
   AUDIT: DurableObjectNamespace;
   DASHBOARD: DurableObjectNamespace;
+  LEARNING: DurableObjectNamespace;
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
   CALLER_TOKEN?: string;
@@ -96,6 +97,18 @@ function auditStub(env: AdminEnv) {
 
 function dashboardStub(env: AdminEnv) {
   return env.DASHBOARD.get(env.DASHBOARD.idFromName("global"));
+}
+
+function learningStub(env: AdminEnv, userId: string) {
+  return env.LEARNING.get(env.LEARNING.idFromName(userId));
+}
+
+async function learningCall(env: AdminEnv, userId: string, path: string, body: unknown) {
+  return learningStub(env, userId).fetch(new Request("https://learning.internal" + path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }));
 }
 
 async function publishDashboard(env: AdminEnv, topics: string[], userId?: string) {
@@ -436,8 +449,13 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   const sessionUser = browserAuth?.ok ? browserAuth.data.user : null;
   const adminAuthorized = operatorAuthorized || sessionUser?.admin === true;
   const selfUserId = sessionUser?.id ? String(sessionUser.id) : "";
-  const selfService = request.method === "GET" && ["/admin/api/overview", "/admin/api/summary"].includes(path);
-  if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService) {
+  const selfService = request.method === "GET" && ["/admin/api/overview", "/admin/api/summary", "/admin/api/learn"].includes(path);
+  const learnSelfMutation = request.method === "POST" && [
+    "/admin/api/learn/put",
+    "/admin/api/learn/delete",
+    "/admin/api/learn/feedback",
+  ].includes(path);
+  if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService && !learnSelfMutation) {
     return error(403, "admin_required");
   }
 
@@ -469,6 +487,51 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     headers.append("set-cookie", adminCookie("", 0));
     headers.append("set-cookie", clearLegacyAdminCookie());
     return Response.json({ ok: true }, { headers });
+  }
+
+  if (path === "/admin/api/learn" && request.method === "GET") {
+    if (!selfUserId) return error(403, "browser_user_required");
+    const limit = Math.min(100, Math.max(1, Math.floor(Number(url.searchParams.get("limit")) || 100)));
+    const activityLimit = Math.min(100, Math.max(1, Math.floor(Number(url.searchParams.get("activityLimit")) || 50)));
+    const response = await learningCall(env, selfUserId, "/profile", { limit, activityLimit });
+    return new Response(response.body, {
+      status: response.status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" },
+    });
+  }
+
+  if (path === "/admin/api/learn/put" && request.method === "POST") {
+    if (!selfUserId) return error(403, "browser_user_required");
+    const response = await learningCall(env, selfUserId, "/put", {
+      key: body?.key,
+      kind: body?.kind,
+      scope: body?.scope,
+      scopeKey: body?.scopeKey,
+      content: body?.content,
+      confidence: body?.confidence,
+    });
+    return new Response(response.body, {
+      status: response.status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" },
+    });
+  }
+
+  if (path === "/admin/api/learn/delete" && request.method === "POST") {
+    if (!selfUserId) return error(403, "browser_user_required");
+    const response = await learningCall(env, selfUserId, "/delete", { id: body?.id });
+    return new Response(response.body, {
+      status: response.status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" },
+    });
+  }
+
+  if (path === "/admin/api/learn/feedback" && request.method === "POST") {
+    if (!selfUserId) return error(403, "browser_user_required");
+    const response = await learningCall(env, selfUserId, "/feedback", { id: body?.id, value: body?.value });
+    return new Response(response.body, {
+      status: response.status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" },
+    });
   }
 
   if (path === "/admin/api/audit" && request.method === "GET") {
