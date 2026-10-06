@@ -4,6 +4,7 @@ export interface Env {
   USAGE: DurableObjectNamespace;
   AUDIT: DurableObjectNamespace;
   DASHBOARD: DurableObjectNamespace;
+  LEARNING: DurableObjectNamespace;
   ASSETS?: Fetcher;
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;

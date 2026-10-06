@@ -46,6 +46,15 @@ function auditStub(env: Env) {
   return env.AUDIT.get(env.AUDIT.idFromName("global"));
 }
 
+function learningStub(env: Env, user: AuthUser) {
+  return env.LEARNING.get(env.LEARNING.idFromName(user.id));
+}
+
+async function learningCall(env: Env, user: AuthUser, path: string, body: unknown) {
+  const response = await learningStub(env, user).fetch(new Request(`https://learning.internal${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+  return { ok: response.ok, body: await response.text(), statusCode: response.status };
+}
+
 function safeAuthReason(value: unknown, fallback: string): string {
   const reason = String(value ?? "").trim().toLowerCase();
   return /^[a-z][a-z0-9_.:-]{0,79}$/.test(reason) ? reason : fallback;
@@ -795,7 +804,7 @@ const terminalSessionIdSchema = z.union([
 ]);
 
 const READ_ONLY_TOOLS = new Set([
-  "whoami", "list_agents", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
+  "whoami", "list_agents", "learn_get", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
   "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
   "start_search", "get_more_search_results", "list_processes", "screenshot", "clipboard_read", "list_windows",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
@@ -808,7 +817,7 @@ const OPEN_WORLD_TOOLS = new Set([
 ]);
 
 const DESTRUCTIVE_TOOLS = new Set([
-  "write_file", "edit_block", "move_path", "delete_path", "kill_process",
+  "write_file", "edit_block", "move_path", "delete_path", "kill_process", "learn_delete",
   "mouse_click", "keyboard_input", "desktop_step", "clipboard_write", "focus_window",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write", "terminal_kill",
   "terminal_batch_start", "terminal_batch_cancel",
@@ -854,6 +863,21 @@ function createMcpServer(env: Env, user: AuthUser) {
       return { value: toolResult(call), ok: call.ok };
     }),
   );
+
+  const learnScopeSchema = z.object({ scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional() });
+  const learnKindSchema = z.enum(["preference", "project_context", "tool_pattern", "workflow", "correction", "agent_context"]);
+
+  server.registerTool("learn_get", { description: "Read explicitly stored learning context for this authenticated account.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
+    async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
+
+  server.registerTool("learn_put", { description: "Store or update one structured memory for this authenticated account. This is explicit memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
+    async (args) => instrumentTool(env, user, "learn_put", args, async () => { const call = await learningCall(env, user, "/put", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
+
+  server.registerTool("learn_delete", { description: "Delete one stored memory from this authenticated account.", inputSchema: { id: z.string().min(1).max(400) }, annotations: annotationsForTool("learn_delete"), ...oauthToolSecurity() } as any,
+    async (args) => instrumentTool(env, user, "learn_delete", args, async () => { const call = await learningCall(env, user, "/delete", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
+
+  server.registerTool("learn_feedback", { description: "Record positive or negative feedback on one stored memory for this authenticated account.", inputSchema: { id: z.string().min(1).max(400), value: z.enum(["positive", "negative"]) }, annotations: annotationsForTool("learn_feedback", { destructiveHint: false }), ...oauthToolSecurity() } as any,
+    async (args) => instrumentTool(env, user, "learn_feedback", args, async () => { const call = await learningCall(env, user, "/feedback", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
 
   server.registerTool(
     "ping_agent",

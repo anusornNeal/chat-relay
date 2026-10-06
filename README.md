@@ -205,3 +205,19 @@ Optional Cloudflare-pressure circuit breakers can be configured with `USAGE_RECO
 - Public plugin/reviewer flow: `docs/plugin-review.md`
 - Google sign-in setup: `docs/google-login.md`
 - Source: https://github.com/anusornNeal/chat-relay
+
+
+## Account-scoped Learn
+
+Chat Relay can persist small, structured pieces of execution context per authenticated account. Learn is **not model training** and it does not capture conversations or tool payloads automatically.
+
+The MCP surface is:
+
+- `learn_get` reads explicit memories for selected scopes.
+- `learn_put` creates or updates one memory.
+- `learn_delete` removes one memory.
+- `learn_feedback` records positive or negative feedback on one memory.
+
+Memories are partitioned by authenticated account using a dedicated Learning Durable Object selected from the server-side `user.id`. Callers cannot provide or override an account id. Supported scopes are `global`, `project`, and `agent`; project and agent memories require a scope key.
+
+The first version is intentionally lightweight: there are no embeddings, vector database, local LLM, transcript ingestion, or per-tool-call writes. A normal tool call causes no Learn storage write. Storage changes happen only when an explicit Learn mutation is requested, while reads are bounded to at most 100 records.
