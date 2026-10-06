@@ -1,6 +1,6 @@
 # Chat Relay public plugin review runbook
 
-Last revalidated: 2026-09-30
+Last revalidated: 2026-10-06
 
 This document is the review/submission dossier for the public Chat Relay remote-MCP plugin. Keep platform-specific review metadata here rather than in core relay behavior.
 
@@ -82,7 +82,9 @@ Usage telemetry stores only hourly aggregate tool-call counts keyed by user id a
 
 Security/admin audit events store sanitized actor/action/target/result metadata. Audit events default to 180-day retention. Sensitive metadata keys such as password/token/secret/command/content/payload/cookie/CSRF are excluded.
 
-Durable Object state is the production source of truth for identities, grants, sessions, telemetry, and audit state. Repository or npm artifacts are not backups of production Durable Object state.
+Durable Object state is the production source of truth for identities, grants, sessions, telemetry, audit state, and account-scoped Learn memories. Repository or npm artifacts are not backups of production Durable Object state.
+
+Learn stores only explicit structured user memory in the authenticated account's dedicated Learning Durable Object, with global/project/agent scopes, at most 512 memories per account, and at most 4,000 characters of content per memory. It does not automatically ingest chat transcripts, raw tool inputs/results, terminal output, file contents, screenshots, or secrets. Ordinary tool calls do not create Learn writes. Learned context is surfaced as advisory, non-authoritative memory and cannot override authorization, grants, `ALLOWED_ROOTS`, capability checks, or destructive-action safeguards. Users can inspect, update, or delete Learn records through the Learn MCP tools.
 
 ## Draft listing copy
 
@@ -155,4 +157,4 @@ Use a dedicated reviewer user and a dedicated test PC/profile.
 
 ## Release notes draft
 
-Chat Relay public-review candidate adds OAuth-first onboarding, multi-user/multi-PC authorization, bounded filesystem responses, browser admin dashboard, privacy-safe usage telemetry, durable quotas, audit/retention operations, explicit device retirement/recovery, opt-in Windows desktop tools, complete MCP tool annotations, and domain-verification support.
+Chat Relay public-review candidate adds OAuth-first onboarding, multi-user/multi-PC authorization, bounded filesystem responses, account-scoped structured Learn memory with advisory context bootstrap, browser admin dashboard, privacy-safe usage telemetry, durable quotas, audit/retention operations, explicit device retirement/recovery, opt-in desktop tools, complete MCP tool annotations, and domain-verification support.

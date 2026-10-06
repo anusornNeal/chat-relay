@@ -18,7 +18,8 @@
       { "name": "REGISTRY", "class_name": "Registry" },
       { "name": "USAGE", "class_name": "Usage" },
       { "name": "AUDIT", "class_name": "Audit" },
-      { "name": "DASHBOARD", "class_name": "DashboardHub" }
+      { "name": "DASHBOARD", "class_name": "DashboardHub" },
+      { "name": "LEARNING", "class_name": "Learning" }
     ]
   },
   "secrets": {
@@ -29,6 +30,7 @@
     { "tag": "v2", "new_sqlite_classes": ["Registry"] },
     { "tag": "v3", "new_sqlite_classes": ["Usage"] },
     { "tag": "v4", "new_sqlite_classes": ["Audit"] },
-    { "tag": "v5", "new_sqlite_classes": ["DashboardHub"] }
+    { "tag": "v5", "new_sqlite_classes": ["DashboardHub"] },
+    { "tag": "v6", "new_sqlite_classes": ["Learning"] }
   ]
 }

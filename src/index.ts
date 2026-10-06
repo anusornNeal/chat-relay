@@ -3,12 +3,13 @@ import { DashboardHub } from "./dashboard-hub";
 import { Audit } from "./audit";
 import { Registry } from "./registry";
 import { Usage } from "./usage";
+import { Learning } from "./learning";
 import { AGENT_PROTOCOL_VERSION, agentConnectionGeneration, agentLiveness, appendAgentConnectionEvent, emptyAgentDiagnostics, isAuthoritativeAgentSocket, nextAgentConnectionGeneration, normalizeAgentHealth, normalizeAgentHello, normalizeAgentLifecycle, normalizeAgentText, readAgentAttachment, recordAgentProcessEpoch, selectLatestAgentSocket, writeAgentAttachment, type AgentConnectionEventType, type AgentDiagnostics, type AgentSocketAttachment } from "./agent-state";
 import workerApp, { publishDashboard } from "./worker-app";
 import { MAX_BYTES, error, hasPayload } from "./http-utils";
 import type { Env } from "./env";
 
-export { Audit, DashboardHub, Registry, Usage };
+export { Audit, DashboardHub, Registry, Usage, Learning };
 export default workerApp;
 
 type Pending = {
