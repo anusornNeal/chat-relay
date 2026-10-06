@@ -55,8 +55,10 @@
         "test:self-update": "node --test test/self-update.test.mjs test/agent-lifecycle-upgrade.test.mjs",
         "test:budget": "node --test test/relay-health.test.mjs test/usage-budget.test.mjs",
         "test:soak": "node test/soak-smoke.mjs",
-        "test:hardening": "npm run test:tui && npm run test:config-security && npm run test:self-update && npm run test:budget && node --test test/connection-generation.test.mjs && npm run test:agent-state && node test/heartbeat-ack-watchdog.test.mjs && npm run test:usage-storage && npm run test:soak",
-        "verify:review": "node scripts/verify-review-artifacts.mjs"
+        "test:hardening": "npm run test:tui && npm run test:config-security && npm run test:self-update && npm run test:budget && node --test test/connection-generation.test.mjs && npm run test:agent-state && node test/heartbeat-ack-watchdog.test.mjs && npm run test:usage-storage && npm run test:learn && npm run test:learn-bootstrap && npm run test:soak",
+        "verify:review": "node scripts/verify-review-artifacts.mjs",
+        "test:learn": "node test/learning-smoke.mjs",
+        "test:learn-bootstrap": "node test/learning-bootstrap-smoke.mjs"
     },
     "dependencies": {
         "ws": "^8.22.0"

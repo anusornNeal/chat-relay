@@ -128,14 +128,18 @@ export function formatTwoColumnHeader(state, width = 110, { color = false } = {}
     ["Status", combinedStatusText(state.status, state.relayHealth), "Relay", state.relay || "-"],
     ["Root", state.root || "-", "Reconnects", String(state.reconnects ?? 0)],
     ["Session up", formatUptime(state.uptimeMs), "Terminal", state.terminal ? "enabled" : "disabled"],
-    ["Desktop", state.desktop ? "enabled" : "disabled", "", ""],
+    ["Desktop", state.desktop ? "enabled" : "disabled", "Learn", state.learn !== false ? "enabled" : "disabled"],
   ];
   return rows
     .map(([leftLabel, leftValue, rightLabel, rightValue]) => {
       const leftStyle = leftLabel === "Status"
         ? combinedStatusStyle(state.status, state.relayHealth)
         : null;
-      const rightStyle = rightLabel === "Reconnects" && Number(state.reconnects || 0) > 0 ? STYLE.yellow : null;
+      const rightStyle = rightLabel === "Reconnects" && Number(state.reconnects || 0) > 0
+        ? STYLE.yellow
+        : rightLabel === "Learn"
+          ? (state.learn !== false ? STYLE.green : STYLE.red)
+          : null;
       return field(leftLabel, leftValue, leftWidth, color, leftStyle)
         + " ".repeat(GAP)
         + field(rightLabel, rightValue, rightWidth, color, rightStyle).trimEnd();
@@ -288,6 +292,7 @@ export class RemoteTui {
       reconnects: 0,
       terminal: config.terminalEnabled !== false,
       desktop: config.desktopEnabled === true,
+      learn: config.learnEnabled !== false,
     };
     this.version = version || "-";
     this.colorEnabled = shouldUseColor(output, env);
@@ -492,7 +497,7 @@ export class RemoteTui {
     if (width < MIN_FRAME_WIDTH) {
       const compactHeader = [
         truncateCells(`👤 ${headerState.account || "-"} · 💻 ${headerState.agent || "-"}`, width),
-        truncateCells(`🔗 ${combinedStatusText(headerState.status, headerState.relayHealth)} · 📁 ${headerState.root || "-"}`, width),
+        truncateCells(`🔗 ${combinedStatusText(headerState.status, headerState.relayHealth)} · 🧠 Learn ${headerState.learn !== false ? "on" : "off"} · 📁 ${headerState.root || "-"}`, width),
       ];
       headerLines = compactHeader.map((line) => this.colorEnabled ? paint(line, STYLE.gray) : line);
     } else {
