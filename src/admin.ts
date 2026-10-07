@@ -667,6 +667,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   }
 
   if (path === "/admin/api/overview" && request.method === "GET") {
+    const showDeleted = adminAuthorized && url.searchParams.get("deleted") === "true";
     const requestedRange = url.searchParams.get("range");
     const range: DashboardRange = requestedRange === "7d" || requestedRange === "30d" ? requestedRange : "today";
     const period = dashboardPeriod(range);
@@ -696,7 +697,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     }
 
     const state = await registryState(env);
-    const users = (state.users ?? []).filter((user: any) => !user.deletedAt);
+    const users = (state.users ?? []).filter((user: any) => Boolean(user.deletedAt) === showDeleted);
     const agents = state.agents ?? [];
     const grants = state.grants ?? [];
     const agentById = new Map(agents.map((agent: any) => [agent.id, agent]));
@@ -749,6 +750,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
         name: user.name || user.login || user.id,
         login: user.login || "",
         calls: Number(userTotals.get(user.id) || 0),
+        deletedAt: user.deletedAt || null,
         agents: accountAgents,
       };
     }).sort((a: any, b: any) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));

@@ -17,6 +17,7 @@ let dataRetryAttempt = 0;
 const pendingLiveTopics = new Set();
 let dashboardPeriod = null;
 let dashboardRange = "today";
+let usageUserMode = "active";
 
 const BKK_TZ = "Asia/Bangkok";
 const API_TIMEOUT_MS = 12000;
@@ -593,7 +594,8 @@ async function loadOverview({ patch = false } = {}) {
 
 async function loadUsage({ patch = false } = {}) {
   setHeader(isAdmin() ? "Usage" : "My usage", "Tool calls by account and agent");
-  const data = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange));
+  const showDeleted = isAdmin() && usageUserMode === "deleted";
+  const data = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange) + (isAdmin() ? "&deleted=" + String(showDeleted) : ""));
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
   dashboardRange = dashboardPeriod.range || dashboardRange;
   const accounts = Array.isArray(data.accounts) ? data.accounts : [];
@@ -609,21 +611,67 @@ async function loadUsage({ patch = false } = {}) {
         '<strong class="agent-usage-count">' + fmtNum(agent.calls) + '</strong>' +
       '</div>'
     ).join("") : '<div class="empty-inline">No agents for this account.</div>';
+    const userAction = !isAdmin() || account.userId === currentUser?.id
+      ? ""
+      : showDeleted
+        ? '<button type="button" class="usage-user-action" data-restore-user="' + esc(account.userId) + '" title="Restore user" aria-label="Restore ' + esc(account.name || account.userId) + '">' + icon("refresh") + '</button>'
+        : '<button type="button" class="usage-user-action danger" data-delete-user="' + esc(account.userId) + '" data-user-name="' + esc(account.name || account.userId) + '" title="Delete user" aria-label="Delete ' + esc(account.name || account.userId) + '">' + icon("trash") + '</button>';
 
     return '<section class="panel account-agent-panel" data-live-key="' + esc(account.userId) + '">' +
       '<div class="panel-heading"><div><div class="panel-kicker">Account</div><h2>' + esc(account.name || account.userId) +
       '</h2><div class="secondary-text">' + esc(account.login || account.userId) + '</div></div>' +
-      '<div class="account-total"><strong>' + fmtNum(account.calls) + '</strong><span>tool calls</span></div></div>' +
+      '<div class="account-heading-actions"><div class="account-total"><strong>' + fmtNum(account.calls) + '</strong><span>tool calls</span></div>' + userAction + '</div></div>' +
       '<div class="agent-usage-list">' + agentRows + '</div></section>';
-  }).join("") : '<section class="panel"><div class="empty-inline">No usage in this period.</div></section>';
+  }).join("") : '<section class="panel"><div class="empty-inline">' + (showDeleted ? "No deleted users." : "No usage in this period.") + '</div></section>';
+
+  const userTabs = isAdmin()
+    ? '<div class="usage-user-tabs" role="tablist" aria-label="User status"><button type="button" class="usage-user-tab ' + (usageUserMode === "active" ? "active" : "") + '" data-usage-user-mode="active" role="tab" aria-selected="' + String(usageUserMode === "active") + '">Active</button><button type="button" class="usage-user-tab ' + (usageUserMode === "deleted" ? "active" : "") + '" data-usage-user-mode="deleted" role="tab" aria-selected="' + String(usageUserMode === "deleted") + '">Deleted</button></div>'
+    : "";
 
   renderContent(
-    '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +
+    '<div class="overview-toolbar"><div class="usage-toolbar-left">' + userTabs + periodChips(dashboardPeriod) + '</div>' +
       '<span class="privacy-chip">' + icon("info") + periodDisplayLabel(dashboardRange) + "</span></div>" +
     '<div class="account-agent-grid">' + accountMarkup + "</div>",
     patch,
   );
 
+  document.querySelectorAll("[data-usage-user-mode]").forEach((button) => {
+    button.onclick = async () => {
+      const nextMode = button.dataset.usageUserMode === "deleted" ? "deleted" : "active";
+      if (nextMode === usageUserMode) return;
+      usageUserMode = nextMode;
+      await loadUsage({ patch: true });
+    };
+  });
+  document.querySelectorAll("[data-delete-user]").forEach((button) => {
+    button.onclick = async () => {
+      const userId = button.dataset.deleteUser;
+      const name = button.dataset.userName || userId;
+      if (!userId || !window.confirm("Delete " + name + "? The account can be restored from the Deleted tab.")) return;
+      button.disabled = true;
+      try {
+        await api("/admin/api/users/soft-delete", { method: "POST", body: JSON.stringify({ userId }) });
+        await loadUsage({ patch: true });
+      } catch (error) {
+        button.disabled = false;
+        setNotice("Delete user failed: " + (error?.message || "request_failed"), true);
+      }
+    };
+  });
+  document.querySelectorAll("[data-restore-user]").forEach((button) => {
+    button.onclick = async () => {
+      const userId = button.dataset.restoreUser;
+      if (!userId) return;
+      button.disabled = true;
+      try {
+        await api("/admin/api/users/restore", { method: "POST", body: JSON.stringify({ userId }) });
+        await loadUsage({ patch: true });
+      } catch (error) {
+        button.disabled = false;
+        setNotice("Restore user failed: " + (error?.message || "request_failed"), true);
+      }
+    };
+  });
   document.querySelectorAll("[data-overview-range]").forEach((button) => {
     button.onclick = async () => {
       const nextRange = button.dataset.overviewRange || "today";
