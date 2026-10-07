@@ -401,7 +401,9 @@ for (const path of ["/put","/delete","/feedback"]) {
   assert.ok(worker.includes(`learningMutationCall(env, user, "${path}"`),"Learn mutations must use the mutation wrapper");
 }
 assert.match(worker,/LEARN_BASELINE_CONTEXT/,"explicit Learn policy must be exposed through the Learn mutation tool descriptions");
-assert.match(worker,/applyLearningMutation/,"changed Learn mutations must still publish TUI Learn activity");
+assert.match(worker,/publishLearnToolActivity/,"Learn tool calls must publish ephemeral TUI Learn activity");
+assert.match(worker,/LEARN_ACTIVITY_TOOLS/,"all explicit Learn tools must share the live activity path");
+assert.doesNotMatch(worker,/learning_activity_v1/,"Worker Learn activity must not add persisted history");
 assert.match(worker,/prepareLearnContext/,"explicit learn_prepare must have a one-shot preparation path");
 for (const tool of ["learn_prepare","learn_get","learn_put","learn_delete","learn_feedback"]) {
   assert.match(worker,new RegExp('"' + tool + '"'));

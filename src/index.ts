@@ -105,6 +105,61 @@ export class Relay extends DurableObject {
   private async control(request: Request): Promise<Response> {
     if (request.method !== "POST") return error(405, "method_not_allowed");
     const body = await request.json<any>().catch(() => null);
+    if (body?.control === "learn_activity" && body?.activity && typeof body.activity === "object") {
+      const activity = body.activity;
+      const tools = new Set(["learn_prepare", "learn_get", "learn_put", "learn_delete", "learn_feedback"]);
+      const tool = tools.has(String(activity.tool)) ? String(activity.tool) : "";
+      if (!tool || typeof activity.ok !== "boolean") return error(400, "invalid_learn_activity");
+
+      const rawDurationMs = Number(activity.durationMs);
+      const durationMs = Number.isFinite(rawDurationMs)
+        ? Math.max(0, Math.min(Math.round(rawDurationMs), 10 * 60_000))
+        : null;
+      const change = activity.change && typeof activity.change === "object" ? activity.change : null;
+      let normalizedChange = null;
+      if (change) {
+        const types = new Set(["created", "updated", "reinforced", "weakened", "removed"]);
+        const type = types.has(String(change.type)) ? String(change.type) : "";
+        const key = normalizeAgentText(change.key, 160);
+        if (type && key) {
+          normalizedChange = {
+            eventId: normalizeAgentText(change.eventId, 160),
+            memoryId: normalizeAgentText(change.memoryId, 160),
+            type,
+            key,
+            kind: normalizeAgentText(change.kind, 40),
+            scope: normalizeAgentText(change.scope, 20),
+            scopeKey: normalizeAgentText(change.scopeKey, 200) || null,
+            confidence: Number.isFinite(Number(change.confidence)) ? Number(change.confidence) : null,
+            previousConfidence: Number.isFinite(Number(change.previousConfidence)) ? Number(change.previousConfidence) : null,
+            at: normalizeAgentText(change.at, 64) || new Date().toISOString(),
+          };
+        }
+      }
+
+      const agent = this.resolveAgent();
+      if (!agent) return Response.json({ ok: true, delivered: false });
+      try {
+        agent.send(JSON.stringify({
+          control: "learn_activity",
+          activity: {
+            eventId: normalizeAgentText(activity.eventId, 160) || "learn-call-" + crypto.randomUUID(),
+            tool,
+            ok: activity.ok,
+            durationMs,
+            at: normalizeAgentText(activity.at, 64) || new Date().toISOString(),
+            scopeSummary: normalizeAgentText(activity.scopeSummary, 80) || null,
+            kind: normalizeAgentText(activity.kind, 40) || null,
+            feedback: activity.feedback === "positive" || activity.feedback === "negative" ? activity.feedback : null,
+            ...(normalizedChange ? { change: normalizedChange } : {}),
+          },
+        }));
+        return Response.json({ ok: true, delivered: true });
+      } catch {
+        return Response.json({ ok: true, delivered: false });
+      }
+    }
+
     if (body?.control !== "learn_activity" || !body?.change || typeof body.change !== "object") {
       return error(400, "invalid_control");
     }

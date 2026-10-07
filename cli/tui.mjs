@@ -474,23 +474,65 @@ export class RemoteTui {
         if (message.error && message.ok === false) item.summary += ` · ${truncate(message.error, 48)}`;
       }
     } else if (message.event === "learn") {
-      const change = message.change && typeof message.change === "object" ? message.change : {};
-      const marker = {
-        created: "+",
-        updated: "~",
-        reinforced: "^",
-        weakened: "v",
-        removed: "-",
-      }[String(change.type || "")] || "~";
-      const detail = String(change.summary || change.key || "Learn updated").replace(/\s+/g, " ").trim();
-      this.appendTransaction({
-        requestId: "learn-" + String(change.eventId || Date.now()),
-        at: change.at || message.at || new Date().toISOString(),
-        action: "learn",
-        summary: "Learn " + marker + " " + truncate(detail, 120),
-        status: "done",
-        ok: true,
-      });
+      const activity = message.activity && typeof message.activity === "object" ? message.activity : null;
+      if (activity) {
+        const tool = String(activity.tool || "learn");
+        const change = activity.change && typeof activity.change === "object" ? activity.change : null;
+        const scopeSummary = String(activity.scopeSummary || "").trim();
+        const kind = String(change?.kind || activity.kind || "memory").trim() || "memory";
+        const key = String(change?.key || "").trim();
+        const verbs = {
+          created: "created",
+          updated: "updated",
+          reinforced: "reinforced",
+          weakened: "weakened",
+          removed: "removed",
+        };
+        let detail;
+        if (tool === "learn_prepare") {
+          detail = "prepare " + (scopeSummary || "relevant") + " context";
+        } else if (tool === "learn_get") {
+          detail = "read " + (scopeSummary || "memory") + " context";
+        } else if (change) {
+          detail = (verbs[String(change.type || "")] || "updated") + " " + kind + (key ? " · " + key : "");
+        } else if (tool === "learn_put") {
+          detail = "write " + kind + " · no change";
+        } else if (tool === "learn_delete") {
+          detail = "delete memory · no change";
+        } else if (tool === "learn_feedback") {
+          detail = String(activity.feedback || "feedback") + " memory · no change";
+        } else {
+          detail = tool.replace(/^learn_/, "").replace(/_/g, " ");
+        }
+        const durationMs = Number(activity.durationMs);
+        this.appendTransaction({
+          requestId: String(activity.eventId || "learn-call-" + Date.now()),
+          at: activity.at || message.at || new Date().toISOString(),
+          action: tool,
+          summary: "🧠 Learn · " + truncate(detail, 120),
+          status: "done",
+          ok: activity.ok !== false,
+          ...(Number.isFinite(durationMs) ? { durationMs } : {}),
+        });
+      } else {
+        const change = message.change && typeof message.change === "object" ? message.change : {};
+        const marker = {
+          created: "+",
+          updated: "~",
+          reinforced: "^",
+          weakened: "v",
+          removed: "-",
+        }[String(change.type || "")] || "~";
+        const detail = String(change.summary || change.key || "Learn updated").replace(/\s+/g, " ").trim();
+        this.appendTransaction({
+          requestId: "learn-" + String(change.eventId || Date.now()),
+          at: change.at || message.at || new Date().toISOString(),
+          action: "learn",
+          summary: "Learn " + marker + " " + truncate(detail, 120),
+          status: "done",
+          ok: true,
+        });
+      }
     } else if (message.event === "system") {
       this.appendTransaction({
         requestId: "system-" + Date.now() + "-" + Math.random(),

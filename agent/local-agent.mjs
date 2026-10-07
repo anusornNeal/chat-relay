@@ -490,7 +490,12 @@ function connect() {
       return;
     }
     if (message?.control === "learn_activity") {
-      emitUi("learn", { change: message.change && typeof message.change === "object" ? message.change : {} });
+      const activity = message.activity && typeof message.activity === "object" ? message.activity : null;
+      const change = message.change && typeof message.change === "object" ? message.change : null;
+      emitUi("learn", {
+        ...(activity ? { activity } : {}),
+        ...(change ? { change } : {}),
+      });
       return;
     }
     if (message?.control === "credential_revoked") {

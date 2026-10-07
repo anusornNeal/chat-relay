@@ -337,27 +337,24 @@ type LearningMutationPayload = {
   change?: LearnChange | null;
 };
 
-async function applyLearningMutation(
-  env: Env,
-  user: AuthUser,
+type LearnActivityTool = "learn_prepare" | "learn_get" | "learn_put" | "learn_delete" | "learn_feedback";
+
+const LEARN_ACTIVITY_TOOLS = new Set<LearnActivityTool>([
+  "learn_prepare",
+  "learn_get",
+  "learn_put",
+  "learn_delete",
+  "learn_feedback",
+]);
+
+function readLearningMutationChange(
   call: { ok: boolean; body: string; statusCode: number },
-) {
-  if (!call.ok) return;
+): LearnChange | null {
+  if (!call.ok) return null;
   let data: LearningMutationPayload;
   try { data = JSON.parse(call.body) as LearningMutationPayload; }
-  catch { return; }
-  if (!data.changed || !data.change) return;
-
-  const agentId = recentLearnAgentByUser.get(user.id) ?? null;
-  if (!agentId) return;
-  try {
-    const stub = env.RELAY.get(env.RELAY.idFromName(agentId));
-    await stub.fetch(new Request("https://relay.internal/control", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ control: "learn_activity", change: data.change }),
-    }));
-  } catch {}
+  catch { return null; }
+  return data.changed && data.change ? data.change : null;
 }
 
 async function learningMutationCall(
@@ -367,8 +364,86 @@ async function learningMutationCall(
   args: unknown,
 ) {
   const call = await learningCall(env, user, path, args);
-  await applyLearningMutation(env, user, call);
-  return call;
+  return { call, learnChange: readLearningMutationChange(call) };
+}
+
+function learnActivityScopeSummary(tool: LearnActivityTool, args: unknown): string | null {
+  const input = args && typeof args === "object" ? args as any : {};
+  if (tool === "learn_prepare") {
+    const scopes = ["global"];
+    if (String(input.projectKey ?? "").trim()) scopes.push("project");
+    if (normalizeLearnPrepareAgentId(input.agentId)) scopes.push("agent");
+    return scopes.join("/");
+  }
+  if (tool !== "learn_get" || !Array.isArray(input.scopes)) return null;
+  const scopes = [...new Set(input.scopes
+    .map((entry: any) => String(entry?.scope ?? "").trim())
+    .filter((scope: string) => scope === "global" || scope === "project" || scope === "agent"))];
+  return scopes.length ? scopes.join("/") : null;
+}
+
+function compactLearnChange(change: LearnChange | null | undefined) {
+  if (!change) return null;
+  return {
+    eventId: change.eventId,
+    memoryId: change.memoryId,
+    type: change.type,
+    key: change.key,
+    kind: change.kind,
+    scope: change.scope,
+    scopeKey: change.scopeKey,
+    confidence: change.confidence,
+    previousConfidence: change.previousConfidence,
+    at: change.at,
+  };
+}
+
+async function publishLearnToolActivity(
+  env: Env,
+  user: AuthUser,
+  tool: LearnActivityTool,
+  args: unknown,
+  result: { ok: boolean; durationMs: number; learnChange?: LearnChange | null },
+  executionCtx?: ExecutionContext,
+) {
+  const input = args && typeof args === "object" ? args as any : {};
+  const explicitAgentId = normalizeLearnPrepareAgentId(input.agentId);
+  if (explicitAgentId) noteRecentLearnAgent(user.id, explicitAgentId);
+  const agentId = explicitAgentId ?? recentLearnAgentByUser.get(user.id) ?? null;
+  if (!agentId) return;
+
+  const scopeSummary = learnActivityScopeSummary(tool, args);
+  const kind = typeof input.kind === "string" ? input.kind.slice(0, 40) : null;
+  const feedback = tool === "learn_feedback" && (input.value === "positive" || input.value === "negative")
+    ? input.value
+    : null;
+  const change = compactLearnChange(result.learnChange);
+  try {
+    const delivery = env.RELAY.get(env.RELAY.idFromName(agentId)).fetch(new Request("https://relay.internal/control", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        control: "learn_activity",
+        activity: {
+          eventId: "learn-call-" + crypto.randomUUID(),
+          tool,
+          ok: result.ok,
+          durationMs: Math.max(0, Math.round(result.durationMs)),
+          at: new Date().toISOString(),
+          ...(scopeSummary ? { scopeSummary } : {}),
+          ...(kind ? { kind } : {}),
+          ...(feedback ? { feedback } : {}),
+          ...(change ? { change } : {}),
+        },
+      }),
+    })).catch(() => undefined);
+
+    if (executionCtx) {
+      try { executionCtx.waitUntil(delivery.then(() => undefined)); } catch {}
+      return;
+    }
+    await delivery;
+  } catch {}
 }
 
 const SECURITY_CACHE_TTL_MS = 30 * 60_000;
@@ -616,19 +691,32 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
   });
 }
 
+type InstrumentToolOutcome<T> = {
+  value: T;
+  ok: boolean;
+  agentId?: string;
+  errorClass?: string;
+  errorSource?: string;
+  errorCode?: string;
+  statusCode?: number;
+  exitCode?: number | null;
+  timing?: SafeTiming;
+  learnChange?: LearnChange | null;
+};
+
 async function instrumentTool<T>(
   env: Env,
   user: AuthUser,
   tool: string,
   args: unknown,
-  run: () => Promise<{ value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming }>,
+  run: () => Promise<InstrumentToolOutcome<T>>,
 ): Promise<T> {
   const startedAtMs = Date.now();
   const executionCtx = toolActivityContexts.get(user)?.executionCtx;
   const requestedAgentId = typeof args === "object" && args !== null && typeof (args as any).agentId === "string"
     ? String((args as any).agentId).slice(0, 128)
     : undefined;
-  let outcome: { value: T; ok: boolean; agentId?: string; errorClass?: string; errorSource?: string; errorCode?: string; statusCode?: number; exitCode?: number | null; timing?: SafeTiming } | undefined;
+  let outcome: InstrumentToolOutcome<T> | undefined;
   try {
     outcome = await run();
 
@@ -636,8 +724,22 @@ async function instrumentTool<T>(
       noteRecentLearnAgent(user.id, outcome.agentId);
     }
 
+    if (LEARN_ACTIVITY_TOOLS.has(tool as LearnActivityTool)) {
+      await publishLearnToolActivity(env, user, tool as LearnActivityTool, args, {
+        ok: outcome.ok,
+        durationMs: Date.now() - startedAtMs,
+        learnChange: outcome.learnChange,
+      }, executionCtx);
+    }
+
     return outcome.value;
   } catch (cause) {
+    if (LEARN_ACTIVITY_TOOLS.has(tool as LearnActivityTool)) {
+      await publishLearnToolActivity(env, user, tool as LearnActivityTool, args, {
+        ok: false,
+        durationMs: Date.now() - startedAtMs,
+      }, executionCtx);
+    }
     await recordUsage(env, {
       userId: user.id,
       ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
@@ -1125,13 +1227,22 @@ function createMcpServer(env: Env, user: AuthUser) {
     async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
 
   server.registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory only when Chat decides durable learning is warranted. Never write memory merely because an ordinary MCP tool ran. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
-    async (args) => instrumentTool(env, user, "learn_put", args, async () => { const call = await learningMutationCall(env, user, "/put", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
+    async (args) => instrumentTool(env, user, "learn_put", args, async () => {
+      const { call, learnChange } = await learningMutationCall(env, user, "/put", args);
+      return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode, learnChange };
+    }));
 
   server.registerTool("learn_delete", { description: "Remove a learned memory when it is no longer valid or useful.", inputSchema: { id: z.string().min(1).max(400) }, annotations: annotationsForTool("learn_delete"), ...oauthToolSecurity() } as any,
-    async (args) => instrumentTool(env, user, "learn_delete", args, async () => { const call = await learningMutationCall(env, user, "/delete", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
+    async (args) => instrumentTool(env, user, "learn_delete", args, async () => {
+      const { call, learnChange } = await learningMutationCall(env, user, "/delete", args);
+      return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode, learnChange };
+    }));
 
   server.registerTool("learn_feedback", { description: "Reinforce or weaken one learned memory for this authenticated account.", inputSchema: { id: z.string().min(1).max(400), value: z.enum(["positive", "negative"]) }, annotations: annotationsForTool("learn_feedback", { destructiveHint: false }), ...oauthToolSecurity() } as any,
-    async (args) => instrumentTool(env, user, "learn_feedback", args, async () => { const call = await learningMutationCall(env, user, "/feedback", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
+    async (args) => instrumentTool(env, user, "learn_feedback", args, async () => {
+      const { call, learnChange } = await learningMutationCall(env, user, "/feedback", args);
+      return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode, learnChange };
+    }));
 
   server.registerTool(
     "ping_agent",

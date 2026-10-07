@@ -229,6 +229,56 @@ test("TUI shows Learn activity pushed over the existing agent channel", () => {
   assert.match(item.summary, /^Learn \+ Test on a physical device before commit/);
 });
 
+
+test("TUI shows one ephemeral row for each Learn call", () => {
+  const tui = new RemoteTui({
+    config: { relayUrl: "https://chat-relay.example.workers.dev" },
+    version: "test",
+    output: { isTTY: false, write() {} },
+  });
+
+  tui.handleMessage({
+    type: "chat-relay-ui",
+    event: "learn",
+    activity: {
+      eventId: "learn-call-1",
+      tool: "learn_get",
+      ok: true,
+      durationMs: 24,
+      scopeSummary: "global/project",
+      at: "2026-10-07T03:00:00.000Z",
+    },
+  });
+
+  assert.equal(tui.transactions.length, 1);
+  assert.equal(tui.transactions[0].action, "learn_get");
+  assert.equal(tui.transactions[0].durationMs, 24);
+  assert.equal(tui.transactions[0].ok, true);
+  assert.match(tui.transactions[0].summary, /^🧠 Learn · read global\/project context/);
+
+  tui.handleMessage({
+    type: "chat-relay-ui",
+    event: "learn",
+    activity: {
+      eventId: "learn-call-2",
+      tool: "learn_put",
+      ok: true,
+      durationMs: 31,
+      kind: "workflow",
+      change: {
+        type: "updated",
+        key: "auto-commit-completed-work",
+        kind: "workflow",
+      },
+      at: "2026-10-07T03:00:01.000Z",
+    },
+  });
+
+  assert.equal(tui.transactions.length, 2, "changed mutations must still append exactly one call row");
+  assert.match(tui.transactions[1].summary, /^🧠 Learn · updated workflow · auto-commit-completed-work/);
+  assert.equal(tui.transactions[1].durationMs, 31);
+});
+
 test("TUI keeps agent socket state separate from Worker HTTP health", () => {
   const tui = new RemoteTui({
     config: { relayUrl: "https://chat-relay.example.workers.dev" },
