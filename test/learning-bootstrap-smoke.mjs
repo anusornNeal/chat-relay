@@ -159,26 +159,23 @@ const agentRecords = [
 
 {
   const worker = fs.readFileSync("src/worker-app.ts", "utf8");
-  assert.match(worker, /new LearnContextSessionStore\(\)/);
-  assert.match(worker, /AUTO_LEARN_SKIP_TOOLS/);
-  assert.match(worker, /prepareAutoLearnContext/);
-  assert.match(worker, /prepareAgentLearnContext/);
-  assert.match(worker, /attachLearnedContext/);
-  assert.match(worker, /learnSessionId/);
+  assert.doesNotMatch(worker, /prepareAutoLearnContext/, "ordinary MCP calls must not auto-read Learn");
+  assert.doesNotMatch(worker, /prepareAgentLearnContext/, "agent calls must not auto-read Learn");
+  assert.doesNotMatch(worker, /attachLearnedContext/, "ordinary tool results must not receive implicit Learn payloads");
+  assert.doesNotMatch(worker, /learnSessionId/, "MCP hot path must not hash a separate Learn session id");
   assert.match(worker, /const user: AuthUser = \{ \.\.\.authenticatedUser \}/);
   assert.match(worker, /"x-openai-conversation-id"/);
-  assert.match(worker, /learnedContextPolicy:/);
-  assert.match(worker, /Advisory user memory only/);
-  assert.match(worker, /perKind: 4/);
-  assert.match(worker, /buildRelevantLearnEnvelope/);
-  assert.match(worker, /buildLearnRelevanceContext/);
-  assert.match(worker, /data\.compaction\?\.removedIds/, "compaction must evict superseded memories from the warm session cache");
+  assert.match(worker, /Explicitly read learned context when it may materially affect the current task/);
+  assert.match(worker, /do not call automatically before every MCP tool/);
+  assert.match(worker, /only when Chat decides durable learning is warranted/);
+  assert.match(worker, /Never write memory merely because an ordinary MCP tool ran/);
+  assert.match(worker, /noteRecentLearnAgent\(user\.id, outcome\.agentId\)/, "explicit Learn mutations should still reach the most recent agent indicator");
   assert.match(worker, /automatically canonicalized\/compacted/, "learn_put must expose project-context compaction semantics");
   const policy = fs.readFileSync("src/learning-policy.ts", "utf8");
   assert.match(policy, /LEARN_BASELINE_VERSION = 2/);
   assert.match(policy, /Keep project_context project-level and canonical/);
   assert.match(policy, /automatically compacted into bounded canonical buckets/);
-  console.log("PASS worker MCP bootstrap wiring contract");
+  console.log("PASS explicit Learn MCP wiring contract");
 }
 
 console.log("learning bootstrap/routing tests passed");
