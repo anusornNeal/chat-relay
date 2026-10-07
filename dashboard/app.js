@@ -894,7 +894,7 @@ function renderLearnProfile({ patch = false } = {}) {
           '<button class="' + (learnSortMode === "confidence" ? "active" : "") + '" type="button" data-learn-sort="confidence">Confidence</button>' +
         '</div><span>Folder view</span></div>' +
         '<div class="learn-folder-workspace">' +
-          '<div class="learn-folder-list"><div class="learn-folder-list-head"><span>Name</span><span>Confidence</span><span>Updated</span></div>' + rowsHtml + '</div>' +
+          '<div class="learn-folder-list"><div class="learn-folder-list-head"><span>Name</span><span>Confidence</span><span>Updated</span></div><div class="learn-folder-list-scroll">' + rowsHtml + '</div></div>' +
           '<aside class="learn-detail-pane">' + detailHtml + '</aside>' +
         '</div>' +
       '</div>' +
