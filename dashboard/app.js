@@ -35,6 +35,9 @@ const bkkTime = (iso) => new Intl.DateTimeFormat("en-GB", {
 const bkkHourMinute = (iso) => new Intl.DateTimeFormat("en-GB", {
   timeZone: BKK_TZ, hour: "2-digit", minute: "2-digit", hour12: false,
 }).format(new Date(iso));
+const bkkDateTime = (iso) => new Intl.DateTimeFormat("en-GB", {
+  timeZone: BKK_TZ, day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+}).format(new Date(iso));
 const bkkDayLabel = (iso) => new Intl.DateTimeFormat("en-GB", {
   timeZone: BKK_TZ, day: "2-digit", month: "short",
 }).format(new Date(iso));
@@ -496,35 +499,64 @@ function periodChips(period) {
 function periodDisplayLabel(range = dashboardRange) {
   return range === "30d" ? "Last 30 days" : range === "7d" ? "Last 7 days" : "Today";
 }
+function chartDisplayBuckets(buckets = [], period = dashboardPeriod) {
+  const items = Array.isArray(buckets) ? buckets : [];
+  if (period?.range !== "today") return items;
+
+  const dayStart = Date.parse(period?.from || "");
+  if (!Number.isFinite(dayStart)) return items;
+
+  const hourMs = 60 * 60 * 1000;
+  const bucketsByHour = new Map(
+    items
+      .map((bucket) => [Math.floor(Date.parse(bucket.from) / hourMs), bucket])
+      .filter(([key]) => Number.isFinite(key)),
+  );
+
+  return Array.from({ length: 24 }, (_, index) => {
+    const fromMs = dayStart + index * hourMs;
+    return bucketsByHour.get(Math.floor(fromMs / hourMs)) || {
+      from: new Date(fromMs).toISOString(),
+      to: new Date(fromMs + hourMs - 1).toISOString(),
+      calls: 0,
+      errors: 0,
+      operationalErrors: 0,
+    };
+  });
+}
 function chartMarkup(buckets = [], period = dashboardPeriod) {
   const items = Array.isArray(buckets) ? buckets : [];
+  const displayItems = chartDisplayBuckets(items, period);
   const byDay = period?.range === "7d" || period?.range === "30d";
   const callsByBucket = items.map((bucket) => Number(bucket.calls || 0));
   const total = callsByBucket.reduce((sum, calls) => sum + calls, 0);
   const max = Math.max(1, ...callsByBucket);
   const average = items.length ? total / items.length : 0;
-  const averageHeight = Math.min(100, Math.max(0, (average / max) * 100));
   const peakIndex = callsByBucket.indexOf(Math.max(0, ...callsByBucket));
   const peakBucket = peakIndex >= 0 ? items[peakIndex] : null;
   const peakLabel = peakBucket ? (byDay ? bkkDayLabel(peakBucket.from) : bkkHourMinute(peakBucket.from)) : "\u2014";
   const yTicks = [1, .75, .5, .25, 0].map((ratio) => Math.round(max * ratio));
   const yLabels = '<div class="chart-y-axis" aria-hidden="true">' + yTicks.map((value) => '<span>' + fmtNum(value) + "</span>").join("") + "</div>";
-  const bars = items.map((bucket, index) => {
+  const currentHour = !byDay && Number.isFinite(Date.parse(period?.to || ""))
+    ? Math.floor(Date.parse(period.to) / (60 * 60 * 1000))
+    : null;
+  const bars = displayItems.map((bucket, index) => {
     const calls = Number(bucket.calls || 0);
     const errors = Number(bucket.operationalErrors ?? bucket.errors ?? 0);
     const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
     const start = bkkHourMinute(bucket.from);
     const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
     const label = byDay ? bkkDayLabel(bucket.from) : start + "\u2013" + end;
-    const current = index === items.length - 1 ? " current" : "";
+    const bucketHour = Math.floor(Date.parse(bucket.from) / (60 * 60 * 1000));
+    const current = (byDay ? index === displayItems.length - 1 : bucketHour === currentHour) ? " current" : "";
     return '<div class="chart-bar' + current + '" style="--bar-height:' + height + '%" tabindex="0" role="img" aria-label="' +
       esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
       '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations</span><small>' + fmtNum(errors) + ' operational errors</small></span>' +
       '<span class="bar-fill"></span>' + (errors > 0 ? '<span class="chart-error-dot" aria-hidden="true"></span>' : "") + "</div>";
   }).join("");
-  const labelEvery = byDay ? (items.length > 14 ? 5 : 1) : 3;
-  const xLabels = items.map((bucket, index) => {
-    const show = index % labelEvery === 0 || index === items.length - 1;
+  const labelEvery = byDay ? (displayItems.length > 14 ? 5 : 1) : 3;
+  const xLabels = displayItems.map((bucket, index) => {
+    const show = index % labelEvery === 0 || index === displayItems.length - 1;
     const label = byDay ? bkkDayLabel(bucket.from) : bkkHourMinute(bucket.from);
     return '<span class="' + (show ? "" : "muted") + '">' + (show ? esc(label) : "") + "</span>";
   }).join("");
@@ -534,10 +566,9 @@ function chartMarkup(buckets = [], period = dashboardPeriod) {
     '<div><span>Avg / ' + intervalLabel + '</span><strong>' + fmtNum(Math.round(average)) + '</strong></div>' +
     '<div><span>Peak</span><strong>' + esc(peakLabel) + '</strong></div>' +
     "</div>";
-  if (!items.length) return stats + '<div class="chart-empty">No tool activity in this period.</div>';
+  if (!items.length && period?.range !== "today") return stats + '<div class="chart-empty">No tool activity in this period.</div>';
   return stats + '<div class="chart-frame">' + yLabels +
     '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div>' +
-    '<div class="chart-average-line" style="--avg-height:' + averageHeight + '%"><span>Avg ' + fmtNum(Math.round(average)) + '</span></div>' +
     '<div class="chart-bars">' + bars + '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
 }
 
@@ -555,7 +586,6 @@ async function loadOverview({ patch = false } = {}) {
   const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : periodLabel.toLowerCase();
   const cards = [
     metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
-    metricCard(isAdmin() ? "Active terminals" : "My active terminals", fmtNum(data.activeTerminals), "sessions and running batches"),
     metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), m.p95Approximate ? "p95 is approximate" : exactMeta),
     metricCard(
       isAdmin() ? "Operational error rate" : "My operational error rate",
@@ -566,7 +596,6 @@ async function loadOverview({ patch = false } = {}) {
   ];
   if (isAdmin()) {
     cards.push(metricCard("Online agents", (data.agents?.online || 0) + " / " + (data.agents?.total || 0), "connected agents"));
-    cards.push(metricCard("Active users", fmtNum(data.activeUsers ?? data.users?.enabled), "enabled users"));
   }
   const boundedNotice = data.bounded
     ? '<div class="data-warning">' + icon("alert") + '<span>Some detailed history is unavailable. Counts cover retained history.</span></div>'
@@ -885,7 +914,7 @@ function renderLearnProfile({ patch = false } = {}) {
       '<span class="learn-folder-file">' + icon("folder") + '</span>' +
       '<span class="learn-folder-copy"><strong>' + esc(item.key) + '</strong><small>' + esc(learnKindLabel(item.kind)) + '</small></span>' +
       '<span class="learn-folder-confidence">' + esc(item.confidence) + '%</span>' +
-      '<span class="learn-folder-updated">' + esc(bkkHourMinute(item.updatedAt)) + '</span>' +
+      '<span class="learn-folder-updated">' + esc(bkkDateTime(item.updatedAt)) + '</span>' +
     '</button>';
   }).join("") : '<div class="learn-folder-empty">' + icon("search") + '<strong>No memories found</strong><span>Try another folder or search term.</span></div>';
 
@@ -906,7 +935,7 @@ function renderLearnProfile({ patch = false } = {}) {
       '<div class="learn-detail-section"><label>Memory</label><p>' + esc(selected.content) + '</p></div>' +
       '<div class="learn-detail-meta">' +
         '<div><span>Confidence</span><strong>' + esc(selected.confidence) + '%</strong></div>' +
-        '<div><span>Updated</span><strong>' + esc(bkkTime(selected.updatedAt)) + '</strong></div>' +
+        '<div><span>Updated</span><strong>' + esc(bkkDateTime(selected.updatedAt)) + '</strong></div>' +
         '<div><span>Scope</span><strong>' + esc(selected.scope === "global" ? "Global" : selected.scope.charAt(0).toUpperCase() + selected.scope.slice(1)) + '</strong></div>' +
         '<div><span>' + esc(selected.scope === "agent" ? "Agent" : selected.scope === "project" ? "Project" : "Level") + '</span><strong>' + esc(selected.scopeKey || "Global") + '</strong></div>' +
       '</div>' +
