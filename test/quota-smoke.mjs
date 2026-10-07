@@ -127,8 +127,13 @@ agentSocket.on("message", (raw) => {
   agentSocket.send(JSON.stringify({ requestId: message.requestId, payload }));
 });
 
-await setPolicy({ rateLimit: 2, rateWindowSeconds: 1, dailyCallQuota: 0 });
 const rateUser = await createReader("Rate Limit Test");
+const disabledCachePrime = await mcpTool(rateUser, 0);
+if (!disabledCachePrime.response.ok) {
+  throw new Error("disabled quota cache prime failed: " + disabledCachePrime.text);
+}
+
+await setPolicy({ rateLimit: 2, rateWindowSeconds: 1, dailyCallQuota: 0 });
 const before = pingCount(await recentCalls(rateUser));
 
 for (let id = 1; id <= 2; id++) {
