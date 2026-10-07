@@ -528,7 +528,6 @@ async function loadOverview({ patch = false } = {}) {
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
   dashboardRange = dashboardPeriod.range || dashboardRange;
   const periodLabel = periodDisplayLabel(dashboardRange);
-  const chartUnit = dashboardRange === "today" ? "hour" : "day";
   const m = data.usage || {};
   const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : periodLabel.toLowerCase();
   const cards = [
@@ -546,7 +545,6 @@ async function loadOverview({ patch = false } = {}) {
     cards.push(metricCard("Online agents", (data.agents?.online || 0) + " / " + (data.agents?.total || 0), "connected agents"));
     cards.push(metricCard("Active users", fmtNum(data.activeUsers ?? data.users?.enabled), "enabled users"));
   }
-  const top = Array.isArray(data.topTools) ? data.topTools : [];
   const boundedNotice = data.bounded
     ? '<div class="data-warning">' + icon("alert") + '<span>Some detailed history is unavailable. Counts cover retained history.</span></div>'
     : "";
@@ -554,20 +552,7 @@ async function loadOverview({ patch = false } = {}) {
     '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +
       '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
     boundedNotice +
-    '<div class="metric-grid">' + cards.join("") + "</div>" +
-    '<div class="layout-2 overview-layout"><section class="panel chart-panel"><div class="panel-heading"><div><div class="panel-kicker">Activity</div><h2>Usage by ' + chartUnit + '</h2></div><span class="panel-meta">Aggregate invocations</span></div>' +
-      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>" +
-    '<section class="panel"><div class="panel-heading"><div><div class="panel-kicker">Breakdown</div><h2>Top tools</h2></div></div><div class="list top-tools">' +
-      (top.length ? top.map((item, index) =>
-        '<div class="list-row"><div class="tool-rank">' + (index + 1) + '</div><div class="list-copy"><div class="primary-text">' + esc(item.tool) +
-        '</div><div class="secondary-text">' + esc(humanTool(item.tool)) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + "</strong></div>"
-      ).join("") : '<div class="empty-inline">No tool invocations in this period.</div>') +
-    "</div></section></div>" +
-    (isAdmin() ? '<section class="panel account-usage-panel"><div class="panel-heading"><div><div class="panel-kicker">Accounts</div><h2>Tool invocations by account</h2></div><span class="panel-meta">' + esc(periodLabel) + '</span></div><div class="list account-usage">' +
-      ((data.accountUsage || []).length ? data.accountUsage.map((item) =>
-        '<div class="list-row"><div class="list-copy"><div class="primary-text">' + esc(item.name || item.userId) + '</div><div class="secondary-text">' + esc(item.login || item.userId) + '</div></div><strong class="list-value">' + fmtNum(item.calls) + '</strong></div>'
-      ).join("") : '<div class="empty-inline">No account usage in this period.</div>') +
-    "</div></section>" : "");
+    '<div class="metric-grid">' + cards.join("") + "</div>";
   renderContent(liveMarkup, patch);
   document.querySelectorAll("[data-overview-range]").forEach((button) => {
     button.onclick = async () => {
