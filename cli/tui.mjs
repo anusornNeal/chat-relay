@@ -191,6 +191,13 @@ function formatDuration(ms, status) {
   return (value / 1000).toFixed(value < 10000 ? 1 : 0) + "s";
 }
 
+export function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value < 1024) return Math.round(value) + " B";
+  if (value < 1024 * 1024) return (value / 1024).toFixed(value < 10 * 1024 ? 1 : 0) + " KB";
+  return (value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0) + " MB";
+}
+
 function clock(value) {
   const date = value ? new Date(value) : new Date();
   if (Number.isNaN(date.getTime())) return "--:--:--";
@@ -239,7 +246,11 @@ export function formatTransactionRows(item, width = 110, { color = false } = {})
   const prefixWidth = terminalCellWidth(prefix);
   const continuationPrefix = " ".repeat(prefixWidth);
   const duration = formatDuration(item.durationMs, item.status);
-  const suffix = "  " + duration.padStart(8);
+  const transfer = [
+    Number.isFinite(Number(item.requestBytes)) ? "↑ " + formatBytes(item.requestBytes) : null,
+    Number.isFinite(Number(item.responseBytes)) ? "↓ " + formatBytes(item.responseBytes) : null,
+  ].filter(Boolean).join("  ");
+  const suffix = "  " + (transfer ? transfer + "  " : "") + duration.padStart(8);
   const summaryWidth = Math.max(4, usable - prefixWidth - terminalCellWidth(suffix));
   const summaryLines = wrapText(item.summary || item.action || "Tool call", summaryWidth, 3);
 
@@ -464,6 +475,7 @@ export class RemoteTui {
         summary: message.summary || humanizeToolCall({ action: message.action }),
         status: "running",
         ok: null,
+        requestBytes: Number.isFinite(Number(message.requestBytes)) ? Number(message.requestBytes) : undefined,
       });
     } else if (message.event === "tool:end") {
       const item = [...this.transactions].reverse().find((entry) => entry.requestId === message.requestId);
@@ -471,6 +483,7 @@ export class RemoteTui {
         item.status = "done";
         item.ok = message.ok !== false;
         item.durationMs = message.durationMs;
+        if (Number.isFinite(Number(message.responseBytes))) item.responseBytes = Number(message.responseBytes);
         if (message.error && message.ok === false) item.summary += ` · ${truncate(message.error, 48)}`;
       }
     } else if (message.event === "learn") {

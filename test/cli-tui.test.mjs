@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { humanizeToolCall } from "../agent/toolcall-summary.mjs";
-import { RemoteTui, formatTransactionRow, formatTransactionRows, formatTwoColumnHeader, shouldUseColor, shouldUseTui, terminalCellWidth } from "../cli/tui.mjs";
+import { RemoteTui, formatBytes, formatTransactionRow, formatTransactionRows, formatTwoColumnHeader, shouldUseColor, shouldUseTui, terminalCellWidth } from "../cli/tui.mjs";
 
 test("humanizes filesystem and terminal calls without file contents", () => {
   assert.equal(
@@ -35,6 +35,27 @@ test("humanizes filesystem and terminal calls without file contents", () => {
     }),
     "Edit cli/tui.mjs · 1 change",
   );
+});
+
+test("formats transfer sizes for transaction telemetry", () => {
+  assert.equal(formatBytes(0), "0 B");
+  assert.equal(formatBytes(842), "842 B");
+  assert.equal(formatBytes(1638), "1.6 KB");
+  assert.equal(formatBytes(2 * 1024 * 1024), "2.0 MB");
+
+  const row = formatTransactionRow({
+    at: "2026-10-07T04:15:35.000Z",
+    summary: "Run node task",
+    status: "done",
+    ok: true,
+    requestBytes: 842,
+    responseBytes: 1638,
+    durationMs: 355,
+  }, 100);
+
+  assert.match(row, /↑ 842 B/);
+  assert.match(row, /↓ 1.6 KB/);
+  assert.match(row, /355ms$/);
 });
 
 test("wraps long transaction summaries onto continuation lines", () => {

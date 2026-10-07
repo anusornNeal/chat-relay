@@ -514,7 +514,8 @@ function connect() {
       ? String(message.payload.action ?? "unknown")
       : "unknown";
     const callSummary = humanizeToolCall(message.payload);
-    emitUi("tool:start", { requestId: message.requestId, action, summary: callSummary });
+    const requestBytes = Buffer.byteLength(JSON.stringify(message), "utf8");
+    emitUi("tool:start", { requestId: message.requestId, action, summary: callSummary, requestBytes });
     let scheduleMeta = { lane: "unknown", queueWaitMs: 0, queueDepthAtStart: 0, activeAtStart: 0 };
     let handlerDurationMs = 0;
     try {
@@ -541,19 +542,22 @@ function connect() {
         ok: !(result && typeof result === "object" && result.ok === false),
       });
       if (recentCalls.length > 100) recentCalls.shift();
+      const responseMeta = {
+        agentQueueWaitMs: scheduleMeta.queueWaitMs,
+        agentHandlerMs: handlerDurationMs,
+        lane: scheduleMeta.lane,
+      };
+      const responseBytes = Buffer.byteLength(serializeResponse(message.requestId, result, responseMeta), "utf8");
       emitUi("tool:end", {
         requestId: message.requestId,
         action,
         summary: callSummary,
         ok: !(result && typeof result === "object" && result.ok === false),
         durationMs: Date.now() - startedAt,
+        responseBytes,
         ...(result && typeof result === "object" && result.ok === false && result.error ? { error: String(result.error) } : {}),
       });
-      sendSocketResponse(socket, message.requestId, result, {
-        agentQueueWaitMs: scheduleMeta.queueWaitMs,
-        agentHandlerMs: handlerDurationMs,
-        lane: scheduleMeta.lane,
-      });
+      sendSocketResponse(socket, message.requestId, result, responseMeta);
     } catch (error) {
       recentCalls.push({
         at: new Date().toISOString(),
@@ -567,18 +571,21 @@ function connect() {
         error: error instanceof Error ? error.message : "agent_error",
       });
       if (recentCalls.length > 100) recentCalls.shift();
+      const errorPayload = {
+        ok: false,
+        error: error instanceof Error ? error.message : "agent_error",
+      };
+      const responseBytes = Buffer.byteLength(serializeResponse(message.requestId, errorPayload), "utf8");
       emitUi("tool:end", {
         requestId: message.requestId,
         action,
         summary: callSummary,
         ok: false,
         durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : "agent_error",
+        responseBytes,
+        error: errorPayload.error,
       });
-      sendSocketResponse(socket, message.requestId, {
-        ok: false,
-        error: error instanceof Error ? error.message : "agent_error",
-      });
+      sendSocketResponse(socket, message.requestId, errorPayload);
     }
   });
 
