@@ -246,6 +246,7 @@ flowchart TD
 The decision boundary is deliberate:
 
 - **Chat decides semantic Learn use:** whether to prepare context, whether a correction/preference/workflow is durable enough to learn, and when a targeted raw `learn_get` is needed.
+- **Reusable user corrections are active-learning signals by default:** when a user directly corrects a reusable mistake in workflow, tool usage, coding conventions, or response behavior, Chat should call `learn_put` in the same turn without waiting for an explicit "learn". Use global scope for cross-project behavior, project scope for project-specific behavior, and skip one-off situational details.
 - **Relay performs mechanical preparation only after `learn_prepare` is explicitly called:** account isolation, project routing from explicit `project-root:<projectKey>` memories or explicit `projectKey`, preferred-agent routing, bounded reads, relevance ranking, and compaction.
 - **Ordinary tools stay hot-path clean:** `ping_agent`, file tools, terminal tools, desktop tools, and other MCP calls do not automatically read, rank, inject, or write Learn.
 - Learned hints remain advisory and never override authorization, grants, allowed roots, destructive-tool policy, capability checks, safety, or the current user request.
