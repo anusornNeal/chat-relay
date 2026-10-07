@@ -130,6 +130,7 @@ jobs:
           TEST_RELAY_URL: http://127.0.0.1:8796
           TEST_ADMIN_TOKEN: test-admin
           TEST_CALLER_TOKEN: test-caller
+          TEST_AGENT_TOKEN: test-agent
         run: npm run test:usage
 
       - name: Quota smoke
