@@ -14,7 +14,6 @@ import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
 import { LEARN_BASELINE_CONTEXT } from "./learning-policy";
-import { noteQuotaDisabled, quotaDisabledFastPathActive } from "./quota-disabled-cache";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
 
@@ -583,7 +582,6 @@ async function inspectMcpToolCall(request: Request) {
 async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Promise<Response | null> {
   const call = await inspectMcpToolCall(request);
   if (!call) return null;
-  if (quotaDisabledFastPathActive()) return null;
   let response: Response;
   try {
     response = await usageStub(env).fetch(new Request("https://usage.internal/quota/check", {
@@ -596,9 +594,6 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
   }
   if (!response.ok) return error(503, "quota_unavailable");
   const decision = await response.json<QuotaDecision>();
-  if (decision.policy?.rateLimit === 0 && decision.policy?.dailyCallQuota === 0) {
-    noteQuotaDisabled();
-  }
   if (decision.allowed) return null;
 
   const code = decision.code === "quota_exceeded" ? "quota_exceeded" : "rate_limited";
