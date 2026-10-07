@@ -643,6 +643,8 @@ let learnScopeKeyFilter = "";
 let learnSelectedMemoryId = null;
 let learnSearchQuery = "";
 let learnSortMode = "name";
+const learnTreeExpanded = { global: true, project: true, agent: true };
+const learnScopedTreeExpanded = new Set();
 
 const LEARN_KIND_ORDER = [
   "workflow",
@@ -787,9 +789,11 @@ function learnTreeScopedRows(items, scope) {
     grouped.get(key).push(item);
   }
   return [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([scopeKey, groupedItems]) => {
-    const expanded = learnScopeFilter === scope && learnScopeKeyFilter === scopeKey;
+    const treeKey = scope + "::" + scopeKey;
+    const expanded = learnScopedTreeExpanded.has(treeKey);
+    const selected = learnScopeFilter === scope && learnScopeKeyFilter === scopeKey && learnKindFilter === "all";
     return '<div class="learn-tree-project">' +
-      '<button class="learn-tree-row learn-tree-child learn-tree-project-row' + (expanded && learnKindFilter === "all" ? " selected" : "") + '" type="button" data-learn-tree-scope="' + esc(scope) + '" data-learn-tree-key="' + esc(scopeKey) + '" data-learn-tree-kind="all">' +
+      '<button class="learn-tree-row learn-tree-child learn-tree-project-row' + (selected ? " selected" : "") + '" type="button" data-learn-tree-toggle="scoped" data-learn-tree-scope="' + esc(scope) + '" data-learn-tree-key="' + esc(scopeKey) + '" data-learn-tree-kind="all">' +
         '<span class="learn-tree-chevron' + (expanded ? " open" : "") + '"></span>' + icon(expanded ? "folderOpen" : "folder") +
         '<span>' + esc(scopeKey) + '</span><em>' + esc(groupedItems.length) + '</em></button>' +
       (expanded ? '<div class="learn-tree-nested">' + learnTreeKindRows(items, scope, scopeKey) + '</div>' : "") +
@@ -817,15 +821,15 @@ function renderLearnProfile({ patch = false } = {}) {
   const treeHtml =
     '<button class="learn-tree-row' + (allActive ? " selected" : "") + '" type="button" data-learn-tree-scope="all" data-learn-tree-key="" data-learn-tree-kind="all">' +
       '<span></span>' + icon("archive") + '<strong>All memories</strong><em>' + esc(summary.total || items.length) + '</em></button>' +
-    '<button class="learn-tree-row' + (globalActive ? " selected" : "") + '" type="button" data-learn-tree-scope="global" data-learn-tree-key="" data-learn-tree-kind="all">' +
-      '<span class="learn-tree-chevron open"></span>' + icon("globe") + '<strong>Global</strong><em>' + esc(byScope.global || 0) + '</em></button>' +
-    '<div class="learn-tree-nested">' + learnTreeKindRows(items, "global") + '</div>' +
-    '<button class="learn-tree-row' + (projectsActive ? " selected" : "") + '" type="button" data-learn-tree-scope="project" data-learn-tree-key="" data-learn-tree-kind="all">' +
-      '<span class="learn-tree-chevron open"></span>' + icon("folder") + '<strong>Projects</strong><em>' + esc(byScope.project || 0) + '</em></button>' +
-    '<div class="learn-tree-nested">' + learnTreeScopedRows(items, "project") + '</div>' +
-    '<button class="learn-tree-row' + (agentsActive ? " selected" : "") + '" type="button" data-learn-tree-scope="agent" data-learn-tree-key="" data-learn-tree-kind="all">' +
-      '<span class="learn-tree-chevron' + (Number(byScope.agent || 0) > 0 ? " open" : "") + '"></span>' + icon("cpu") + '<strong>Agents</strong><em>' + esc(byScope.agent || 0) + '</em></button>' +
-    (Number(byScope.agent || 0) > 0 ? '<div class="learn-tree-nested">' + learnTreeScopedRows(items, "agent") + '</div>' : "");
+    '<button class="learn-tree-row' + (globalActive ? " selected" : "") + '" type="button" data-learn-tree-toggle="root" data-learn-tree-scope="global" data-learn-tree-key="" data-learn-tree-kind="all">' +
+      '<span class="learn-tree-chevron' + (learnTreeExpanded.global ? " open" : "") + '"></span>' + icon("globe") + '<strong>Global</strong><em>' + esc(byScope.global || 0) + '</em></button>' +
+    (learnTreeExpanded.global ? '<div class="learn-tree-nested">' + learnTreeKindRows(items, "global") + '</div>' : "") +
+    '<button class="learn-tree-row' + (projectsActive ? " selected" : "") + '" type="button" data-learn-tree-toggle="root" data-learn-tree-scope="project" data-learn-tree-key="" data-learn-tree-kind="all">' +
+      '<span class="learn-tree-chevron' + (learnTreeExpanded.project ? " open" : "") + '"></span>' + icon(learnTreeExpanded.project ? "folderOpen" : "folder") + '<strong>Projects</strong><em>' + esc(byScope.project || 0) + '</em></button>' +
+    (learnTreeExpanded.project ? '<div class="learn-tree-nested">' + learnTreeScopedRows(items, "project") + '</div>' : "") +
+    '<button class="learn-tree-row' + (agentsActive ? " selected" : "") + '" type="button" data-learn-tree-toggle="root" data-learn-tree-scope="agent" data-learn-tree-key="" data-learn-tree-kind="all">' +
+      '<span class="learn-tree-chevron' + (learnTreeExpanded.agent && Number(byScope.agent || 0) > 0 ? " open" : "") + '"></span>' + icon("cpu") + '<strong>Agents</strong><em>' + esc(byScope.agent || 0) + '</em></button>' +
+    (learnTreeExpanded.agent && Number(byScope.agent || 0) > 0 ? '<div class="learn-tree-nested">' + learnTreeScopedRows(items, "agent") + '</div>' : "");
 
   const rowsHtml = visibleItems.length ? visibleItems.map((item) => {
     const active = selected?.id === item.id ? " active" : "";
@@ -876,15 +880,14 @@ function renderLearnProfile({ patch = false } = {}) {
     : "Your reusable preferences and working patterns";
 
   renderContent(
-    '<div class="overview-toolbar learn-folder-toolbar"><span class="privacy-chip">' + icon("info") + 'Only your Learn profile</span>' +
-      '<button id="learnExport" class="button" type="button">' + icon("download") + 'Export JSON</button></div>' +
     '<section class="learn-folder-shell">' +
       '<aside class="learn-folder-tree">' +
         '<label class="learn-folder-search">' + icon("search") + '<input id="learnSearch" type="search" placeholder="Search memories" value="' + esc(learnSearchQuery) + '"><kbd>/</kbd></label>' +
         '<div class="learn-tree-section">Library</div>' + treeHtml +
       '</aside>' +
       '<div class="learn-folder-main">' +
-        '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span></div>' +
+        '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div>' +
+          '<div class="learn-folder-heading-actions"><span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
         '<div class="learn-folder-list-toolbar"><div class="learn-folder-sort">' +
           '<button class="' + (learnSortMode === "name" ? "active" : "") + '" type="button" data-learn-sort="name">Name</button>' +
           '<button class="' + (learnSortMode === "updated" ? "active" : "") + '" type="button" data-learn-sort="updated">Updated</button>' +
@@ -920,8 +923,18 @@ function renderLearnProfile({ patch = false } = {}) {
 
   document.querySelectorAll("[data-learn-tree-scope]").forEach((button) => {
     button.onclick = () => {
-      learnScopeFilter = button.dataset.learnTreeScope || "all";
-      learnScopeKeyFilter = button.dataset.learnTreeKey || "";
+      const scope = button.dataset.learnTreeScope || "all";
+      const scopeKey = button.dataset.learnTreeKey || "";
+      const toggle = button.dataset.learnTreeToggle || "";
+      if (toggle === "root" && Object.prototype.hasOwnProperty.call(learnTreeExpanded, scope)) {
+        learnTreeExpanded[scope] = !learnTreeExpanded[scope];
+      } else if (toggle === "scoped" && scopeKey) {
+        const treeKey = scope + "::" + scopeKey;
+        if (learnScopedTreeExpanded.has(treeKey)) learnScopedTreeExpanded.delete(treeKey);
+        else learnScopedTreeExpanded.add(treeKey);
+      }
+      learnScopeFilter = scope;
+      learnScopeKeyFilter = scopeKey;
       learnKindFilter = button.dataset.learnTreeKind || "all";
       learnSelectedMemoryId = null;
       renderLearnProfile({ patch: true });

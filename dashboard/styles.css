@@ -345,20 +345,18 @@ tr:last-child td{border-bottom:0}
 
 
 /* learn folder explorer */
-.learn-folder-toolbar .button{display:inline-flex;align-items:center;gap:7px}
-.learn-folder-toolbar .button .icon{width:14px;height:14px}
 .learn-folder-shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:690px;border:1px solid var(--line);border-radius:15px;background:#fff;overflow:hidden;box-shadow:0 1px 0 rgba(20,24,28,.015)}
-.learn-folder-tree{border-right:1px solid var(--line);background:#fbfcfd;padding:14px 10px;min-height:0;overflow:auto}
+.learn-folder-tree{border-right:1px solid var(--line);background:#fbfcfd;padding:12px 9px;min-height:0;overflow:auto}
 .learn-folder-search{height:35px;border:1px solid #d7dce2;border-radius:8px;background:#fff;display:flex;align-items:center;gap:7px;padding:0 9px;color:#8c96a2;margin-bottom:15px}
 .learn-folder-search .icon{width:14px;height:14px}
 .learn-folder-search input{border:0;outline:0;background:transparent;min-width:0;flex:1;font-size:12px;color:#26303a}
 .learn-folder-search input::placeholder{color:#9ba4ae}
 .learn-folder-search kbd{font-size:9px;border:1px solid #e1e4e8;border-radius:4px;padding:1px 5px;color:#9ba3ad;background:#fafafa}
 .learn-tree-section{font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:#9aa2ab;font-weight:700;padding:0 8px 6px}
-.learn-tree-row{width:100%;height:33px;border:0;border-radius:7px;background:transparent;display:grid;grid-template-columns:13px 17px minmax(0,1fr) auto;align-items:center;gap:6px;padding:0 8px;color:#46515f;text-align:left;cursor:pointer}
+.learn-tree-row{width:100%;height:31px;border:0;border-radius:7px;background:transparent;display:grid;grid-template-columns:13px 16px minmax(0,1fr) auto;align-items:center;gap:6px;padding:0 8px;color:#46515f;text-align:left;cursor:pointer;font-size:12px}
 .learn-tree-row:hover{background:#f3f5f7}
-.learn-tree-row strong{font-weight:650;color:#26303d}
-.learn-tree-row em{font-style:normal;font-size:10px;color:#929ba5}
+.learn-tree-row strong{font-size:12px;font-weight:650;color:#26303d}
+.learn-tree-row em{font-style:normal;font-size:9px;color:#929ba5}
 .learn-tree-row>.icon{width:14px;height:14px;color:#76818e}
 .learn-tree-row.selected{background:#edf3fa;box-shadow:inset 0 0 0 1px #d6e2ef;color:#203d5d}
 .learn-tree-row.selected span:nth-child(3),.learn-tree-row.selected strong{font-weight:650;color:#203d5d}
@@ -379,21 +377,26 @@ tr:last-child td{border-bottom:0}
 .learn-tree-dot.kind-work_style{background:#3b8b6b}
 .learn-tree-dot.kind-coding_style{background:#6d6577}
 .learn-tree-dot.kind-problem_solving{background:#b06b38}
-.learn-folder-main{padding:18px;min-width:0}
-.learn-folder-heading{display:flex;align-items:flex-start;justify-content:space-between;padding-bottom:14px;border-bottom:1px solid #e7eaee}
+.learn-folder-main{padding:14px 16px 16px;min-width:0}
+.learn-folder-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:9px;border-bottom:1px solid #e7eaee}
 .learn-folder-breadcrumbs{display:flex;align-items:center;gap:6px;font-size:10px;color:#8b95a1}
 .learn-folder-breadcrumbs b{font-weight:400;color:#c1c6cc}
 .learn-folder-breadcrumbs strong{color:#5b6673;font-weight:600}
-.learn-folder-heading h2{font-size:23px;letter-spacing:-.02em;margin:7px 0 2px}
-.learn-folder-heading p{margin:0;color:#7d8793;font-size:12px}
-.learn-folder-count{font-size:11px;color:#8b95a1}
+.learn-folder-heading h2{font-size:22px;letter-spacing:-.02em;margin:5px 0 1px}
+.learn-folder-heading p{margin:0;color:#7d8793;font-size:11px}
+.learn-folder-count{font-size:10px;color:#8b95a1;white-space:nowrap}
 .learn-folder-count strong{color:#5c6774}
-.learn-folder-list-toolbar{height:52px;display:flex;align-items:center;justify-content:space-between}
+.learn-folder-heading-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.learn-profile-chip{padding:5px 8px;font-size:9px;min-height:28px}
+.learn-profile-chip .icon{width:11px;height:11px}
+.learn-export-button{min-height:28px!important;padding:4px 8px!important;border-radius:8px;font-size:10px}
+.learn-export-button .icon{width:12px;height:12px}
+.learn-folder-list-toolbar{height:42px;display:flex;align-items:center;justify-content:space-between}
 .learn-folder-sort{display:inline-flex;border:1px solid #d9dee4;border-radius:8px;background:#fff;padding:3px}
 .learn-folder-sort button{height:26px;border:0;border-radius:6px;background:transparent;padding:0 10px;font-size:11px;color:#68727f;cursor:pointer}
 .learn-folder-sort button.active{background:#eef2f6;color:#202a36;font-weight:650}
 .learn-folder-list-toolbar>span{font-size:10px;color:#929aa5}
-.learn-folder-workspace{height:555px;border:1px solid var(--line);border-radius:10px;display:grid;grid-template-columns:minmax(0,1fr) 350px;overflow:hidden}
+.learn-folder-workspace{height:575px;border:1px solid var(--line);border-radius:10px;display:grid;grid-template-columns:minmax(0,1fr) minmax(390px,34%);overflow:hidden}
 .learn-folder-list{border-right:1px solid var(--line);background:#fff;overflow:auto}
 .learn-folder-list-head{height:36px;display:grid;grid-template-columns:minmax(0,1fr) 100px 90px;align-items:center;padding:0 14px;border-bottom:1px solid var(--line);font-size:9px;text-transform:uppercase;letter-spacing:.09em;color:#9aa2ad;font-weight:700;background:#fbfcfd;position:sticky;top:0;z-index:1}
 .learn-folder-row{width:100%;height:56px;border:0;border-bottom:1px solid #edf0f2;background:#fff;display:grid;grid-template-columns:27px minmax(0,1fr) 100px 90px;align-items:center;padding:0 14px;text-align:left;cursor:pointer}
@@ -436,7 +439,7 @@ tr:last-child td{border-bottom:0}
 .learn-detail-remove .icon{width:12px;height:12px}
 @media(max-width:1180px){
   .learn-folder-shell{grid-template-columns:220px minmax(0,1fr)}
-  .learn-folder-workspace{grid-template-columns:minmax(0,1fr) 320px}
+  .learn-folder-workspace{grid-template-columns:minmax(0,1fr) 380px}
 }
 @media(max-width:900px){
   .learn-folder-shell{grid-template-columns:1fr}
@@ -444,4 +447,6 @@ tr:last-child td{border-bottom:0}
   .learn-folder-workspace{grid-template-columns:1fr;height:auto;min-height:520px}
   .learn-folder-list{border-right:0;border-bottom:1px solid var(--line)}
   .learn-detail-pane{min-height:420px}
+  .learn-folder-heading{display:grid}
+  .learn-folder-heading-actions{justify-content:flex-start}
 }
