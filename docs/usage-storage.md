@@ -14,8 +14,6 @@ The Usage Durable Object stores that call with one SQLite upsert into `usage_hou
 
 This replaces the previous minute + hour + day aggregate writes. Normal usage accounting is therefore one aggregate row write per tool call. Failed calls use the same counter path and do not create raw error-history rows.
 
-Disabled quota policy checks are read-only and do not create per-user quota rows.
-
 ## Query path
 
 `/window` is the only usage-count query used by the dashboard.

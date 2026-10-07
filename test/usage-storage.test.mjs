@@ -112,17 +112,6 @@ const event = (timestamp, overrides = {}) => ({
 
 {
   const f = fixture();
-  const disabled = await f.call("/quota/check", {
-    userId: "alice",
-    defaultPolicy: { rateLimit: 0, rateWindowSeconds: 60, dailyCallQuota: 0 },
-  });
-  assert.equal(disabled.allowed, true);
-  assert.equal(f.stats.puts, 0);
-  console.log("PASS disabled quota is read-only");
-}
-
-{
-  const f = fixture();
   f.reset();
   assert.equal((await f.call("/record", event("2026-10-04T08:01:00Z"))).status, 200);
   assert.equal(f.stats.puts, 1, "one tool call must produce one usage row write in fallback storage");

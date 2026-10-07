@@ -133,9 +133,8 @@ jobs:
           TEST_AGENT_TOKEN: test-agent
         run: npm run test:usage
 
-      - name: Quota smoke
-        env: *test-env
-        run: npm run test:quota
+      - name: No-quota regression
+        run: npm run test:no-quota
 
       - name: Admin API smoke
         env: *test-env

@@ -132,7 +132,6 @@ Run against an isolated local Worker/test state:
 - `npm run test:admin-auth` - browser administrator sessions/CSRF.
 - `npm run test:dashboard` - Worker-hosted dashboard and protected admin API routing.
 - `npm run test:usage` - privacy-safe telemetry/aggregates.
-- `npm run test:quota` - durable rate/quota enforcement.
 - `npm run test:ops` - audit redaction, cleanup, aggregate preservation.
 - `npm run test:desktop` - desktop permission gates and MCP image/control contracts.
 - `npm run test:device-management` - multi-PC, rename, retire, reconnect, cross-owner isolation.
@@ -157,4 +156,4 @@ Use a dedicated reviewer user and a dedicated test PC/profile.
 
 ## Release notes draft
 
-Chat Relay public-review candidate adds OAuth-first onboarding, multi-user/multi-PC authorization, bounded filesystem responses, account-scoped structured Learn memory with advisory context bootstrap, browser admin dashboard, privacy-safe usage telemetry, durable quotas, audit/retention operations, explicit device retirement/recovery, opt-in desktop tools, complete MCP tool annotations, and domain-verification support.
+Chat Relay public-review candidate adds OAuth-first onboarding, multi-user/multi-PC authorization, bounded filesystem responses, account-scoped structured Learn memory with advisory context bootstrap, browser admin dashboard, privacy-safe usage telemetry, audit/retention operations, explicit device retirement/recovery, opt-in desktop tools, complete MCP tool annotations, and domain-verification support.

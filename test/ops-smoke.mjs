@@ -96,13 +96,6 @@ const rotated = await admin("/admin/users/rotate", "POST", { userId });
 if (!rotated.response.ok || !rotated.data.token) throw new Error("user rotation failed");
 const rotatedToken = rotated.data.token;
 
-const policy = await admin("/admin/api/limits", "POST", {
-  rateLimit: 50,
-  rateWindowSeconds: 60,
-  dailyCallQuota: 5000,
-});
-if (!policy.response.ok) throw new Error("quota policy mutation failed");
-
 const usageSocket = new WebSocket(base.replace(/^http/, "ws") + "/agent?agentId=default", {
   headers: { authorization: `Bearer ${agentToken}` },
 });
@@ -160,7 +153,6 @@ for (const expected of [
   "user.disable",
   "user.enable",
   "user.token.rotate",
-  "policy.quota.set",
 ]) {
   if (!actions.has(expected)) throw new Error("missing audit action: " + expected);
 }

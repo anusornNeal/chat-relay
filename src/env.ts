@@ -9,9 +9,6 @@ export interface Env {
   ADMIN_TOKEN?: string;
   AGENT_TOKEN?: string;
   CALLER_TOKEN?: string;
-  USER_RATE_LIMIT_PER_WINDOW?: string;
-  USER_RATE_WINDOW_SECONDS?: string;
-  USER_DAILY_CALL_QUOTA?: string;
   USAGE_RECORD_DAILY_BUDGET?: string;
   USAGE_DASHBOARD_PUBLISH_DAILY_BUDGET?: string;
   AUDIT_RETENTION_DAYS?: string;

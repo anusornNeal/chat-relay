@@ -179,7 +179,7 @@ $env:CHAT_RELAY_SOAK_ITERATIONS=100000; npm run test:soak
 
 ## Administration
 
-Administration is separate from the public MCP interface. The admin tooling manages users, agents, grants, lifecycle, quotas, audit data, and operational cleanup.
+Administration is separate from the public MCP interface. The admin tooling manages users, agents, grants, lifecycle, audit data, and operational cleanup.
 
 Operator commands are available through:
 
