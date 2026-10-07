@@ -496,35 +496,48 @@ function periodDisplayLabel(range = dashboardRange) {
   return range === "30d" ? "Last 30 days" : range === "7d" ? "Last 7 days" : "Today";
 }
 function chartMarkup(buckets = [], period = dashboardPeriod) {
+  const items = Array.isArray(buckets) ? buckets : [];
   const byDay = period?.range === "7d" || period?.range === "30d";
-  const max = Math.max(1, ...buckets.map((bucket) => Number(bucket.calls || 0)));
+  const callsByBucket = items.map((bucket) => Number(bucket.calls || 0));
+  const total = callsByBucket.reduce((sum, calls) => sum + calls, 0);
+  const max = Math.max(1, ...callsByBucket);
+  const average = items.length ? total / items.length : 0;
+  const averageHeight = Math.min(100, Math.max(0, (average / max) * 100));
+  const peakIndex = callsByBucket.indexOf(Math.max(0, ...callsByBucket));
+  const peakBucket = peakIndex >= 0 ? items[peakIndex] : null;
+  const peakLabel = peakBucket ? (byDay ? bkkDayLabel(peakBucket.from) : bkkHourMinute(peakBucket.from)) : "\u2014";
   const yTicks = [1, .75, .5, .25, 0].map((ratio) => Math.round(max * ratio));
-  const yLabels = '<div class="chart-y-axis" aria-hidden="true">' +
-    yTicks.map((value) => '<span>' + fmtNum(value) + "</span>").join("") +
-    "</div>";
-  const bars = buckets.map((bucket, index) => {
+  const yLabels = '<div class="chart-y-axis" aria-hidden="true">' + yTicks.map((value) => '<span>' + fmtNum(value) + "</span>").join("") + "</div>";
+  const bars = items.map((bucket, index) => {
     const calls = Number(bucket.calls || 0);
     const errors = Number(bucket.operationalErrors ?? bucket.errors ?? 0);
     const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
     const start = bkkHourMinute(bucket.from);
     const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
     const label = byDay ? bkkDayLabel(bucket.from) : start + "\u2013" + end;
-    const current = index === buckets.length - 1 ? " current" : "";
-    return '<div class="chart-bar' + current + '" style="--bar-height:' + height + '%" tabindex="0" role="img"' +
-      ' aria-label="' + esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
-      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations \u00b7 ' + fmtNum(errors) + ' operational errors</span><small>Aggregate usage</small></span>' +
-      '<span class="bar-fill"></span>' +
-      "</div>";
+    const current = index === items.length - 1 ? " current" : "";
+    return '<div class="chart-bar' + current + '" style="--bar-height:' + height + '%" tabindex="0" role="img" aria-label="' +
+      esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
+      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations</span><small>' + fmtNum(errors) + ' operational errors</small></span>' +
+      '<span class="bar-fill"></span>' + (errors > 0 ? '<span class="chart-error-dot" aria-hidden="true"></span>' : "") + "</div>";
   }).join("");
-  const labelEvery = byDay ? (buckets.length > 14 ? 5 : 1) : 3;
-  const xLabels = buckets.map((bucket, index) => {
-    const show = index % labelEvery === 0 || index === buckets.length - 1;
+  const labelEvery = byDay ? (items.length > 14 ? 5 : 1) : 3;
+  const xLabels = items.map((bucket, index) => {
+    const show = index % labelEvery === 0 || index === items.length - 1;
     const label = byDay ? bkkDayLabel(bucket.from) : bkkHourMinute(bucket.from);
     return '<span class="' + (show ? "" : "muted") + '">' + (show ? esc(label) : "") + "</span>";
   }).join("");
-  return '<div class="chart-frame">' + yLabels +
-    '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div><div class="chart-bars">' + bars +
-    '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
+  const intervalLabel = byDay ? "day" : "hour";
+  const stats = '<div class="chart-stats">' +
+    '<div><span>Total</span><strong>' + fmtNum(total) + '</strong></div>' +
+    '<div><span>Avg / ' + intervalLabel + '</span><strong>' + fmtNum(Math.round(average)) + '</strong></div>' +
+    '<div><span>Peak</span><strong>' + esc(peakLabel) + '</strong></div>' +
+    "</div>";
+  if (!items.length) return stats + '<div class="chart-empty">No tool activity in this period.</div>';
+  return stats + '<div class="chart-frame">' + yLabels +
+    '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div>' +
+    '<div class="chart-average-line" style="--avg-height:' + averageHeight + '%"><span>Avg ' + fmtNum(Math.round(average)) + '</span></div>' +
+    '<div class="chart-bars">' + bars + '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
 }
 
 async function loadOverview({ patch = false } = {}) {
@@ -557,11 +570,15 @@ async function loadOverview({ patch = false } = {}) {
   const boundedNotice = data.bounded
     ? '<div class="data-warning">' + icon("alert") + '<span>Some detailed history is unavailable. Counts cover retained history.</span></div>'
     : "";
+  const chartUnit = dashboardRange === "today" ? "hour" : "day";
   const liveMarkup =
     '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +
       '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
     boundedNotice +
-    '<div class="metric-grid">' + cards.join("") + "</div>";
+    '<div class="metric-grid">' + cards.join("") + "</div>" +
+    '<section class="panel overview-chart-panel"><div class="overview-chart-heading"><div><div class="panel-kicker">Activity</div><h2>Tool activity</h2><p>Invocations by ' + chartUnit + ' for ' + esc(periodLabel.toLowerCase()) + '.</p></div>' +
+      '<div class="chart-legend"><span class="legend-invocations"><i></i>Invocations</span><span class="legend-errors"><i></i>Operational error</span></div></div>' +
+      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>";
   renderContent(liveMarkup, patch);
   document.querySelectorAll("[data-overview-range]").forEach((button) => {
     button.onclick = async () => {
