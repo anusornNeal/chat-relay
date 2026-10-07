@@ -58,6 +58,15 @@ const ICONS = {
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v5M14 11v5"/>',
+  folder: '<path d="M3 6.5h7l2 2h9v10H3z"/><path d="M3 6.5v-2h7l2 2"/>',
+  folderOpen: '<path d="M3 7h7l2 2h9l-2.5 9H3z"/><path d="M3 7V5h7l2 2"/>',
+  archive: '<path d="M4 7h16M5 7l1 12h12l1-12M9 11h6M6 4h12v3H6z"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/>',
+  cpu: '<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  thumbUp: '<path d="M7 10v10H3V10h4Zm0 8h10.5a2 2 0 0 0 2-1.6l1-5A2 2 0 0 0 18.5 9H14l.7-3.2A2.2 2.2 0 0 0 12.6 3L7 10v8Z"/>',
+  thumbDown: '<path d="M7 14V4H3v10h4Zm0-8h10.5a2 2 0 0 1 2 1.6l1 5a2 2 0 0 1-2 2.4H14l.7 3.2a2.2 2.2 0 0 1-2.1 2.8L7 14V6Z"/>',
 };
 function icon(name, cls = "") {
   return '<svg class="icon ' + cls + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' + (ICONS[name] || ICONS.info) + "</svg>";
@@ -613,6 +622,10 @@ async function loadUsage({ patch = false } = {}) {
 let learnProfileSnapshot = null;
 let learnKindFilter = "all";
 let learnScopeFilter = "all";
+let learnScopeKeyFilter = "";
+let learnSelectedMemoryId = null;
+let learnSearchQuery = "";
+let learnSortMode = "name";
 
 const LEARN_KIND_ORDER = [
   "workflow",
@@ -626,7 +639,6 @@ const LEARN_KIND_ORDER = [
   "preference",
   "correction",
 ];
-const LEARN_SCOPE_ORDER = ["global", "project", "agent"];
 
 function learnKindLabel(kind) {
   return ({
@@ -650,7 +662,7 @@ function learnKindClass(kind) {
 function learnScopeLabel(item) {
   const scope = String(item?.scope || "");
   if (scope === "global") return "Global";
-  return scope.charAt(0).toUpperCase() + scope.slice(1) + (item?.scopeKey ? " · " + item.scopeKey : "");
+  return scope.charAt(0).toUpperCase() + scope.slice(1) + (item?.scopeKey ? " Â· " + item.scopeKey : "");
 }
 
 function learnSummary(items) {
@@ -661,38 +673,6 @@ function learnSummary(items) {
     byKind[item.kind] = (byKind[item.kind] || 0) + 1;
   }
   return { total: items.length, byScope, byKind };
-}
-
-function sortLearnItems(items) {
-  return [...items].sort((a, b) => {
-    const kindA = LEARN_KIND_ORDER.indexOf(a.kind);
-    const kindB = LEARN_KIND_ORDER.indexOf(b.kind);
-    const normalizedKindA = kindA < 0 ? LEARN_KIND_ORDER.length : kindA;
-    const normalizedKindB = kindB < 0 ? LEARN_KIND_ORDER.length : kindB;
-    if (normalizedKindA !== normalizedKindB) return normalizedKindA - normalizedKindB;
-
-    const scopeA = LEARN_SCOPE_ORDER.indexOf(a.scope);
-    const scopeB = LEARN_SCOPE_ORDER.indexOf(b.scope);
-    if (scopeA !== scopeB) return scopeA - scopeB;
-
-    const updated = String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
-    return updated || String(a.key || "").localeCompare(String(b.key || ""));
-  });
-}
-
-function learnScopeItems(items) {
-  return learnScopeFilter === "all"
-    ? items
-    : items.filter((item) => item.scope === learnScopeFilter);
-}
-
-function learnScopeMetric(label, value, meta, scope) {
-  const active = learnScopeFilter === scope ? " active" : "";
-  return '<button class="metric learn-scope-filter' + active + '" type="button" data-learn-scope="' + esc(scope) + '" aria-pressed="' + (learnScopeFilter === scope ? "true" : "false") + '">' +
-    '<div class="metric-label">' + esc(label) + '</div>' +
-    '<div class="metric-value">' + esc(value) + '</div>' +
-    '<div class="metric-meta">' + esc(meta) + '</div>' +
-  '</button>';
 }
 
 function exportLearnProfile() {
@@ -724,7 +704,7 @@ function applyLearnMutation(result) {
     summary: learnSummary(items),
   };
 
-  const scopedItems = learnScopeItems(items);
+  const scopedItems = learnItemsForScope(items, learnScopeFilter, learnScopeKeyFilter);
   if (learnKindFilter !== "all" && !scopedItems.some((item) => item.kind === learnKindFilter)) {
     learnKindFilter = "all";
   }
@@ -736,81 +716,168 @@ async function mutateLearn(path, body) {
   renderLearnProfile({ patch: true });
 }
 
+function learnCountByKind(items) {
+  const counts = {};
+  for (const item of items) counts[item.kind] = (counts[item.kind] || 0) + 1;
+  return counts;
+}
+
+function learnItemsForScope(items, scope, scopeKey = "") {
+  if (scope === "all") return items;
+  return items.filter((item) =>
+    item.scope === scope && (!scopeKey || String(item.scopeKey || "") === scopeKey)
+  );
+}
+
+function learnVisibleItems(items) {
+  let visible = learnItemsForScope(items, learnScopeFilter, learnScopeKeyFilter);
+  if (learnKindFilter !== "all") visible = visible.filter((item) => item.kind === learnKindFilter);
+  const query = learnSearchQuery.trim().toLowerCase();
+  if (query) {
+    visible = visible.filter((item) =>
+      [item.key, item.content, item.kind, item.scope, item.scopeKey]
+        .some((value) => String(value || "").toLowerCase().includes(query))
+    );
+  }
+  return [...visible].sort((a, b) => {
+    if (learnSortMode === "updated") {
+      return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+    }
+    if (learnSortMode === "confidence") {
+      return Number(b.confidence || 0) - Number(a.confidence || 0) ||
+        String(a.key || "").localeCompare(String(b.key || ""));
+    }
+    return String(a.key || "").localeCompare(String(b.key || ""));
+  });
+}
+
+function learnTreeKindRows(items, scope, scopeKey = "") {
+  const counts = learnCountByKind(learnItemsForScope(items, scope, scopeKey));
+  return LEARN_KIND_ORDER.filter((kind) => Number(counts[kind]) > 0).map((kind) => {
+    const active = learnScopeFilter === scope &&
+      String(learnScopeKeyFilter || "") === String(scopeKey || "") &&
+      learnKindFilter === kind;
+    return '<button class="learn-tree-row learn-tree-child' + (active ? " selected" : "") + '" type="button" data-learn-tree-scope="' + esc(scope) + '" data-learn-tree-key="' + esc(scopeKey) + '" data-learn-tree-kind="' + esc(kind) + '">' +
+      '<span></span><i class="learn-tree-dot ' + esc(learnKindClass(kind)) + '"></i><span>' + esc(learnKindLabel(kind)) + '</span><em>' + esc(counts[kind]) + '</em></button>';
+  }).join("");
+}
+
+function learnTreeScopedRows(items, scope) {
+  const grouped = new Map();
+  for (const item of items.filter((entry) => entry.scope === scope)) {
+    const key = String(item.scopeKey || (scope === "project" ? "Unscoped project" : "Unscoped agent"));
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(item);
+  }
+  return [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([scopeKey, groupedItems]) => {
+    const expanded = learnScopeFilter === scope && learnScopeKeyFilter === scopeKey;
+    return '<div class="learn-tree-project">' +
+      '<button class="learn-tree-row learn-tree-child learn-tree-project-row' + (expanded && learnKindFilter === "all" ? " selected" : "") + '" type="button" data-learn-tree-scope="' + esc(scope) + '" data-learn-tree-key="' + esc(scopeKey) + '" data-learn-tree-kind="all">' +
+        '<span class="learn-tree-chevron' + (expanded ? " open" : "") + '"></span>' + icon(expanded ? "folderOpen" : "folder") +
+        '<span>' + esc(scopeKey) + '</span><em>' + esc(groupedItems.length) + '</em></button>' +
+      (expanded ? '<div class="learn-tree-nested">' + learnTreeKindRows(items, scope, scopeKey) + '</div>' : "") +
+    '</div>';
+  }).join("");
+}
+
 function renderLearnProfile({ patch = false } = {}) {
   const data = learnProfileSnapshot || {};
   const items = Array.isArray(data.items) ? data.items : [];
   const summary = data.summary || learnSummary(items);
   const byScope = summary.byScope || {};
+  const visibleItems = learnVisibleItems(items);
 
-  const scopedItems = learnScopeItems(items);
-  const scopedSummary = learnSummary(scopedItems);
-  const byKind = scopedSummary.byKind || {};
-  const visibleItems = sortLearnItems(
-    learnKindFilter === "all"
-      ? scopedItems
-      : scopedItems.filter((item) => item.kind === learnKindFilter),
-  );
+  if (!visibleItems.some((item) => item.id === learnSelectedMemoryId)) {
+    learnSelectedMemoryId = visibleItems[0]?.id || null;
+  }
+  const selected = visibleItems.find((item) => item.id === learnSelectedMemoryId) || null;
 
-  const categoryButtons = [
-    '<button class="learn-category-filter' + (learnKindFilter === "all" ? " active" : "") + '" type="button" data-learn-kind="all">' +
-      '<span>All types</span><strong>' + esc(scopedItems.length) + '</strong></button>',
-    ...LEARN_KIND_ORDER.filter((kind) => Number(byKind[kind]) > 0).map((kind) =>
-      '<button class="learn-category-filter ' + esc(learnKindClass(kind)) + (learnKindFilter === kind ? " active" : "") + '" type="button" data-learn-kind="' + esc(kind) + '">' +
-        '<span>' + esc(learnKindLabel(kind)) + '</span><strong>' + esc(byKind[kind]) + '</strong></button>'
-    ),
-  ].join("");
+  const allActive = learnScopeFilter === "all" && learnKindFilter === "all";
+  const globalActive = learnScopeFilter === "global" && !learnScopeKeyFilter && learnKindFilter === "all";
+  const projectsActive = learnScopeFilter === "project" && !learnScopeKeyFilter && learnKindFilter === "all";
+  const agentsActive = learnScopeFilter === "agent" && !learnScopeKeyFilter && learnKindFilter === "all";
 
-  const memoryCards = visibleItems.length ? visibleItems.map((item) => {
-    const kindClass = learnKindClass(item.kind);
-    const positive = Number(item.positiveFeedback || 0);
-    const negative = Number(item.negativeFeedback || 0);
+  const treeHtml =
+    '<button class="learn-tree-row' + (allActive ? " selected" : "") + '" type="button" data-learn-tree-scope="all" data-learn-tree-key="" data-learn-tree-kind="all">' +
+      '<span></span>' + icon("archive") + '<strong>All memories</strong><em>' + esc(summary.total || items.length) + '</em></button>' +
+    '<button class="learn-tree-row' + (globalActive ? " selected" : "") + '" type="button" data-learn-tree-scope="global" data-learn-tree-key="" data-learn-tree-kind="all">' +
+      '<span class="learn-tree-chevron open"></span>' + icon("globe") + '<strong>Global</strong><em>' + esc(byScope.global || 0) + '</em></button>' +
+    '<div class="learn-tree-nested">' + learnTreeKindRows(items, "global") + '</div>' +
+    '<button class="learn-tree-row' + (projectsActive ? " selected" : "") + '" type="button" data-learn-tree-scope="project" data-learn-tree-key="" data-learn-tree-kind="all">' +
+      '<span class="learn-tree-chevron open"></span>' + icon("folder") + '<strong>Projects</strong><em>' + esc(byScope.project || 0) + '</em></button>' +
+    '<div class="learn-tree-nested">' + learnTreeScopedRows(items, "project") + '</div>' +
+    '<button class="learn-tree-row' + (agentsActive ? " selected" : "") + '" type="button" data-learn-tree-scope="agent" data-learn-tree-key="" data-learn-tree-kind="all">' +
+      '<span class="learn-tree-chevron' + (Number(byScope.agent || 0) > 0 ? " open" : "") + '"></span>' + icon("cpu") + '<strong>Agents</strong><em>' + esc(byScope.agent || 0) + '</em></button>' +
+    (Number(byScope.agent || 0) > 0 ? '<div class="learn-tree-nested">' + learnTreeScopedRows(items, "agent") + '</div>' : "");
+
+  const rowsHtml = visibleItems.length ? visibleItems.map((item) => {
+    const active = selected?.id === item.id ? " active" : "";
+    return '<button class="learn-folder-row' + active + '" type="button" data-learn-memory="' + esc(item.id) + '" data-live-key="learn-row-' + esc(item.id) + '">' +
+      '<span class="learn-folder-file">' + icon("folder") + '</span>' +
+      '<span class="learn-folder-copy"><strong>' + esc(item.key) + '</strong><small>' + esc(learnKindLabel(item.kind)) + '</small></span>' +
+      '<span class="learn-folder-confidence">' + esc(item.confidence) + '%</span>' +
+      '<span class="learn-folder-updated">' + esc(bkkHourMinute(item.updatedAt)) + '</span>' +
+    '</button>';
+  }).join("") : '<div class="learn-folder-empty">' + icon("search") + '<strong>No memories found</strong><span>Try another folder or search term.</span></div>';
+
+  let detailHtml = '<div class="learn-detail-empty">' + icon("info") + '<strong>Select a memory</strong><span>Choose a row to inspect its details.</span></div>';
+  if (selected) {
+    const positive = Number(selected.positiveFeedback || 0);
+    const negative = Number(selected.negativeFeedback || 0);
     const positiveChecked = positive > negative ? " checked" : "";
     const negativeChecked = negative > positive ? " checked" : "";
-    const radioName = "learn-feedback-" + String(item.id).replace(/[^a-z0-9_-]/gi, "-");
+    const radioName = "learn-feedback-detail-" + String(selected.id).replace(/[^a-z0-9_-]/gi, "-");
+    const scopePath = selected.scope === "global" ? "Global" : learnScopeLabel(selected);
+    detailHtml =
+      '<div class="learn-detail-top"><span class="learn-type-pill ' + esc(learnKindClass(selected.kind)) + '"><i class="learn-tree-dot ' + esc(learnKindClass(selected.kind)) + '"></i>' + esc(learnKindLabel(selected.kind)) + '</span>' +
+        '<button class="learn-detail-more" type="button" aria-label="More memory actions">' + icon("more") + '</button></div>' +
+      '<h3>' + esc(selected.key) + '</h3>' +
+      '<div class="learn-detail-path">' + icon("folder") + esc(scopePath) + ' / ' + esc(learnKindLabel(selected.kind)) + '</div>' +
+      '<div class="learn-detail-rule"></div>' +
+      '<div class="learn-detail-section"><label>Memory</label><p>' + esc(selected.content) + '</p></div>' +
+      '<div class="learn-detail-meta">' +
+        '<div><span>Confidence</span><strong>' + esc(selected.confidence) + '%</strong></div>' +
+        '<div><span>Updated</span><strong>' + esc(bkkTime(selected.updatedAt)) + '</strong></div>' +
+        '<div><span>Scope</span><strong>' + esc(selected.scope === "global" ? "Global" : selected.scope.charAt(0).toUpperCase() + selected.scope.slice(1)) + '</strong></div>' +
+        '<div><span>' + esc(selected.scope === "agent" ? "Agent" : selected.scope === "project" ? "Project" : "Level") + '</span><strong>' + esc(selected.scopeKey || "Global") + '</strong></div>' +
+      '</div>' +
+      '<div class="learn-detail-rule"></div>' +
+      '<div class="learn-detail-section"><label>Feedback</label><div class="learn-detail-feedback" role="radiogroup" aria-label="Feedback for ' + esc(selected.key) + '">' +
+        '<label class="learn-detail-radio useful' + (positiveChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="positive" data-learn-feedback="positive" data-memory-id="' + esc(selected.id) + '"' + positiveChecked + '>' + icon("thumbUp") + '<span>Useful</span></label>' +
+        '<label class="learn-detail-radio not-useful' + (negativeChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="negative" data-learn-feedback="negative" data-memory-id="' + esc(selected.id) + '"' + negativeChecked + '>' + icon("thumbDown") + '<span>Not useful</span></label>' +
+      '</div></div>' +
+      '<div class="learn-detail-footer"><button class="button danger learn-detail-remove" type="button" data-learn-delete="' + esc(selected.id) + '">' + icon("trash") + 'Remove memory</button></div>';
+  }
 
-    return '<article class="learn-memory ' + esc(kindClass) + '" data-kind="' + esc(item.kind) + '" data-live-key="learn-' + esc(item.id) + '">' +
-      '<div class="learn-memory-head">' +
-        '<div><span class="learn-kind-badge ' + esc(kindClass) + '">' + esc(learnKindLabel(item.kind)) + '</span>' +
-        '<h3>' + esc(item.key) + '</h3></div>' +
-        '<span class="soft-pill">' + esc(learnScopeLabel(item)) + '</span>' +
-      '</div>' +
-      '<p>' + esc(item.content) + '</p>' +
-      '<div class="learn-memory-meta">' +
-        '<span>Confidence ' + esc(item.confidence) + '%</span>' +
-        '<span>Updated ' + esc(bkkTime(item.updatedAt)) + '</span>' +
-      '</div>' +
-      '<div class="learn-actions">' +
-        '<div class="learn-feedback-options" role="radiogroup" aria-label="Feedback for ' + esc(item.key) + '">' +
-          '<label class="learn-radio useful"><input type="radio" name="' + esc(radioName) + '" value="positive" data-learn-feedback="positive" data-memory-id="' + esc(item.id) + '"' + positiveChecked + '><span>👍 Useful</span></label>' +
-          '<label class="learn-radio not-useful"><input type="radio" name="' + esc(radioName) + '" value="negative" data-learn-feedback="negative" data-memory-id="' + esc(item.id) + '"' + negativeChecked + '><span>👎 Not useful</span></label>' +
-        '</div>' +
-        '<button class="button learn-small danger" type="button" data-learn-delete="' + esc(item.id) + '" title="Remove this memory">🗑 Remove</button>' +
-      '</div>' +
-    '</article>';
-  }).join("") : '<div class="table-empty learn-empty">' + icon("info") + '<strong>No memories in this filter</strong><span>Choose another level or category to see learned preferences and working patterns.</span></div>';
-
-  const scopeLabel = ({
-    all: "All levels",
-    global: "Global",
-    project: "Projects",
-    agent: "Agents",
-  })[learnScopeFilter] || "All levels";
-  const typeLabel = learnKindFilter === "all" ? "All types" : learnKindLabel(learnKindFilter);
+  const scopeTitle = learnScopeFilter === "all"
+    ? "All memories"
+    : learnScopeKeyFilter || ({ global: "Global", project: "Projects", agent: "Agents" })[learnScopeFilter] || "Learn";
+  const typeTitle = learnKindFilter === "all" ? "" : learnKindLabel(learnKindFilter);
+  const heading = typeTitle || scopeTitle;
+  const subtitle = typeTitle
+    ? (learnScopeKeyFilter ? "Reusable " + typeTitle.toLowerCase() + " patterns for " + learnScopeKeyFilter : typeTitle + " memories")
+    : "Your reusable preferences and working patterns";
 
   renderContent(
-    '<div class="overview-toolbar"><span class="privacy-chip">' + icon("info") + 'Only your Learn profile</span>' +
-      '<button id="learnExport" class="button" type="button">Export JSON</button></div>' +
-    '<div class="metric-grid learn-metrics">' +
-      learnScopeMetric("Learned memories", fmtNum(summary.total || items.length), "all levels", "all") +
-      learnScopeMetric("Global", fmtNum(byScope.global), "shared across apps", "global") +
-      learnScopeMetric("Projects", fmtNum(byScope.project), "project-specific", "project") +
-      learnScopeMetric("Agents", fmtNum(byScope.agent), "agent-specific", "agent") +
-    '</div>' +
-    '<section class="panel learn-profile-panel">' +
-      '<div class="panel-heading"><div><div class="panel-kicker">Categories</div><h2>What Chat Relay learned</h2></div><span class="panel-meta">Loaded only when you open this page</span></div>' +
-      '<div class="learn-category-bar">' + categoryButtons + '</div>' +
-      '<div class="learn-results-meta"><strong>' + esc(scopeLabel + " · " + typeLabel) + '</strong><span>Sorted by type · ' + esc(visibleItems.length) + ' memories</span></div>' +
-      '<div class="learn-memory-grid">' + memoryCards + '</div>' +
+    '<div class="overview-toolbar learn-folder-toolbar"><span class="privacy-chip">' + icon("info") + 'Only your Learn profile</span>' +
+      '<button id="learnExport" class="button" type="button">' + icon("download") + 'Export JSON</button></div>' +
+    '<section class="learn-folder-shell">' +
+      '<aside class="learn-folder-tree">' +
+        '<label class="learn-folder-search">' + icon("search") + '<input id="learnSearch" type="search" placeholder="Search memories" value="' + esc(learnSearchQuery) + '"><kbd>/</kbd></label>' +
+        '<div class="learn-tree-section">Library</div>' + treeHtml +
+      '</aside>' +
+      '<div class="learn-folder-main">' +
+        '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span></div>' +
+        '<div class="learn-folder-list-toolbar"><div class="learn-folder-sort">' +
+          '<button class="' + (learnSortMode === "name" ? "active" : "") + '" type="button" data-learn-sort="name">Name</button>' +
+          '<button class="' + (learnSortMode === "updated" ? "active" : "") + '" type="button" data-learn-sort="updated">Updated</button>' +
+          '<button class="' + (learnSortMode === "confidence" ? "active" : "") + '" type="button" data-learn-sort="confidence">Confidence</button>' +
+        '</div><span>Folder view</span></div>' +
+        '<div class="learn-folder-workspace">' +
+          '<div class="learn-folder-list"><div class="learn-folder-list-head"><span>Name</span><span>Confidence</span><span>Updated</span></div>' + rowsHtml + '</div>' +
+          '<aside class="learn-detail-pane">' + detailHtml + '</aside>' +
+        '</div>' +
+      '</div>' +
     '</section>',
     patch,
   );
@@ -818,20 +885,42 @@ function renderLearnProfile({ patch = false } = {}) {
   const exportButton = $("learnExport");
   if (exportButton) exportButton.onclick = exportLearnProfile;
 
-  document.querySelectorAll("[data-learn-scope]").forEach((button) => {
+  const searchInput = $("learnSearch");
+  if (searchInput) {
+    searchInput.oninput = () => {
+      learnSearchQuery = searchInput.value;
+      renderLearnProfile({ patch: true });
+      requestAnimationFrame(() => {
+        const next = $("learnSearch");
+        if (next) {
+          next.focus();
+          const pos = next.value.length;
+          next.setSelectionRange?.(pos, pos);
+        }
+      });
+    };
+  }
+
+  document.querySelectorAll("[data-learn-tree-scope]").forEach((button) => {
     button.onclick = () => {
-      learnScopeFilter = button.dataset.learnScope || "all";
-      const nextScopedItems = learnScopeItems(items);
-      if (learnKindFilter !== "all" && !nextScopedItems.some((item) => item.kind === learnKindFilter)) {
-        learnKindFilter = "all";
-      }
+      learnScopeFilter = button.dataset.learnTreeScope || "all";
+      learnScopeKeyFilter = button.dataset.learnTreeKey || "";
+      learnKindFilter = button.dataset.learnTreeKind || "all";
+      learnSelectedMemoryId = null;
       renderLearnProfile({ patch: true });
     };
   });
 
-  document.querySelectorAll("[data-learn-kind]").forEach((button) => {
+  document.querySelectorAll("[data-learn-sort]").forEach((button) => {
     button.onclick = () => {
-      learnKindFilter = button.dataset.learnKind || "all";
+      learnSortMode = button.dataset.learnSort || "name";
+      renderLearnProfile({ patch: true });
+    };
+  });
+
+  document.querySelectorAll("[data-learn-memory]").forEach((button) => {
+    button.onclick = () => {
+      learnSelectedMemoryId = button.dataset.learnMemory || null;
       renderLearnProfile({ patch: true });
     };
   });
@@ -850,6 +939,7 @@ function renderLearnProfile({ patch = false } = {}) {
     button.onclick = () => mutateLearn("/admin/api/learn/delete", { id: button.dataset.learnDelete });
   });
 }
+
 
 async function loadLearn({ patch = false } = {}) {
   setHeader("My Learn", "Your adaptive preferences and reusable working patterns");
