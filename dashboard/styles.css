@@ -345,10 +345,12 @@ tr:last-child td{border-bottom:0}
 
 
 /* learn folder explorer */
-.main:has(.learn-folder-shell){height:100vh;overflow:hidden;display:flex;flex-direction:column;padding-bottom:27px}
+html:has(.learn-folder-shell),body:has(.learn-folder-shell){width:100%;height:100%;overflow:hidden}
+.app-shell:has(.learn-folder-shell){width:100vw;height:100vh;min-height:0;overflow:hidden}
+.main:has(.learn-folder-shell){width:100%;height:100vh;min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;padding-bottom:27px}
 .main:has(.learn-folder-shell) .topbar{flex:0 0 auto}
 .learn-folder-shell{display:grid;grid-template-columns:250px minmax(0,1fr);width:100%;max-width:100%;min-height:0;flex:1;border:1px solid var(--line);border-radius:15px;background:#fff;overflow:hidden;box-shadow:0 1px 0 rgba(20,24,28,.015)}
-.learn-folder-tree{border-right:1px solid var(--line);background:#fbfcfd;padding:12px 9px;min-width:0;min-height:0;overflow:auto}
+.learn-folder-tree{border-right:1px solid var(--line);background:#fbfcfd;padding:12px 9px;min-width:0;min-height:0;overflow:hidden}
 .learn-folder-search{height:35px;border:1px solid #d7dce2;border-radius:8px;background:#fff;display:flex;align-items:center;gap:7px;padding:0 9px;color:#8c96a2;margin-bottom:15px}
 .learn-folder-search .icon{width:14px;height:14px}
 .learn-folder-search input{border:0;outline:0;background:transparent;min-width:0;flex:1;font-size:12px;color:#26303a}
@@ -399,7 +401,7 @@ tr:last-child td{border-bottom:0}
 .learn-folder-sort button.active{background:#eef2f6;color:#202a36;font-weight:650}
 .learn-folder-list-toolbar>span{font-size:10px;color:#929aa5}
 .learn-folder-workspace{flex:1;min-height:0;border:1px solid var(--line);border-radius:10px;display:grid;grid-template-columns:minmax(0,1fr) minmax(390px,34%);overflow:hidden}
-.learn-folder-list{border-right:1px solid var(--line);background:#fff;overflow:auto}
+.learn-folder-list{border-right:1px solid var(--line);background:#fff;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
 .learn-folder-list-head{height:36px;display:grid;grid-template-columns:minmax(0,1fr) 100px 90px;align-items:center;padding:0 14px;border-bottom:1px solid var(--line);font-size:9px;text-transform:uppercase;letter-spacing:.09em;color:#9aa2ad;font-weight:700;background:#fbfcfd;position:sticky;top:0;z-index:1}
 .learn-folder-row{width:100%;height:56px;border:0;border-bottom:1px solid #edf0f2;background:#fff;display:grid;grid-template-columns:27px minmax(0,1fr) 100px 90px;align-items:center;padding:0 14px;text-align:left;cursor:pointer}
 .learn-folder-row:hover{background:#fafbfc}
@@ -413,7 +415,7 @@ tr:last-child td{border-bottom:0}
 .learn-folder-empty,.learn-detail-empty{display:grid;place-items:center;align-content:center;gap:6px;color:#8d96a1;text-align:center;min-height:180px;font-size:11px}
 .learn-folder-empty .icon,.learn-detail-empty .icon{width:18px;height:18px}
 .learn-folder-empty strong,.learn-detail-empty strong{color:#66717d;font-size:12px}
-.learn-detail-pane{display:flex;flex-direction:column;background:#fcfcfd;min-width:0;overflow:auto}
+.learn-detail-pane{display:flex;flex-direction:column;background:#fcfcfd;min-width:0;min-height:0;overflow:hidden}
 .learn-detail-top{display:flex;align-items:center;justify-content:space-between;padding:18px 18px 7px}
 .learn-type-pill{height:23px;border:1px solid #e0e4e8;border-radius:999px;padding:0 8px;display:inline-flex;align-items:center;gap:6px;font-size:9px;text-transform:uppercase;letter-spacing:.08em;font-weight:700;color:#596572;background:#fff}
 .learn-detail-more{width:28px;height:28px;border:0;background:transparent;color:#89929c;cursor:pointer}
