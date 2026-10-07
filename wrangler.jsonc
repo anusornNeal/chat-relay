@@ -3,6 +3,19 @@
   "name": "chat-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-29",
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 0.1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.02
+    },
+    "issues": {
+      "enabled": true
+    }
+  },
   "vars": {
     "GOOGLE_CLIENT_ID": "56931025855-dqcdmdib96ac7jqs5k5gek287plsblqf.apps.googleusercontent.com",
     "PUBLIC_BASE_URL": "https://chat-relay.anusorn-hank.workers.dev"
