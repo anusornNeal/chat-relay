@@ -7,6 +7,7 @@ import { Learning } from "./learning";
 import { AGENT_PROTOCOL_VERSION, agentConnectionGeneration, agentLiveness, appendAgentConnectionEvent, emptyAgentDiagnostics, isAuthoritativeAgentSocket, nextAgentConnectionGeneration, normalizeAgentHealth, normalizeAgentHello, normalizeAgentLifecycle, normalizeAgentText, readAgentAttachment, recordAgentProcessEpoch, selectLatestAgentSocket, writeAgentAttachment, type AgentConnectionEventType, type AgentDiagnostics, type AgentSocketAttachment } from "./agent-state";
 import workerApp, { publishDashboard } from "./worker-app";
 import { MAX_BYTES, error, hasPayload } from "./http-utils";
+import { relayResultHeaders } from "./relay-result";
 import type { Env } from "./env";
 
 export { Audit, DashboardHub, Registry, Usage, Learning };
@@ -596,7 +597,7 @@ export class Relay extends DurableObject {
     const agentQueueWaitMs = Math.max(0, Number(agentMeta.agentQueueWaitMs) || 0);
     const agentHandlerMs = Math.max(0, Number(agentMeta.agentHandlerMs) || 0);
     const transportMs = Math.max(0, relayRoundTripMs - agentQueueWaitMs - agentHandlerMs);
-    pending.resolve(Response.json({
+    const responseBody = {
       requestId,
       payload: message.payload,
       meta: {
@@ -606,6 +607,14 @@ export class Relay extends DurableObject {
         agentHandlerMs,
         lane: normalizeAgentText(agentMeta.lane, 32),
       },
+    };
+    pending.resolve(new Response(JSON.stringify(responseBody), {
+      headers: relayResultHeaders(message.payload, {
+        relayRoundTripMs,
+        transportMs,
+        agentQueueWaitMs,
+        agentHandlerMs,
+      }),
     }));
   }
 

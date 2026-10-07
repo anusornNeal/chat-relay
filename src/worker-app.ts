@@ -10,6 +10,7 @@ import { DailyOptionalBudget } from "./usage-budget.mjs";
 import { AGENT_PROTOCOL_VERSION } from "./agent-state";
 import { handleStatusRequest } from "./status-route.mjs";
 import { error, hasPayload, readJson } from "./http-utils";
+import { readRelayResultMetadata } from "./relay-result";
 import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
@@ -269,15 +270,6 @@ type SafeTiming = {
   transportMs?: number;
   agentQueueWaitMs?: number;
   agentHandlerMs?: number;
-  desktopQueueWaitMs?: number;
-  desktopInputMs?: number;
-  desktopExplicitWaitMs?: number;
-  desktopSettleMs?: number;
-  desktopCaptureMs?: number;
-  desktopEncodeMs?: number;
-  desktopWorkerMs?: number;
-  desktopManagerMs?: number;
-  desktopTotalMs?: number;
 };
 
 function safeTimingMs(value: unknown): number | undefined {
@@ -550,6 +542,28 @@ function grantAllows(scopes: string[], required: Scope) {
   return scopes.includes("*") || scopes.includes(required);
 }
 
+const ACTIVITY_ID_CACHE_MAX = 512;
+const activityIdCache = new Map<string, string>();
+
+async function activityIdForSource(source: string | undefined): Promise<string | undefined> {
+  if (!source) return undefined;
+  const cached = activityIdCache.get(source);
+  if (cached) {
+    activityIdCache.delete(source);
+    activityIdCache.set(source, cached);
+    return cached;
+  }
+
+  const activityId = "act_" + (await hashToken("chat-relay-activity:" + source)).slice(0, 20);
+  activityIdCache.set(source, activityId);
+  while (activityIdCache.size > ACTIVITY_ID_CACHE_MAX) {
+    const oldest = activityIdCache.keys().next().value;
+    if (oldest === undefined) break;
+    activityIdCache.delete(oldest);
+  }
+  return activityId;
+}
+
 async function activityContextForRequest(request: Request): Promise<ToolActivityContext> {
   const activitySource = [
     "mcp-session-id",
@@ -558,10 +572,7 @@ async function activityContextForRequest(request: Request): Promise<ToolActivity
     "x-chatgpt-conversation-id",
   ].map((name) => request.headers.get(name)?.trim()).find(Boolean);
 
-  const activityId = activitySource
-    ? "act_" + (await hashToken("chat-relay-activity:" + activitySource)).slice(0, 20)
-    : undefined;
-
+  const activityId = await activityIdForSource(activitySource);
   return {
     toolCallId: "tc_" + crypto.randomUUID().replace(/-/g, ""),
     ...(activityId ? { activityId } : {}),
@@ -595,28 +606,34 @@ async function flushUsageEvents(env: Env) {
   }
 }
 
-async function recordUsage(
+function recordUsage(
   env: Env,
   event: UsageEvent,
   executionCtx?: ExecutionContext,
-): Promise<void> {
-  const budget = usageRecordBudget.consume(env.USAGE_RECORD_DAILY_BUDGET);
-  if (!budget.allowed) return;
+): void {
+  try {
+    const budget = usageRecordBudget.consume(env.USAGE_RECORD_DAILY_BUDGET);
+    if (!budget.allowed) return;
 
-  usageEventBuffer.push(event);
-  if (!usageFlushPromise) {
-    usageFlushPromise = flushUsageEvents(env).finally(() => {
-      usageFlushPromise = null;
-      usageFlushWake = null;
-    });
-  }
+    usageEventBuffer.push(event);
+    if (!usageFlushPromise) {
+      const flush = flushUsageEvents(env).finally(() => {
+        usageFlushPromise = null;
+        usageFlushWake = null;
+      });
+      usageFlushPromise = flush;
+      if (executionCtx) {
+        try { executionCtx.waitUntil(flush); } catch {}
+      }
+    }
 
-  executionCtx?.waitUntil(usageFlushPromise);
-  if (!executionCtx || usageEventBuffer.length >= USAGE_BATCH_MAX_EVENTS) {
-    usageFlushWake?.();
+    if (!executionCtx || usageEventBuffer.length >= USAGE_BATCH_MAX_EVENTS) {
+      usageFlushWake?.();
+    }
+  } catch {
+    // Optional telemetry must never fail or delay the primary tool path.
   }
 }
-
 
 async function flushPendingUsage(env: Env): Promise<void> {
   const pending = usageFlushPromise;
@@ -687,7 +704,7 @@ async function instrumentTool<T>(
         durationMs: Date.now() - startedAtMs,
       }, executionCtx);
     }
-    await recordUsage(env, {
+    recordUsage(env, {
       userId: user.id,
       ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
       timestamp: new Date().toISOString(),
@@ -701,7 +718,7 @@ async function instrumentTool<T>(
     throw cause;
   } finally {
     if (outcome) {
-      await recordUsage(env, {
+      recordUsage(env, {
         userId: user.id,
         ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
         timestamp: new Date().toISOString(),
@@ -883,49 +900,55 @@ async function callAgent(
   let errorCode: string | undefined;
   let errorSource: string | undefined;
   let timing: SafeTiming | undefined;
-  try {
-    const parsed = JSON.parse(body) as any;
-    const payload = parsed?.payload;
-    const relayRoundTripMs = safeTimingMs(parsed?.meta?.relayRoundTripMs);
-    const transportMs = safeTimingMs(parsed?.meta?.transportMs);
-    const agentQueueWaitMs = safeTimingMs(parsed?.meta?.agentQueueWaitMs);
-    const agentHandlerMs = safeTimingMs(parsed?.meta?.agentHandlerMs);
-    const desktopQueueWaitMs = safeTimingMs(payload?.timing?.queueWaitMs);
-    const desktopInputMs = safeTimingMs(payload?.timing?.inputMs);
-    const desktopExplicitWaitMs = safeTimingMs(payload?.timing?.explicitWaitMs);
-    const desktopSettleMs = safeTimingMs(payload?.timing?.settleMs);
-    const desktopCaptureMs = safeTimingMs(payload?.timing?.captureMs);
-    const desktopEncodeMs = safeTimingMs(payload?.timing?.encodeMs);
-    const desktopWorkerMs = safeTimingMs(payload?.timing?.workerMs);
-    const desktopManagerMs = safeTimingMs(payload?.timing?.managerMs);
-    const desktopTotalMs = safeTimingMs(payload?.timing?.totalMs);
+  const relayMetadata = readRelayResultMetadata(response.headers);
+
+  if (relayMetadata.present) {
+    if (relayMetadata.payloadOk === false) ok = false;
+    if (relayMetadata.exitCode !== undefined) exitCode = relayMetadata.exitCode;
     const workerTotalMs = Math.max(0, Date.now() - workerStartedAt);
     timing = {
-      ...(relayRoundTripMs === undefined ? {} : { relayRoundTripMs }),
-      ...(transportMs === undefined ? {} : { transportMs }),
-      ...(agentQueueWaitMs === undefined ? {} : { agentQueueWaitMs }),
-      ...(agentHandlerMs === undefined ? {} : { agentHandlerMs }),
-      ...(desktopQueueWaitMs === undefined ? {} : { desktopQueueWaitMs }),
-      ...(desktopInputMs === undefined ? {} : { desktopInputMs }),
-      ...(desktopExplicitWaitMs === undefined ? {} : { desktopExplicitWaitMs }),
-      ...(desktopSettleMs === undefined ? {} : { desktopSettleMs }),
-      ...(desktopCaptureMs === undefined ? {} : { desktopCaptureMs }),
-      ...(desktopEncodeMs === undefined ? {} : { desktopEncodeMs }),
-      ...(desktopWorkerMs === undefined ? {} : { desktopWorkerMs }),
-      ...(desktopManagerMs === undefined ? {} : { desktopManagerMs }),
-      ...(desktopTotalMs === undefined ? {} : { desktopTotalMs }),
-      ...(relayRoundTripMs === undefined ? {} : { workerOverheadMs: Math.max(0, workerTotalMs - relayRoundTripMs) }),
+      ...(relayMetadata.relayRoundTripMs === undefined ? {} : { relayRoundTripMs: relayMetadata.relayRoundTripMs }),
+      ...(relayMetadata.transportMs === undefined ? {} : { transportMs: relayMetadata.transportMs }),
+      ...(relayMetadata.agentQueueWaitMs === undefined ? {} : { agentQueueWaitMs: relayMetadata.agentQueueWaitMs }),
+      ...(relayMetadata.agentHandlerMs === undefined ? {} : { agentHandlerMs: relayMetadata.agentHandlerMs }),
+      ...(relayMetadata.relayRoundTripMs === undefined
+        ? {}
+        : { workerOverheadMs: Math.max(0, workerTotalMs - relayMetadata.relayRoundTripMs) }),
     };
-    if (payload?.ok === false) ok = false;
-    if (payload?.exitCode === null) exitCode = null;
-    else if (Number.isFinite(Number(payload?.exitCode))) exitCode = Number(payload?.exitCode);
     if (!ok) {
-      errorCode = safeErrorCode(payload?.errorCode) || safeErrorCode(payload?.error) ||
-        safeErrorCode(parsed?.errorCode) || safeErrorCode(parsed?.error);
-      errorSource = payload && (payload.errorCode !== undefined || payload.error !== undefined) ? "agent" : "relay";
+      errorCode = relayMetadata.errorCode;
+      errorSource = response.ok ? "agent" : "relay";
     }
-  } catch {
-    if (!response.ok) errorSource = "relay";
+  } else {
+    // Rolling-deploy fallback for responses emitted before Relay metadata headers existed.
+    try {
+      const parsed = JSON.parse(body) as any;
+      const agentPayload = parsed?.payload;
+      const relayRoundTripMs = safeTimingMs(parsed?.meta?.relayRoundTripMs);
+      const transportMs = safeTimingMs(parsed?.meta?.transportMs);
+      const agentQueueWaitMs = safeTimingMs(parsed?.meta?.agentQueueWaitMs);
+      const agentHandlerMs = safeTimingMs(parsed?.meta?.agentHandlerMs);
+      const workerTotalMs = Math.max(0, Date.now() - workerStartedAt);
+      timing = {
+        ...(relayRoundTripMs === undefined ? {} : { relayRoundTripMs }),
+        ...(transportMs === undefined ? {} : { transportMs }),
+        ...(agentQueueWaitMs === undefined ? {} : { agentQueueWaitMs }),
+        ...(agentHandlerMs === undefined ? {} : { agentHandlerMs }),
+        ...(relayRoundTripMs === undefined ? {} : { workerOverheadMs: Math.max(0, workerTotalMs - relayRoundTripMs) }),
+      };
+      if (agentPayload?.ok === false) ok = false;
+      if (agentPayload?.exitCode === null) exitCode = null;
+      else if (Number.isFinite(Number(agentPayload?.exitCode))) exitCode = Number(agentPayload?.exitCode);
+      if (!ok) {
+        errorCode = safeErrorCode(agentPayload?.errorCode) || safeErrorCode(agentPayload?.error) ||
+          safeErrorCode(parsed?.errorCode) || safeErrorCode(parsed?.error);
+        errorSource = agentPayload && (agentPayload.errorCode !== undefined || agentPayload.error !== undefined)
+          ? "agent"
+          : "relay";
+      }
+    } catch {
+      if (!response.ok) errorSource = "relay";
+    }
   }
   if (!ok && !errorCode && !response.ok) errorCode = "http_" + response.status;
 
