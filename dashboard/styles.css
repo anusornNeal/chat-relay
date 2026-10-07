@@ -349,7 +349,7 @@ html:has(.learn-folder-shell),body:has(.learn-folder-shell){width:100%;height:10
 .app-shell:has(.learn-folder-shell){width:100vw;height:100vh;min-height:0;overflow:hidden}
 .main:has(.learn-folder-shell){width:100%;height:100vh;min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;padding-bottom:27px}
 .main:has(.learn-folder-shell) .topbar{flex:0 0 auto}
-.learn-folder-shell{display:grid;grid-template-columns:250px minmax(0,1fr);width:100%;max-width:100%;min-height:0;flex:1;border:1px solid var(--line);border-radius:15px;background:#fff;overflow:hidden;box-shadow:0 1px 0 rgba(20,24,28,.015)}
+.learn-folder-shell{display:grid;grid-template-columns:250px minmax(0,1fr);grid-template-rows:minmax(0,1fr);width:100%;max-width:100%;min-height:0;flex:1;border:1px solid var(--line);border-radius:15px;background:#fff;overflow:hidden;box-shadow:0 1px 0 rgba(20,24,28,.015)}
 .learn-folder-tree{border-right:1px solid var(--line);background:#fbfcfd;padding:12px 9px;min-width:0;min-height:0;overflow:hidden}
 .learn-folder-search{height:35px;border:1px solid #d7dce2;border-radius:8px;background:#fff;display:flex;align-items:center;gap:7px;padding:0 9px;color:#8c96a2;margin-bottom:15px}
 .learn-folder-search .icon{width:14px;height:14px}
@@ -400,8 +400,8 @@ html:has(.learn-folder-shell),body:has(.learn-folder-shell){width:100%;height:10
 .learn-folder-sort button{height:26px;border:0;border-radius:6px;background:transparent;padding:0 10px;font-size:11px;color:#68727f;cursor:pointer}
 .learn-folder-sort button.active{background:#eef2f6;color:#202a36;font-weight:650}
 .learn-folder-list-toolbar>span{font-size:10px;color:#929aa5}
-.learn-folder-workspace{flex:1;min-height:0;border:1px solid var(--line);border-radius:10px;display:grid;grid-template-columns:minmax(0,1fr) minmax(390px,34%);overflow:hidden}
-.learn-folder-list{border-right:1px solid var(--line);background:#fff;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
+.learn-folder-workspace{flex:1;min-height:0;height:0;border:1px solid var(--line);border-radius:10px;display:grid;grid-template-columns:minmax(0,1fr) minmax(390px,34%);grid-template-rows:minmax(0,1fr);overflow:hidden}
+.learn-folder-list{border-right:1px solid var(--line);background:#fff;min-width:0;min-height:0;height:100%;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
 .learn-folder-list-head{height:36px;display:grid;grid-template-columns:minmax(0,1fr) 100px 90px;align-items:center;padding:0 14px;border-bottom:1px solid var(--line);font-size:9px;text-transform:uppercase;letter-spacing:.09em;color:#9aa2ad;font-weight:700;background:#fbfcfd;position:sticky;top:0;z-index:1}
 .learn-folder-row{width:100%;height:56px;border:0;border-bottom:1px solid #edf0f2;background:#fff;display:grid;grid-template-columns:27px minmax(0,1fr) 100px 90px;align-items:center;padding:0 14px;text-align:left;cursor:pointer}
 .learn-folder-row:hover{background:#fafbfc}
