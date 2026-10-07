@@ -14,6 +14,7 @@ import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
 import { LEARN_BASELINE_CONTEXT } from "./learning-policy";
+import { LearnPreflightGuard, attachLearnPrepareAdvisory } from "./learn-preflight-guard.mjs";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
 
@@ -315,6 +316,7 @@ type ToolActivityContext = {
 };
 
 const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
+const learnPreflightGuard = new LearnPreflightGuard();
 
 const recentLearnAgentByUser = new Map<string, string>();
 const RECENT_LEARN_AGENT_MAX = 512;
@@ -644,13 +646,19 @@ async function instrumentTool<T>(
   run: () => Promise<InstrumentToolOutcome<T>>,
 ): Promise<T> {
   const startedAtMs = Date.now();
-  const executionCtx = toolActivityContexts.get(user)?.executionCtx;
+  const activity = toolActivityContexts.get(user);
+  const executionCtx = activity?.executionCtx;
+  const activityId = activity?.activityId;
   const requestedAgentId = typeof args === "object" && args !== null && typeof (args as any).agentId === "string"
     ? String((args as any).agentId).slice(0, 128)
     : undefined;
   let outcome: InstrumentToolOutcome<T> | undefined;
   try {
     outcome = await run();
+
+    if (tool === "learn_prepare" && outcome.ok && activityId) {
+      learnPreflightGuard.markPrepared(user.id, activityId);
+    }
 
     if (outcome.agentId && (outcome.ok || outcome.errorSource === "agent")) {
       noteRecentLearnAgent(user.id, outcome.agentId);
@@ -662,6 +670,13 @@ async function instrumentTool<T>(
         durationMs: Date.now() - startedAtMs,
         learnChange: outcome.learnChange,
       }, executionCtx);
+    }
+
+    const canAttachLearnAdvisory = activityId
+      && !LEARN_ACTIVITY_TOOLS.has(tool as LearnActivityTool)
+      && Array.isArray((outcome.value as any)?.content);
+    if (canAttachLearnAdvisory && learnPreflightGuard.claimReminder(user.id, activityId)) {
+      return attachLearnPrepareAdvisory(outcome.value).value as T;
     }
 
     return outcome.value;

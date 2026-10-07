@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { build } from "esbuild";
 import fs from "node:fs";
+import { LearnPreflightGuard, attachLearnPrepareAdvisory } from "../src/learn-preflight-guard.mjs";
 
 const bundled = await build({
   stdin: {
@@ -115,17 +116,49 @@ const agentRecords = [
 }
 
 {
+  let now = 1_000;
+  const guard = new LearnPreflightGuard({ ttlMs: 1_000, maxEntries: 2, now: () => now });
+
+  assert.equal(guard.claimReminder("user-a", "activity-a"), true, "first ordinary call should claim one reminder");
+  assert.equal(guard.claimReminder("user-a", "activity-a"), false, "same activity must not repeat the reminder");
+  assert.equal(guard.claimReminder("user-b", "activity-a"), true, "guard state must remain account isolated");
+
+  guard.markPrepared("user-a", "activity-b");
+  assert.equal(guard.claimReminder("user-a", "activity-b"), false, "prepared activity must suppress reminders");
+
+  const wrapped = attachLearnPrepareAdvisory({
+    structuredContent: { ok: true },
+    content: [{ type: "text", text: "{\"ok\":true}" }],
+  });
+  assert.equal(wrapped.attached, true);
+  assert.match(wrapped.value.content.at(-1).text, /learn_prepare_recommended/);
+  assert.equal(attachLearnPrepareAdvisory({ ok: true }).attached, false, "non-MCP results must not consume a reminder");
+
+  now += 1_001;
+  assert.equal(guard.claimReminder("user-a", "activity-a"), true, "expired activity state may remind again");
+  guard.claimReminder("user-a", "activity-c");
+  guard.claimReminder("user-a", "activity-d");
+  assert.ok(guard.size() <= 2, "ephemeral guard state must remain bounded");
+  console.log("PASS Relay-only Learn preflight reminder guard");
+}
+
+{
   const worker = fs.readFileSync("src/worker-app.ts", "utf8");
   const instrumentStart = worker.indexOf("async function instrumentTool");
   const instrumentEnd = worker.indexOf("function bearerToken", instrumentStart);
   assert.ok(instrumentStart >= 0 && instrumentEnd > instrumentStart);
   const instrumentBlock = worker.slice(instrumentStart, instrumentEnd);
+  const guardSource = fs.readFileSync("src/learn-preflight-guard.mjs", "utf8");
+  assert.doesNotMatch(guardSource, /learningCall|LEARNING|DurableObject|fetch\s*\(/, "preflight guard must stay Worker-local and must not touch Learn storage");
 
   assert.doesNotMatch(worker, /prepareAutoLearnContext/, "ordinary MCP calls must not auto-read Learn");
   assert.doesNotMatch(worker, /prepareAgentLearnContext/, "agent calls must not auto-read Learn");
   assert.doesNotMatch(worker, /attachLearnedContext/, "ordinary tool results must not receive implicit Learn payloads");
   assert.doesNotMatch(worker, /learnSessionId/, "MCP hot path must not hash a separate Learn session id");
   assert.doesNotMatch(instrumentBlock, /learningCall|prepareLearnContext|buildLearnRelevanceContext/, "instrumentTool must remain free of Learn reads/ranking");
+  assert.match(instrumentBlock, /learnPreflightGuard\.markPrepared\(user\.id, activityId\)/, "successful learn_prepare must mark the activity prepared");
+  assert.match(instrumentBlock, /learnPreflightGuard\.claimReminder\(user\.id, activityId\)/, "ordinary tools must use the one-time reminder claim");
+  assert.match(instrumentBlock, /!LEARN_ACTIVITY_TOOLS\.has/, "Learn tools must not recursively trigger the reminder");
 
   assert.match(worker, /"learn_prepare"/);
   assert.match(worker, /mode: "explicit-one-shot"/);
