@@ -209,52 +209,47 @@ Optional Cloudflare-pressure circuit breakers can be configured with `USAGE_RECO
 
 ## Account-scoped Learn
 
-Chat Relay can persist small, structured pieces of execution context per authenticated account. Learn is **not model training** and it does not capture conversations or tool payloads automatically.
+Chat Relay can persist small, structured pieces of execution context per authenticated account. Learn is **not model training** and it does not capture conversations or ordinary tool payloads automatically.
 
 The MCP surface is:
 
-- `learn_get` reads explicit memories for selected scopes.
-- `learn_put` creates or updates one memory.
+- `learn_prepare` performs one explicit, relevance-aware preparation pass for the current task. It can combine global, project, and agent memories, then rank and compact them into one advisory context envelope.
+- `learn_get` reads raw memories for selected scopes when targeted inspection is needed.
+- `learn_put` creates or updates one durable memory when Chat decides a reusable signal is worth keeping.
 - `learn_delete` removes one memory.
 - `learn_feedback` records positive or negative feedback on one memory.
 
 Memories are partitioned by authenticated account using a dedicated Learning Durable Object selected from the server-side `user.id`. Callers cannot provide or override an account id. Supported scopes are `global`, `project`, and `agent`; project and agent memories require a scope key.
 
-The first version is intentionally lightweight: there are no embeddings, vector database, local LLM, transcript ingestion, or per-tool-call writes. A normal tool call causes no Learn storage write. Storage changes happen only when an explicit Learn mutation is requested. Each account is capped at 512 memories, each memory content field is capped at 4,000 characters, and reads return at most 100 records. Do not store credentials, tokens, secrets, raw tool payloads, terminal output, file contents, or screenshots in Learn.
+Learn remains intentionally lightweight: there are no embeddings, vector database, local LLM, transcript ingestion, or per-tool-call Learn reads/writes. A normal Relay tool call does **not** touch the Learning Durable Object. Storage changes happen only when an explicit Learn mutation is requested. Each account is capped at 512 memories, each memory content field is capped at 4,000 characters, and raw reads return at most 100 records. Do not store credentials, tokens, secrets, raw tool payloads, terminal output, file contents, or screenshots in Learn.
 
+## Explicit one-shot Learn preparation
 
-## Progressive Learn bootstrap and routing
-
-Learn context is loaded progressively so a fresh ChatGPT conversation does not need to remember to call `learn_get` before using Relay.
+Chat decides whether learned context is useful for the task. When it is, Chat calls `learn_prepare` once and reuses the returned context for the rest of that task instead of re-preparing before every tool call.
 
 ```mermaid
 flowchart TD
-    U[User starts or continues a chat] --> M[ChatGPT calls Relay]
-    M --> A[Authenticate account]
-    A --> G{Global context loaded in this MCP session?}
-    G -- No --> LG[Read global Learn once]
-    G -- Yes --> S[Continue]
-    LG --> S
-    S --> P{Concrete project signal? path / cwd / repo}
-    P -- Yes --> PR[Match explicit project-root hint]
-    PR --> LP[Read project Learn once]
-    P -- No --> AG
-    LP --> AG
-    AG{Agent selected or safely resolved?}
-    AG -- Yes --> LA[Read agent Learn once]
-    AG -- No --> E
-    LA --> E
-    E[Attach bounded learnedContext envelope] --> R[ChatGPT chooses action and tool]
-    R --> SEC[Relay enforces auth, grants, allowedRoots and capabilities]
-    SEC --> X[Execute]
+    U[User starts or continues a task] --> D{Would prior learned context materially help?}
+    D -- No --> R[Use ordinary Relay tools]
+    D -- Yes --> P[Chat calls learn_prepare once]
+    P --> G[Read account-global Learn]
+    G --> K[Resolve explicit or project-root project]
+    K --> PJ[Read project Learn when available]
+    PJ --> A[Resolve explicit or preferred agent]
+    A --> AG[Read agent Learn when available]
+    AG --> Q[Rank by task query + tool hint + scope]
+    Q --> C[Compact to bounded advisory context]
+    C --> R2[Chat reuses prepared context for the task]
+    R2 --> X[Use ordinary Relay tools without more implicit Learn reads]
 ```
 
 The decision boundary is deliberate:
 
-- **Relay decides mechanical routing only:** authenticated account, whether a scope was already loaded, project identity from explicit `project-root:<projectKey>` memories, explicit/resolved agent, and available permissions/capabilities.
-- **ChatGPT decides semantic actions and tools:** whether to read files, search, edit, run terminal commands, use desktop control, or re-plan after a failure.
-- Learned hints never override authorization, grants, allowed roots, destructive-tool policy, or capability checks.
+- **Chat decides semantic Learn use:** whether to prepare context, whether a correction/preference/workflow is durable enough to learn, and when a targeted raw `learn_get` is needed.
+- **Relay performs mechanical preparation only after `learn_prepare` is explicitly called:** account isolation, project routing from explicit `project-root:<projectKey>` memories or explicit `projectKey`, preferred-agent routing, bounded reads, relevance ranking, and compaction.
+- **Ordinary tools stay hot-path clean:** `ping_agent`, file tools, terminal tools, desktop tools, and other MCP calls do not automatically read, rank, inject, or write Learn.
+- Learned hints remain advisory and never override authorization, grants, allowed roots, destructive-tool policy, capability checks, safety, or the current user request.
 
-Routing hints are explicit memories. A global `project_context` memory with key `project-root:<projectKey>` stores the concrete project root. A `preferred-agent` memory may exist in project scope (preferred) or global scope (fallback); Relay surfaces it in `routingContext` as guidance and does not execute or retry a tool solely because of that hint. No project is guessed when no explicit root hint matches.
+Routing hints are explicit memories. A global `project_context` memory with key `project-root:<projectKey>` stores the concrete project root. A `preferred-agent` memory may exist in project scope (preferred) or global scope (fallback). `learn_prepare` can also take explicit `projectKey` and `agentId` values when Chat already knows them.
 
-The intended read budget is bounded by an in-memory warm-cache: global context is normally read once per conversation/session, each activated project once, and each activated agent once. A Worker isolate restart/eviction may cause a scope to be read again; this is intentionally best-effort so bootstrap performs no durable session writes. Learned content is advisory user memory, not system/developer instruction authority.
+`learn_prepare` is intentionally one-shot and stateless at the Worker level. There is no warm session cache or durable Learn session state to maintain. This prevents Learn from becoming an implicit per-tool CPU/subrequest tax while still allowing relevance-aware context preparation when it is actually useful.

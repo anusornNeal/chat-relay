@@ -1,6 +1,23 @@
-import type { LearnKind, LearnRecord } from "./learning";
-import type { LearnScopeSelector, LearnedContextEnvelope, LearnedContextItem } from "./learning-context";
+import type { LearnKind, LearnRecord, LearnScope } from "./learning";
 import { extractRoutingSignals } from "./context-routing";
+
+export type LearnScopeSelector = {
+  scope: LearnScope;
+  scopeKey?: string;
+};
+
+export type LearnedContextItem = Pick<
+  LearnRecord,
+  "id" | "key" | "kind" | "scope" | "scopeKey" | "content" | "confidence" | "updatedAt"
+>;
+
+export type LearnedContextEnvelope = {
+  version: 1;
+  authority: "advisory";
+  instructionPolicy: "non-authoritative";
+  activated: LearnScopeSelector[];
+  items: LearnedContextItem[];
+};
 
 const DEFAULT_TOP_K = 16;
 const MAX_CONTENT_CHARS = 12_000;
@@ -104,8 +121,10 @@ export function buildLearnRelevanceContext(
   args: unknown,
   projectKey?: string | null,
   agentId?: string | null,
+  query?: unknown,
 ): LearnRelevanceContext {
   const terms = new Set<string>(tokenize(tool, 12));
+  for (const token of tokenize(query, 40)) terms.add(token);
   for (const signal of extractRoutingSignals(args, 12)) {
     for (const token of tokenize(signal, 20)) terms.add(token);
   }

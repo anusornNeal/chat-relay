@@ -5,7 +5,6 @@ import fs from "node:fs";
 const bundled = await build({
   stdin: {
     contents: [
-      'export * from "./src/learning-context";',
       'export * from "./src/context-routing";',
       'export * from "./src/learning-relevance";',
     ].join("\n"),
@@ -28,8 +27,6 @@ const bundled = await build({
 
 const mod = await import("data:text/javascript;base64," + Buffer.from(bundled.outputFiles[0].text).toString("base64"));
 const {
-  LearnContextSessionStore,
-  learnSessionKey,
   extractRoutingSignals,
   projectKeyForSignals,
   preferredAgentForContext,
@@ -83,20 +80,23 @@ const agentRecords = [
     memory("project-code-a", "small-patches", "coding_style", "project", "chat-relay", "Prefer small focused code patches with tests", 99),
     memory("project-code-b", "focused-patches", "coding_style", "project", "chat-relay", "Prefer small focused code patches with tests", 90),
     memory("agent-tool", "terminal-batch", "tool_pattern", "agent", "desktop-project", "Batch independent terminal reads when practical", 98),
+    memory("query-hit", "cpu-regression", "problem_solving", "project", "chat-relay", "Investigate CPU regression before changing infrastructure", 92),
     ...Array.from({ length: 24 }, (_, index) =>
       memory("noise-"+index, "noise-"+index, "project_context", "project", "chat-relay", "Unrelated context "+index, 70-index)
     ),
   ];
   const ctx = buildLearnRelevanceContext(
     "terminal_batch_start",
-    { cwd: "C:\Users\tatar\Projects\chat-relay", jobs: [{ command: "test" }] },
+    { cwd: "C:\\Users\\tatar\\Projects\\chat-relay", jobs: [{ command: "test" }] },
     "chat-relay",
     "desktop-project",
+    "fix CPU regression and review Learn architecture",
   );
   const selected = selectRelevantLearnRecords(relevanceRecords, ctx, 16);
   assert.ok(selected.some((item) => item.id === "project-code-a"), "coding style should rank for terminal/code work");
   assert.ok(selected.some((item) => item.id === "global-response"), "global response style should remain represented");
   assert.ok(selected.some((item) => item.id === "project-workflow"), "project override should be selected");
+  assert.ok(selected.some((item) => item.id === "query-hit"), "explicit task query must influence relevance");
   assert.ok(!selected.some((item) => item.id === "global-workflow"), "same kind/key global duplicate should be compacted");
   assert.ok(!selected.some((item) => item.id === "project-code-b"), "near-identical content should be compacted");
   const envelope = buildRelevantLearnEnvelope(
@@ -106,76 +106,47 @@ const agentRecords = [
   );
   assert.ok(envelope?.items.length <= 16);
   assert.ok(envelope?.items.some((item) => item.scope === "agent"));
+  assert.equal(envelope?.authority, "advisory");
+  assert.equal(envelope?.instructionPolicy, "non-authoritative");
   const longCanonical = memory("canonical-project", "project-context:architecture", "project_context", "project", "chat-relay", "x".repeat(2200), 100);
   const canonicalEnvelope = buildRelevantLearnEnvelope([longCanonical], [{ scope: "project", scopeKey: "chat-relay" }], ctx);
-  assert.equal(canonicalEnvelope?.items[0].content.length, 2200, "canonical project context should retain more than the legacy 1200-char item limit while staying under the total context cap");
-  console.log("PASS relevance ranking, Top-K, and read-time compaction");
-}
-
-{
-  const store = new LearnContextSessionStore(60_000, 8);
-  const key = learnSessionKey("user-a", "activity-a", "tool-1");
-  const calls = [];
-  const loader = async (scopes) => {
-    calls.push(scopes.map((scope) => scope.scope + ":" + (scope.scopeKey || "")).join(","));
-    const items = [];
-    for (const scope of scopes) {
-      if (scope.scope === "global") items.push(...globalRecords);
-      if (scope.scope === "project" && scope.scopeKey === "chat-relay") items.push(...projectRecords);
-      if (scope.scope === "agent" && scope.scopeKey === "desktop-project") items.push(...agentRecords);
-    }
-    return items;
-  };
-
-  const first = await store.activate(key, [{ scope: "global" }], loader);
-  assert.ok(first?.items.length);
-  assert.equal(first.authority,"advisory");
-  assert.equal(first.instructionPolicy,"non-authoritative");
-  assert.equal(first.items[0].key,"project-root:chat-relay");
-  assert.equal(calls.length, 1);
-  assert.equal(await store.activate(key, [{ scope: "global" }], loader), null);
-  assert.equal(calls.length, 1, "global scope must not reread in same warm session cache");
-
-  const project = await store.activate(key, [{ scope: "project", scopeKey: "chat-relay" }], loader);
-  assert.equal(project?.activated[0].scope, "project");
-  assert.equal(calls.length, 2);
-  assert.equal(await store.activate(key, [{ scope: "project", scopeKey: "chat-relay" }], loader), null);
-  assert.equal(calls.length, 2);
-
-  const agent = await store.activate(key, [{ scope: "agent", scopeKey: "desktop-project" }], loader);
-  assert.equal(agent?.activated[0].scope, "agent");
-  assert.equal(calls.length, 3);
-  assert.equal(store.snapshot().loadedScopes, 3);
-
-  const otherChat = learnSessionKey("user-a", "activity-b", "tool-2");
-  await store.activate(otherChat, [{ scope: "global" }], loader);
-  assert.equal(calls.length, 4, "new MCP activity must get its own global bootstrap");
-
-  const otherUser = learnSessionKey("user-b", "activity-a", "tool-3");
-  await store.activate(otherUser, [{ scope: "global" }], loader);
-  assert.equal(calls.length, 5, "account identity must remain part of the session key");
-  console.log("PASS progressive scope activation and read bounds");
+  assert.equal(canonicalEnvelope?.items[0].content.length, 2200);
+  console.log("PASS explicit one-shot relevance ranking and compaction");
 }
 
 {
   const worker = fs.readFileSync("src/worker-app.ts", "utf8");
+  const instrumentStart = worker.indexOf("async function instrumentTool");
+  const instrumentEnd = worker.indexOf("function bearerToken", instrumentStart);
+  assert.ok(instrumentStart >= 0 && instrumentEnd > instrumentStart);
+  const instrumentBlock = worker.slice(instrumentStart, instrumentEnd);
+
   assert.doesNotMatch(worker, /prepareAutoLearnContext/, "ordinary MCP calls must not auto-read Learn");
   assert.doesNotMatch(worker, /prepareAgentLearnContext/, "agent calls must not auto-read Learn");
   assert.doesNotMatch(worker, /attachLearnedContext/, "ordinary tool results must not receive implicit Learn payloads");
   assert.doesNotMatch(worker, /learnSessionId/, "MCP hot path must not hash a separate Learn session id");
-  assert.match(worker, /const user: AuthUser = \{ \.\.\.authenticatedUser \}/);
-  assert.match(worker, /"x-openai-conversation-id"/);
-  assert.match(worker, /Explicitly read learned context when it may materially affect the current task/);
-  assert.match(worker, /do not call automatically before every MCP tool/);
+  assert.doesNotMatch(instrumentBlock, /learningCall|prepareLearnContext|buildLearnRelevanceContext/, "instrumentTool must remain free of Learn reads/ranking");
+
+  assert.match(worker, /"learn_prepare"/);
+  assert.match(worker, /mode: "explicit-one-shot"/);
+  assert.match(worker, /Reuse this prepared context for the current task/);
+  assert.match(worker, /Do not call learn_prepare before every tool/);
+  assert.match(worker, /readLearnPrepareScopes\(env, user, \[globalScope\]\)/);
+  assert.match(worker, /preferredAgentForContext\(records, projectKey\)/, "explicit project keys must still use project-scoped preferred-agent routing");
+  assert.match(worker, /buildLearnRelevanceContext\([\s\S]*args\.query/);
+  assert.match(worker, /"learn_prepare", "learn_get"/, "learn_prepare and learn_get must be read-only tools");
   assert.match(worker, /only when Chat decides durable learning is warranted/);
   assert.match(worker, /Never write memory merely because an ordinary MCP tool ran/);
-  assert.match(worker, /noteRecentLearnAgent\(user\.id, outcome\.agentId\)/, "explicit Learn mutations should still reach the most recent agent indicator");
-  assert.match(worker, /automatically canonicalized\/compacted/, "learn_put must expose project-context compaction semantics");
+  assert.match(worker, /noteRecentLearnAgent\(user\.id, outcome\.agentId\)/);
+  assert.match(worker, /automatically canonicalized\/compacted/);
+
   const policy = fs.readFileSync("src/learning-policy.ts", "utf8");
-  assert.match(policy, /LEARN_BASELINE_VERSION = 2/);
+  assert.match(policy, /LEARN_BASELINE_VERSION = 3/);
+  assert.match(policy, /Call learn_prepare once/);
+  assert.match(policy, /Ordinary Relay tools do not read or write Learn automatically/);
   assert.match(policy, /Keep project_context project-level and canonical/);
-  assert.match(policy, /automatically compacted into bounded canonical buckets/);
-  console.log("PASS explicit Learn MCP wiring contract");
+  assert.match(policy, /compacted into bounded canonical buckets/);
+  console.log("PASS explicit Learn MCP architecture contract");
 }
 
-console.log("learning bootstrap/routing tests passed");
+console.log("learning prepare/routing tests passed");

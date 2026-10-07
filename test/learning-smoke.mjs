@@ -400,9 +400,10 @@ assert.ok(worker.includes('learningCall(env, user, "/get"'),"Learn reads must ca
 for (const path of ["/put","/delete","/feedback"]) {
   assert.ok(worker.includes(`learningMutationCall(env, user, "${path}"`),"Learn mutations must use the mutation wrapper");
 }
-assert.match(worker,/LEARN_BASELINE_CONTEXT/,"automatic Learn baseline must be surfaced to every Relay app");
-assert.match(worker,/applyLearningMutation/,"changed Learn mutations must update warm context and TUI activity");
-for (const tool of ["learn_get","learn_put","learn_delete","learn_feedback"]) {
+assert.match(worker,/LEARN_BASELINE_CONTEXT/,"explicit Learn policy must be exposed through the Learn mutation tool descriptions");
+assert.match(worker,/applyLearningMutation/,"changed Learn mutations must still publish TUI Learn activity");
+assert.match(worker,/prepareLearnContext/,"explicit learn_prepare must have a one-shot preparation path");
+for (const tool of ["learn_prepare","learn_get","learn_put","learn_delete","learn_feedback"]) {
   assert.match(worker,new RegExp('"' + tool + '"'));
 }
 

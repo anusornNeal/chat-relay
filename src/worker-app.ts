@@ -10,7 +10,9 @@ import { DailyOptionalBudget } from "./usage-budget.mjs";
 import { AGENT_PROTOCOL_VERSION } from "./agent-state";
 import { handleStatusRequest } from "./status-route.mjs";
 import { error, hasPayload, readJson } from "./http-utils";
-import type { LearnChange } from "./learning";
+import type { LearnChange, LearnRecord } from "./learning";
+import { preferredAgentForContext, routingContext } from "./context-routing";
+import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
 import { LEARN_BASELINE_CONTEXT } from "./learning-policy";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
@@ -55,6 +57,123 @@ function learningStub(env: Env, user: AuthUser) {
 async function learningCall(env: Env, user: AuthUser, path: string, body: unknown) {
   const response = await learningStub(env, user).fetch(new Request(`https://learning.internal${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
   return { ok: response.ok, body: await response.text(), statusCode: response.status };
+}
+
+type LearnPrepareArgs = {
+  query: string;
+  toolHint?: string;
+  projectKey?: string;
+  agentId?: string;
+  path?: string;
+  cwd?: string;
+  limit?: number;
+};
+
+function normalizeLearnPrepareProjectKey(value: unknown) {
+  const projectKey = String(value ?? "").trim().slice(0, 200);
+  return projectKey || null;
+}
+
+function normalizeLearnPrepareAgentId(value: unknown) {
+  const agentId = String(value ?? "").trim().toLowerCase();
+  return /^[a-z0-9_-]{1,64}$/.test(agentId) ? agentId : null;
+}
+
+async function readLearnPrepareScopes(
+  env: Env,
+  user: AuthUser,
+  scopes: LearnScopeSelector[],
+): Promise<{ ok: true; items: LearnRecord[] } | { ok: false; statusCode: number }> {
+  const call = await learningCall(env, user, "/get", {
+    scopes,
+    limit: 64,
+    perKind: 4,
+    routingReserve: 24,
+  });
+  if (!call.ok) return { ok: false, statusCode: call.statusCode };
+  try {
+    const data = JSON.parse(call.body) as { items?: LearnRecord[] };
+    return { ok: true, items: Array.isArray(data.items) ? data.items.slice(0, 100) : [] };
+  } catch {
+    return { ok: false, statusCode: 502 };
+  }
+}
+
+async function prepareLearnContext(
+  env: Env,
+  user: AuthUser,
+  args: LearnPrepareArgs,
+): Promise<{ ok: boolean; body: string; statusCode?: number }> {
+  const globalScope: LearnScopeSelector = { scope: "global" };
+  const globalRead = await readLearnPrepareScopes(env, user, [globalScope]);
+  if (!globalRead.ok) {
+    return { ok: false, statusCode: globalRead.statusCode, body: JSON.stringify({ error: "learning_unavailable" }) };
+  }
+
+  const records: LearnRecord[] = [...globalRead.items];
+  const activeScopes: LearnScopeSelector[] = [globalScope];
+  let route = routingContext(args, records);
+  const explicitProjectKey = normalizeLearnPrepareProjectKey(args.projectKey);
+  const projectKey = explicitProjectKey ?? route.projectKey ?? null;
+
+  if (projectKey) {
+    const projectScope: LearnScopeSelector = { scope: "project", scopeKey: projectKey };
+    const projectRead = await readLearnPrepareScopes(env, user, [projectScope]);
+    if (!projectRead.ok) {
+      return { ok: false, statusCode: projectRead.statusCode, body: JSON.stringify({ error: "learning_unavailable" }) };
+    }
+    activeScopes.push(projectScope);
+    records.push(...projectRead.items);
+  }
+
+  const preferredAgent = preferredAgentForContext(records, projectKey);
+  const explicitAgentId = normalizeLearnPrepareAgentId(args.agentId);
+  const agentId = explicitAgentId ?? preferredAgent?.agentId ?? null;
+  if (agentId) {
+    const agentScope: LearnScopeSelector = { scope: "agent", scopeKey: agentId };
+    const agentRead = await readLearnPrepareScopes(env, user, [agentScope]);
+    if (!agentRead.ok) {
+      return { ok: false, statusCode: agentRead.statusCode, body: JSON.stringify({ error: "learning_unavailable" }) };
+    }
+    activeScopes.push(agentScope);
+    records.push(...agentRead.items);
+  }
+
+  const deduped = [...new Map(records.map((record) => [record.id, record])).values()];
+  const relevance = buildLearnRelevanceContext(
+    args.toolHint || "learn_prepare",
+    args,
+    projectKey,
+    agentId,
+    args.query,
+  );
+  const preparedContext = buildRelevantLearnEnvelope(
+    deduped,
+    activeScopes,
+    relevance,
+    args.limit ?? 16,
+  ) ?? {
+    version: 1 as const,
+    authority: "advisory" as const,
+    instructionPolicy: "non-authoritative" as const,
+    activated: activeScopes,
+    items: [],
+  };
+
+  return {
+    ok: true,
+    body: JSON.stringify({
+      mode: "explicit-one-shot",
+      preparedContext,
+      routingContext: {
+        projectKey,
+        projectSource: projectKey ? (explicitProjectKey ? "explicit" : "project-root") : null,
+        agentId,
+        agentSource: agentId ? (explicitAgentId ? "explicit" : preferredAgent?.source ?? "preferred") : null,
+      },
+      guidance: "Reuse this prepared context for the current task. Do not call learn_prepare before every tool.",
+    }),
+  };
 }
 
 function safeAuthReason(value: unknown, fallback: string): string {
@@ -919,7 +1038,7 @@ const terminalSessionIdSchema = z.union([
 ]);
 
 const READ_ONLY_TOOLS = new Set([
-  "whoami", "list_agents", "learn_get", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
+  "whoami", "list_agents", "learn_prepare", "learn_get", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
   "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
   "start_search", "get_more_search_results", "list_processes", "screenshot", "clipboard_read", "list_windows",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
@@ -982,7 +1101,34 @@ function createMcpServer(env: Env, user: AuthUser) {
   const learnScopeSchema = z.object({ scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional() });
   const learnKindSchema = z.enum(["preference", "response_style", "work_style", "coding_style", "problem_solving", "project_context", "tool_pattern", "workflow", "correction", "agent_context"]);
 
-  server.registerTool("learn_get", { description: "Explicitly read learned context when it may materially affect the current task. Call once for the relevant scopes; do not call automatically before every MCP tool.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
+  server.registerTool(
+    "learn_prepare",
+    {
+      description: "Prepare relevant learned context once for the current task when prior user/project/agent context may materially affect decisions. This is explicit and read-only: call it when useful, reuse the result for the task, and do not call it before every MCP tool.",
+      inputSchema: {
+        query: z.string().min(1).max(1200),
+        toolHint: z.string().min(1).max(80).optional(),
+        projectKey: z.string().min(1).max(200).optional(),
+        agentId: agentIdSchema,
+        path: z.string().min(1).max(2048).optional(),
+        cwd: z.string().min(1).max(2048).optional(),
+        limit: z.number().int().min(1).max(32).optional(),
+      },
+      annotations: annotationsForTool("learn_prepare"),
+      ...oauthToolSecurity(),
+    } as any,
+    async (args: LearnPrepareArgs) => instrumentTool(env, user, "learn_prepare", args, async () => {
+      const call = await prepareLearnContext(env, user, args);
+      return {
+        value: toolResult(call),
+        ok: call.ok,
+        statusCode: call.statusCode,
+        ...(call.ok ? {} : { errorSource: "worker", errorCode: "learn_prepare_failed" }),
+      };
+    }),
+  );
+
+  server.registerTool("learn_get", { description: "Read raw learned memories for targeted inspection or deduplication. Prefer learn_prepare once for task-level context; do not call learn_get automatically before ordinary MCP tools.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
 
   server.registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory only when Chat decides durable learning is warranted. Never write memory merely because an ordinary MCP tool ran. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
