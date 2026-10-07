@@ -35,6 +35,7 @@ export function getAgentCapabilities(options = {}) {
     "filesystem.move",
     "filesystem.delete",
     "filesystem.search",
+    "git.worktree.cleanup",
     "process.list",
     "process.kill",
   ];

@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { DesktopManager, createDesktopPlatformAdapter } from "./desktop-manager.mjs";
 import { FileManager } from "./file-manager.mjs";
+import { GitWorktreeManager } from "./git-worktree-manager.mjs";
 import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
 import { CapabilityScheduler } from "./capability-scheduler.mjs";
@@ -72,6 +73,7 @@ const connectionState = new AgentConnectionState({
   heartbeatMs: process.env.AGENT_HEARTBEAT_MS,
 });
 const files = new FileManager(process.env.ALLOWED_ROOTS);
+const gitWorktrees = new GitWorktreeManager(files.getRoots(), { platform: process.platform });
 const processes = new ProcessManager();
 const desktop = new DesktopManager({
   enabled: desktopEnabled,
@@ -225,6 +227,9 @@ async function handlePayload(payload) {
       return files.startSearch(payload.path, payload.pattern, payload.searchType, payload.maxResults);
     case "fs.search.results":
       return files.getSearchResults(payload.sessionId, payload.offset, payload.length);
+
+    case "git.worktree.cleanup":
+      return gitWorktrees.cleanup(payload.repoPath, payload.worktreePath);
 
     case "process.list":
       return processes.list(payload.filter);

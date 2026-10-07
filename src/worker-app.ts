@@ -1447,6 +1447,18 @@ function createMcpServer(env: Env, user: AuthUser) {
   );
 
   register(
+    "cleanup_worktree",
+    "Safely remove a completed Git worktree and delete its merged local branch. Refuses dirty, unmerged, protected, detached, unregistered, primary, or out-of-root targets.",
+    "write",
+    {
+      repoPath: z.string().min(1).max(2048),
+      worktreePath: z.string().min(1).max(2048),
+    },
+    ({ repoPath, worktreePath }) => ({ action: "git.worktree.cleanup", repoPath, worktreePath }),
+    { destructiveHint: true },
+  );
+
+  register(
     "list_processes",
     "List Windows processes with PID, name, command line, and executable path.",
     "process",

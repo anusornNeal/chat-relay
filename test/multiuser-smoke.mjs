@@ -229,7 +229,7 @@ const tools = await rpc(ownerToken, 1, "tools/list");
 const names = new Set(tools.result.tools.map((item) => item.name));
 for (const required of [
   "list_agents", "get_config", "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch", "create_temp_artifact",
-  "write_file", "edit_block", "create_directory", "move_path", "delete_path",
+  "write_file", "edit_block", "create_directory", "move_path", "delete_path", "cleanup_worktree",
   "start_search", "get_more_search_results", "list_processes", "kill_process",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_read",
   "terminal_write", "terminal_list", "terminal_kill",
@@ -260,6 +260,7 @@ if (configPayload?.protocol?.protocolVersion !== AGENT_PROTOCOL_VERSION) throw n
 if (!configPayload?.protocol?.agentVersion) throw new Error("agent package version missing from config");
 if (!configPayload?.protocol?.capabilities?.includes("filesystem.batch")) throw new Error("filesystem batch capability missing from config");
 if (!configPayload?.protocol?.capabilities?.includes("filesystem.artifact")) throw new Error("filesystem artifact capability missing from config");
+if (!configPayload?.protocol?.capabilities?.includes("git.worktree.cleanup")) throw new Error("worktree cleanup capability missing from config");
 if (configPayload.protocol.capabilities.includes("desktop.control")) throw new Error("disabled desktop capability advertised");
 
 const disabledShot = await tool(ownerToken, 30, "screenshot", {}, true);

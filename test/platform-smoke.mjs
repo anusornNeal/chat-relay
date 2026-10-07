@@ -139,6 +139,7 @@ function capabilityTests() {
     desktopEnabled: expectedDesktop,
   });
   assert(hello.capabilities.includes("terminal.exec"), "terminal capability missing");
+  assert(hello.capabilities.includes("git.worktree.cleanup"), "worktree cleanup capability missing");
   if (expectedDesktop) {
     assert(hello.capabilities.includes("desktop.screenshot"), "desktop capability missing");
   }
