@@ -14,6 +14,7 @@ import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
 import { LEARN_BASELINE_CONTEXT } from "./learning-policy";
+import { noteQuotaDisabled, quotaDisabledFastPathActive } from "./quota-disabled-cache";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
 
@@ -390,8 +391,6 @@ const ADMIN_SECURITY_MUTATION_PATHS = new Set([
   "/admin/api/agents/retire",
   "/admin/api/sessions/revoke",
 ]);
-const QUOTA_DISABLED_CACHE_TTL_MS = 15 * 60_000;
-
 type TimedSecurityCacheEntry<T> = { value: T; expiresAt: number };
 type ResolvedAgentAccess = { agentId: string; scopes: string[] };
 
@@ -400,7 +399,6 @@ const resolvedAgentCache = new Map<string, TimedSecurityCacheEntry<ResolvedAgent
 let knownSecurityRevision: number | null = null;
 let securityRevisionCheckedAt = 0;
 let securityRevisionCheckPromise: Promise<void> | null = null;
-let quotaDisabledUntil = 0;
 const usageRecordBudget = new DailyOptionalBudget();
 const USAGE_BATCH_MAX_EVENTS = 96;
 const USAGE_BATCH_DELAY_MS = 3_000;
@@ -585,7 +583,7 @@ async function inspectMcpToolCall(request: Request) {
 async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Promise<Response | null> {
   const call = await inspectMcpToolCall(request);
   if (!call) return null;
-  if (quotaDisabledUntil > Date.now()) return null;
+  if (quotaDisabledFastPathActive()) return null;
   let response: Response;
   try {
     response = await usageStub(env).fetch(new Request("https://usage.internal/quota/check", {
@@ -599,7 +597,7 @@ async function enforceMcpQuota(request: Request, env: Env, user: AuthUser): Prom
   if (!response.ok) return error(503, "quota_unavailable");
   const decision = await response.json<QuotaDecision>();
   if (decision.policy?.rateLimit === 0 && decision.policy?.dailyCallQuota === 0) {
-    quotaDisabledUntil = Date.now() + QUOTA_DISABLED_CACHE_TTL_MS;
+    noteQuotaDisabled();
   }
   if (decision.allowed) return null;
 

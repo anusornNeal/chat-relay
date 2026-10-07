@@ -3,6 +3,7 @@ import { DEFAULT_QUOTA_POLICY, normalizeQuotaPolicy, type QuotaPolicy } from "./
 import { clearGoogleStateCookie, finishGoogleLogin, googleLoginSuccessPage, startGoogleLogin } from "./google-auth";
 import { completeGoogleConnectorAuthorization } from "./oauth";
 import { completeGoogleDeviceAuthorization } from "./device-auth";
+import { invalidateQuotaDisabledFastPath } from "./quota-disabled-cache";
 
 type AdminEnv = {
   REGISTRY: DurableObjectNamespace;
@@ -613,6 +614,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     if (body?.resetToDefaults === true) {
       const response = await usageStub(env).fetch(new Request("https://usage.internal/quota/policy", { method: "DELETE" }));
       if (!response.ok) return error(502, "quota_policy_update_failed");
+      invalidateQuotaDisabledFastPath();
       const current = await quotaPolicy(env);
       await recordAudit(env, actor, "policy.quota.reset", { type: "quota_policy", id: "global" }, "success");
       return Response.json({ ok: true, ...current });
@@ -630,6 +632,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       body: JSON.stringify(policy),
     }));
     const data = await response.json<any>();
+    if (response.ok) invalidateQuotaDisabledFastPath();
     await recordAudit(env, actor, "policy.quota.set", { type: "quota_policy", id: "global" }, response.ok ? "success" : "failure", {      rateLimit: policy.rateLimit,
       rateWindowSeconds: policy.rateWindowSeconds,
       dailyCallQuota: policy.dailyCallQuota,
@@ -996,8 +999,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     });
   }
 
-  if (path === "/admin/users" && request.method === "POST") {
-    const name = String(body?.name ?? "").trim();
+  if (path === "/admin/users" && request.method === "POST") {    const name = String(body?.name ?? "").trim();
     if (!name) return error(400, "name_required");
     const id = String(body?.id || generatedId(name, "user"));
     const token = newToken("usr");
