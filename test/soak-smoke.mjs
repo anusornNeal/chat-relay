@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
 import { AgentConnectionState } from "../agent/connection-state.mjs";
+import { CapabilityScheduler } from "../agent/capability-scheduler.mjs";
 import { RemoteTui, terminalCellWidth } from "../cli/tui.mjs";
 import { DailyOptionalBudget } from "../src/usage-budget.mjs";
 
@@ -27,6 +28,53 @@ for (let index = 0; index < iterations; index += 1) {
   assert.ok(delay >= 100 && delay <= 5_000);
 }
 assert.equal(state.snapshot().reconnectCount, iterations);
+
+
+async function verifyFiveChatConcurrency() {
+  const scheduler = new CapabilityScheduler({ terminalExecConcurrency: 4, fileConcurrency: 2, maxQueued: 4 });
+  let releaseRunning;
+  const runningGate = new Promise((resolve) => { releaseRunning = resolve; });
+  const started = [];
+  let active = 0;
+  let peak = 0;
+  const tasks = Array.from({ length: 5 }, (_, index) => scheduler.run("terminal.exec", async () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    started.push(index);
+    try {
+      await runningGate;
+      return index;
+    } finally {
+      active -= 1;
+    }
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(peak, 4, "four terminal requests should run concurrently");
+  assert.equal(scheduler.snapshot().terminalExec.queued, 1, "fifth request must remain queued");
+  const otherLane = await scheduler.run("fs.read", async () => "independent");
+  assert.equal(otherLane, "independent", "file operations must not wait for terminal capacity");
+  assert.deepEqual(started, [0, 1, 2, 3], "admission order must remain FIFO");
+
+  releaseRunning();
+  assert.deepEqual(await Promise.all(tasks), [0, 1, 2, 3, 4]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(active, 0);
+  assert.equal(peak, 4, "terminal lane cap must not be exceeded");
+  assert.equal(scheduler.snapshot().terminalExec.queued, 0);
+  assert.equal(scheduler.snapshot().terminalExec.active, 0);
+
+  await assert.rejects(
+    scheduler.run("terminal.exec", async () => { throw new Error("synthetic failure"); }),
+    /synthetic failure/,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduler.snapshot().terminalExec.active, 0, "rejected tasks must release capacity");
+  assert.equal(await scheduler.run("terminal.exec", async () => "recovered"), "recovered");
+
+  console.log("five-chat scheduler: peak=4 queued=1 cross-lane=independent completed=5 duplicates=0");
+}
+
+await verifyFiveChatConcurrency();
 
 const budget = new DailyOptionalBudget();
 const budgetLimit = Math.max(1, Math.floor(iterations / 2));
