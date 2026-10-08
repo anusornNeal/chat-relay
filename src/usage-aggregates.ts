@@ -351,7 +351,13 @@ export class UsageAggregates {
     }
     const predicate = where.join(" AND ");
 
-    const metric = this.sql.exec<{
+    const byDay = toMs - fromMs > 36 * HOUR;
+    const bucketSize = byDay ? DAY : HOUR;
+    const bucketExpr = byDay
+      ? `(CAST((CAST(substr(bucket_key, 1, 13) AS INTEGER) + ${BKK}) / ${DAY} AS INTEGER) * ${DAY} - ${BKK})`
+      : "CAST(substr(bucket_key, 1, 13) AS INTEGER)";
+    const bucketRows = this.sql.exec<{
+      start_ms: number;
       calls: number | null;
       detail_calls: number | null;
       errors: number | null;
@@ -363,6 +369,7 @@ export class UsageAggregates {
       max_duration_ms: number | null;
     }>(
       `SELECT
+         ${bucketExpr} AS start_ms,
          SUM(calls) AS calls,
          SUM(detail_calls) AS detail_calls,
          SUM(errors) AS errors,
@@ -373,9 +380,42 @@ export class UsageAggregates {
          MIN(CASE WHEN detail_calls > 0 THEN min_duration_ms END) AS min_duration_ms,
          MAX(CASE WHEN detail_calls > 0 THEN max_duration_ms END) AS max_duration_ms
        FROM ${TABLE}
-       WHERE ${predicate}`,
+       WHERE ${predicate}
+       GROUP BY start_ms
+       ORDER BY start_ms`,
       ...bindings,
-    ).toArray()[0];
+    ).toArray();
+
+    // Bucket aggregates already scan all matching rows. Reduce them instead of
+    // performing a second full-range SQL query for the overview metrics.
+    let calls = 0;
+    let detailedCalls = 0;
+    let errors = 0;
+    let operationalErrors = 0;
+    let durationMs = 0;
+    let requestBytes = 0;
+    let responseBytes = 0;
+    let minDurationMs: number | null = null;
+    let maxDurationMs: number | null = null;
+    for (const row of bucketRows) {
+      calls += Number(row.calls || 0);
+      detailedCalls += Number(row.detail_calls || 0);
+      errors += Number(row.errors || 0);
+      operationalErrors += Number(row.operational_errors || 0);
+      durationMs += Number(row.duration_ms || 0);
+      requestBytes += Number(row.request_bytes || 0);
+      responseBytes += Number(row.response_bytes || 0);
+      if (row.min_duration_ms !== null && row.min_duration_ms !== undefined) {
+        minDurationMs = minDurationMs === null
+          ? Number(row.min_duration_ms)
+          : Math.min(minDurationMs, Number(row.min_duration_ms));
+      }
+      if (row.max_duration_ms !== null && row.max_duration_ms !== undefined) {
+        maxDurationMs = maxDurationMs === null
+          ? Number(row.max_duration_ms)
+          : Math.max(maxDurationMs, Number(row.max_duration_ms));
+      }
+    }
 
     const histogram = this.sql.exec<{ bin: string; count: number | null }>(
       `SELECT json_each.key AS bin, SUM(CAST(json_each.value AS INTEGER)) AS count
@@ -385,7 +425,6 @@ export class UsageAggregates {
       ...bindings,
     ).toArray();
 
-    const detailedCalls = Number(metric?.detail_calls || 0);
     let p95DurationMs: number | null = null;
     if (detailedCalls > 0) {
       let rank = Math.ceil(detailedCalls * 0.95);
@@ -399,7 +438,7 @@ export class UsageAggregates {
         rank -= item.count;
         if (rank <= 0) {
           const estimate = item.bin === 0 ? 0 : Math.ceil(1.1 ** (item.bin - 1));
-          p95DurationMs = Math.min(Number(metric?.max_duration_ms || estimate), estimate);
+          p95DurationMs = Math.min(maxDurationMs || estimate, estimate);
           break;
         }
       }
@@ -418,42 +457,19 @@ export class UsageAggregates {
       calls: Number(row.calls || 0),
     }));
 
-    const byDay = toMs - fromMs > 36 * HOUR;
-    const bucketSize = byDay ? DAY : HOUR;
-    const bucketExpr = byDay
-      ? `(CAST((CAST(substr(bucket_key, 1, 13) AS INTEGER) + ${BKK}) / ${DAY} AS INTEGER) * ${DAY} - ${BKK})`
-      : "CAST(substr(bucket_key, 1, 13) AS INTEGER)";
-    const bucketRows = this.sql.exec<{
-      start_ms: number;
-      calls: number | null;
-      errors: number | null;
-      operational_errors: number | null;
-    }>(
-      `SELECT
-         ${bucketExpr} AS start_ms,
-         SUM(calls) AS calls,
-         SUM(errors) AS errors,
-         SUM(operational_errors) AS operational_errors
-       FROM ${TABLE}
-       WHERE ${predicate}
-       GROUP BY start_ms
-       ORDER BY start_ms`,
-      ...bindings,
-    ).toArray();
-
     return {
       metric: {
-        calls: Number(metric?.calls || 0),
-        errors: Number(metric?.errors || 0),
-        operationalErrors: Number(metric?.operational_errors || 0),
-        durationMs: Number(metric?.duration_ms || 0),
-        requestBytes: Number(metric?.request_bytes || 0),
-        responseBytes: Number(metric?.response_bytes || 0),
-        minDurationMs: detailedCalls ? Number(metric?.min_duration_ms || 0) : null,
-        maxDurationMs: detailedCalls ? Number(metric?.max_duration_ms || 0) : null,
-        avgDurationMs: detailedCalls ? Number(metric?.duration_ms || 0) / detailedCalls : null,
-        errorRate: detailedCalls ? Number(metric?.errors || 0) / detailedCalls : null,
-        operationalErrorRate: detailedCalls ? Number(metric?.operational_errors || 0) / detailedCalls : null,
+        calls,
+        errors,
+        operationalErrors,
+        durationMs,
+        requestBytes,
+        responseBytes,
+        minDurationMs: detailedCalls ? minDurationMs ?? 0 : null,
+        maxDurationMs: detailedCalls ? maxDurationMs ?? 0 : null,
+        avgDurationMs: detailedCalls ? durationMs / detailedCalls : null,
+        errorRate: detailedCalls ? errors / detailedCalls : null,
+        operationalErrorRate: detailedCalls ? operationalErrors / detailedCalls : null,
         p95DurationMs,
         p95Approximate: detailedCalls > 0,
       },

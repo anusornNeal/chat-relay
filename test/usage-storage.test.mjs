@@ -7,7 +7,7 @@ if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const bundled = await build({
   stdin: {
-    contents: 'export { Usage } from "./src/usage"; export { Registry } from "./src/registry";',
+    contents: 'export { Usage } from "./src/usage"; export { Registry } from "./src/registry"; export { UsageAggregates } from "./src/usage-aggregates";',
     resolveDir: process.cwd(),
   },
   bundle: true,
@@ -25,7 +25,7 @@ const bundled = await build({
   }],
 });
 
-const { Usage, Registry } = await import(
+const { Usage, Registry, UsageAggregates } = await import(
   "data:text/javascript;base64," + Buffer.from(bundled.outputFiles[0].text).toString("base64")
 );
 
@@ -244,6 +244,66 @@ const event = (timestamp, overrides = {}) => ({
   assert.equal((await f.call("/state")).status, 200);
   assert.equal(f.stats.lists, 6, "relevant mutations must invalidate Registry state cache");
   console.log("PASS Registry state hot-cache collapses repeated dashboard metadata reads");
+}
+
+
+{
+  // SQLite DO evidence: one upsert for 50 same-bucket calls. For detailed
+  // windows, one grouped count query plus three detail queries (rather than
+  // a separate global metric scan AND a grouped bucket scan).
+  const sqlQueries = [];
+  const cursor = (rows = []) => ({ toArray: () => rows });
+  const start = Date.parse("2026-10-04T08:00:00Z");
+  const sql = {
+    exec(query) {
+      const sqlText = String(query);
+      sqlQueries.push(sqlText);
+      if (/^\s*(CREATE|ALTER|PRAGMA)/i.test(sqlText)) return cursor();
+      if (/^\s*INSERT INTO/i.test(sqlText)) return cursor();
+      if (sqlText.includes("WITH filtered AS")) return cursor([
+        { kind: "data", user_id: "alice", agent_id: "agent-a", calls: 50, first_key: null },
+        { kind: "meta", user_id: null, agent_id: null, calls: null, first_key: String(Date.parse("2026-09-01T00:00:00Z")) + "|" },
+      ]);
+      if (sqlText.includes("AS start_ms")) return cursor([
+        { start_ms: start, calls: 30, detail_calls: 30, errors: 2, operational_errors: 1,
+          duration_ms: 600, request_bytes: 3000, response_bytes: 6000, min_duration_ms: 10, max_duration_ms: 30 },
+        { start_ms: start + 3600000, calls: 20, detail_calls: 20, errors: 1, operational_errors: 0,
+          duration_ms: 500, request_bytes: 2000, response_bytes: 4000, min_duration_ms: 15, max_duration_ms: 40 },
+      ]);
+      if (sqlText.includes("json_each(histogram_json)")) return cursor([{ bin: "b15", count: 30 }, { bin: "b38", count: 20 }]);
+      if (sqlText.includes("json_each(tools_json)")) return cursor([{ tool: "terminal.exec", calls: 30 }, { tool: "fs.read", calls: 20 }]);
+      throw new Error("unexpected SQL query: " + sqlText.slice(0, 100));
+    },
+  };
+  const storage = {
+    sql,
+    async get() { throw new Error("legacy KV should not be read after SQL cutover"); },
+    async put() { throw new Error("SQLite DO must not write fallback KV rows"); },
+  };
+  const aggregates = new UsageAggregates(storage);
+  sqlQueries.length = 0;
+  await aggregates.recordBatch(Array.from({ length: 50 }, (_, index) =>
+    event("2026-10-04T08:00:00Z", { tool: index % 2 ? "fs.read" : "terminal.exec", durationMs: index + 1 }),
+  ));
+  const upserts = sqlQueries.filter((sqlText) => /^\s*INSERT INTO/i.test(sqlText)).length;
+  assert.equal(upserts, 1, "50 events in one hour/user/agent require exactly one SQLite upsert");
+
+  sqlQueries.length = 0;
+  const result = await aggregates.window(start, start + 2 * 3600000 - 1, { userId: "alice" }, true);
+  assert.equal(sqlQueries.length, 4, "details require one count scan and three detail scans, not five");
+  assert.equal(result.metric.calls, 50);
+  assert.equal(result.metric.errors, 3);
+  assert.equal(result.metric.operationalErrors, 1);
+  assert.equal(result.metric.durationMs, 1100);
+  assert.equal(result.metric.requestBytes, 5000);
+  assert.equal(result.metric.responseBytes, 10000);
+  assert.equal(result.metric.minDurationMs, 10);
+  assert.equal(result.metric.maxDurationMs, 40);
+  assert.equal(result.metric.avgDurationMs, 22);
+  assert.equal(result.detailSampleSize, 50);
+  assert.equal(result.buckets.length, 2);
+  assert.ok(result.metric.p95DurationMs >= 0 && result.metric.p95DurationMs <= 40);
+  console.log("SQL benchmark: 50 same-bucket events=1 upsert; detailed-window queries=5 before / 4 after (20% fewer)");
 }
 
 console.log("usage storage/query optimization tests passed");
