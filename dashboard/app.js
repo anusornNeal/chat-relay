@@ -501,23 +501,28 @@ function periodDisplayLabel(range = dashboardRange) {
 }
 function chartDisplayBuckets(buckets = [], period = dashboardPeriod) {
   const items = Array.isArray(buckets) ? buckets : [];
-  if (period?.range !== "today") return items;
+  const slotCount = period?.range === "30d" ? 30 : period?.range === "7d" ? 7 : period?.range === "today" ? 24 : 0;
+  if (!slotCount) return items;
 
-  const dayStart = Date.parse(period?.from || "");
-  if (!Number.isFinite(dayStart)) return items;
+  const periodStart = Date.parse(period?.from || "");
+  if (!Number.isFinite(periodStart)) return items;
 
-  const hourMs = 60 * 60 * 1000;
-  const bucketsByHour = new Map(
+  const slotMs = period.range === "today" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+  const bucketsBySlot = new Map(
     items
-      .map((bucket) => [Math.floor(Date.parse(bucket.from) / hourMs), bucket])
-      .filter(([key]) => Number.isFinite(key)),
+      .map((bucket) => {
+        const fromMs = Date.parse(bucket.from);
+        const slotIndex = Math.round((fromMs - periodStart) / slotMs);
+        return [slotIndex, bucket];
+      })
+      .filter(([slotIndex]) => Number.isInteger(slotIndex) && slotIndex >= 0 && slotIndex < slotCount),
   );
 
-  return Array.from({ length: 24 }, (_, index) => {
-    const fromMs = dayStart + index * hourMs;
-    return bucketsByHour.get(Math.floor(fromMs / hourMs)) || {
+  return Array.from({ length: slotCount }, (_, index) => {
+    const fromMs = periodStart + index * slotMs;
+    return bucketsBySlot.get(index) || {
       from: new Date(fromMs).toISOString(),
-      to: new Date(fromMs + hourMs - 1).toISOString(),
+      to: new Date(fromMs + slotMs - 1).toISOString(),
       calls: 0,
       errors: 0,
       operationalErrors: 0,
@@ -528,12 +533,12 @@ function chartMarkup(buckets = [], period = dashboardPeriod) {
   const items = Array.isArray(buckets) ? buckets : [];
   const displayItems = chartDisplayBuckets(items, period);
   const byDay = period?.range === "7d" || period?.range === "30d";
-  const callsByBucket = items.map((bucket) => Number(bucket.calls || 0));
+  const callsByBucket = displayItems.map((bucket) => Number(bucket.calls || 0));
   const total = callsByBucket.reduce((sum, calls) => sum + calls, 0);
   const max = Math.max(1, ...callsByBucket);
-  const average = items.length ? total / items.length : 0;
+  const average = displayItems.length ? total / displayItems.length : 0;
   const peakIndex = callsByBucket.indexOf(Math.max(0, ...callsByBucket));
-  const peakBucket = peakIndex >= 0 ? items[peakIndex] : null;
+  const peakBucket = peakIndex >= 0 && callsByBucket[peakIndex] > 0 ? displayItems[peakIndex] : null;
   const peakLabel = peakBucket ? (byDay ? bkkDayLabel(peakBucket.from) : bkkHourMinute(peakBucket.from)) : "\u2014";
   const yTicks = [1, .75, .5, .25, 0].map((ratio) => Math.round(max * ratio));
   const yLabels = '<div class="chart-y-axis" aria-hidden="true">' + yTicks.map((value) => '<span>' + fmtNum(value) + "</span>").join("") + "</div>";
@@ -566,7 +571,7 @@ function chartMarkup(buckets = [], period = dashboardPeriod) {
     '<div><span>Avg / ' + intervalLabel + '</span><strong>' + fmtNum(Math.round(average)) + '</strong></div>' +
     '<div><span>Peak</span><strong>' + esc(peakLabel) + '</strong></div>' +
     "</div>";
-  if (!items.length && period?.range !== "today") return stats + '<div class="chart-empty">No tool activity in this period.</div>';
+
   return stats + '<div class="chart-frame">' + yLabels +
     '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div>' +
     '<div class="chart-bars">' + bars + '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
