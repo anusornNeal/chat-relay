@@ -82,7 +82,7 @@ const SAFE_AGENT_DIAGNOSTIC_REASONS = new Set([
   "heartbeat_ack_timeout", "transport_pong_timeout", "transport_ping_failed", "socket_closed",
   "credential_revoked", "credential_rejected", "protocol_incompatible", "restart_requested",
   "upgrade_requested", "connection_generation_changed",
-  "client_shutdown", "replaced", "heartbeat_timeout", "shutdown", "SIGINT", "SIGTERM",
+  "client_shutdown", "replaced", "heartbeat_timeout", "shutdown", "socket_error", "SIGINT", "SIGTERM",
 ]);
 const SAFE_NETWORK_ERROR_CODES = ["ENOTFOUND", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"];
 

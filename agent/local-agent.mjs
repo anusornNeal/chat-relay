@@ -5,7 +5,7 @@ import { GitWorktreeManager } from "./git-worktree-manager.mjs";
 import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
 import { CapabilityScheduler } from "./capability-scheduler.mjs";
-import { AgentConnectionState } from "./connection-state.mjs";
+import { AgentConnectionState, safeConnectionReason } from "./connection-state.mjs";
 import { buildAgentHello } from "./protocol.mjs";
 import {
   AgentLifecycle,
@@ -394,7 +394,8 @@ function scheduleReconnect(code, reason) {
     reconnects: connectionState.snapshot().reconnectCount,
     delayMs: delay,
     closeCode: code ?? null,
-    reason: reason || "socket_closed",
+    reason: safeConnectionReason(reason) || "socket_closed",
+    category: connectionState.lastDisconnectCategory,
   });
   clearReconnectTimer();
   plainLog(`Reconnect scheduled in ${delay}ms`);
@@ -609,7 +610,7 @@ function connect() {
     activeSocket = null;
     stopHeartbeat();
     const reasonText = reason.toString();
-    plainLog("Agent disconnected (" + code + ") " + reasonText);
+    plainLog("Agent disconnected (" + code + ") " + (safeConnectionReason(reasonText) || "socket_closed"));
     if (code === 4001 || reasonText === "credential_revoked") {
       requireReauthorization("credential_revoked");
       return;
@@ -618,13 +619,13 @@ function connect() {
       requireProtocolUpdate({ receivedProtocolVersion: agentHello.protocolVersion });
       return;
     }
-    scheduleReconnect(code, reasonText || "socket_closed");
+    scheduleReconnect(code, safeConnectionReason(reasonText) || "socket_closed");
   });
 
   socket.on("error", (error) => {
     if (socket === activeSocket && !stopping && !reauthorizationRequired) {
       connectionState.markSocketError(error.message);
-      plainError("WebSocket error:", error.message);
+      plainError("WebSocket error:", safeConnectionReason(error.message));
     }
   });
 }

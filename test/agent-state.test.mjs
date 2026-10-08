@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AgentConnectionState, safeConnectionReason } from "../agent/connection-state.mjs";
 
 import {
   AGENT_CONNECTION_EVENT_LIMIT,
@@ -143,4 +144,29 @@ test("upgrade lifecycle and generation diagnostics survive normalization", () =>
   assert.equal(health.serverConnectionGeneration, 42);
   assert.equal(health.lastSocketError, "connection_generation_changed");
   assert.equal(normalizeAgentDiagnosticReason("upgrade_requested"), "upgrade_requested");
+});
+
+test("connection diagnostics classify closes without exposing socket payloads", () => {
+  const state = new AgentConnectionState();
+  state.markConnected(1_000);
+  state.markSocketError("Authorization: Bearer secret=do-not-log");
+  state.markDisconnected(1006, "token=secret user command", 2_000);
+  const abnormal = state.snapshot();
+  assert.equal(abnormal.lastSocketError, "socket_error");
+  assert.equal(abnormal.lastDisconnectReason, "socket_error");
+  assert.equal(abnormal.lastDisconnectCategory, "abnormal_transport");
+  assert.equal(JSON.stringify(abnormal).includes("secret"), false);
+
+  state.markConnected(3_000);
+  state.markSocketError("transport_pong_timeout");
+  state.markDisconnected(1006, "socket_closed", 4_000);
+  assert.equal(state.snapshot().lastDisconnectCategory, "timeout");
+
+  state.markConnected(5_000);
+  state.markDisconnected(1006, "socket_closed", 6_000);
+  assert.equal(state.snapshot().lastDisconnectCategory, "abnormal_transport", "old timeouts must not leak into new socket diagnoses");
+  assert.equal(state.snapshot().lastSocketError, "transport_pong_timeout", "historical socket errors remain inspectable");
+  assert.equal(safeConnectionReason("connect ECONNRESET 192.0.2.1"), "ECONNRESET");
+  assert.equal(safeConnectionReason("unexpected_response_503"), "unexpected_response_503");
+  assert.equal(safeConnectionReason("user private header"), "socket_error");
 });
