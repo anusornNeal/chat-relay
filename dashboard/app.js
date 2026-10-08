@@ -17,6 +17,7 @@ let dataRetryAttempt = 0;
 const pendingLiveTopics = new Set();
 let dashboardPeriod = null;
 let dashboardRange = "today";
+let overviewUserId = "";
 let usageUserMode = "active";
 
 const BKK_TZ = "Asia/Bangkok";
@@ -580,20 +581,28 @@ function chartMarkup(buckets = [], period = dashboardPeriod) {
 async function loadOverview({ patch = false } = {}) {
   const requestedPeriodLabel = periodDisplayLabel(dashboardRange);
   setHeader(
-    isAdmin() ? "System overview" : "My overview",
-    isAdmin() ? requestedPeriodLabel + " across Chat Relay" : requestedPeriodLabel + " \u00b7 your activity",
+    isAdmin() ? (overviewUserId ? "User overview" : "System overview") : "My overview",
+    isAdmin() ? requestedPeriodLabel + (overviewUserId ? " · selected account" : " across Chat Relay") : requestedPeriodLabel + " \u00b7 your activity",
   );
-  const data = await api("/admin/api/summary?range=" + encodeURIComponent(dashboardRange));
+  const data = await api("/admin/api/summary?range=" + encodeURIComponent(dashboardRange) +
+    (isAdmin() && overviewUserId ? "&userId=" + encodeURIComponent(overviewUserId) : ""));
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
   dashboardRange = dashboardPeriod.range || dashboardRange;
   const periodLabel = periodDisplayLabel(dashboardRange);
+  const accounts = isAdmin() ? (data.accountUsage || []) : [];
+  const userOptions = '<option value="">All users</option>' + accounts.map((account) =>
+    '<option value="' + esc(account.userId) + '"' + (overviewUserId === account.userId ? ' selected' : '') + '>' +
+    esc(account.name || account.login || account.userId) + '</option>').join('');
+  const userFilter = isAdmin()
+    ? '<label class="overview-user-filter">User <select id="overview-user-filter" aria-label="Filter overview by user">' + userOptions + '</select></label>'
+    : '';
   const m = data.usage || {};
   const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : periodLabel.toLowerCase();
   const cards = [
-    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
+    metricCard(isAdmin() && overviewUserId ? "User tool invocations" : isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
     metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), m.p95Approximate ? "p95 is approximate" : exactMeta),
     metricCard(
-      isAdmin() ? "Operational error rate" : "My operational error rate",
+      isAdmin() && overviewUserId ? "User operational error rate" : isAdmin() ? "Operational error rate" : "My operational error rate",
       fmtPct(m.operationalErrorRate ?? m.errorRate),
       fmtNum(m.operationalErrors ?? m.errors) + " infrastructure failures",
       Number(m.operationalErrors ?? m.errors ?? 0) ? "metric-alert" : "",
@@ -607,14 +616,19 @@ async function loadOverview({ patch = false } = {}) {
     : "";
   const chartUnit = dashboardRange === "today" ? "hour" : "day";
   const liveMarkup =
-    '<div class="overview-toolbar">' + periodChips(dashboardPeriod) +
-      '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
+    '<div class="overview-toolbar"><div class="overview-filters">' + periodChips(dashboardPeriod) + userFilter + '</div>' +
+      '<span class="privacy-chip">' + icon("info") + (isAdmin() ? (overviewUserId ? "Selected user metadata" : "System-wide safe metadata") : "Only your activity") + "</span></div>" +
     boundedNotice +
     '<div class="metric-grid">' + cards.join("") + "</div>" +
     '<section class="panel overview-chart-panel"><div class="overview-chart-heading"><div><div class="panel-kicker">Activity</div><h2>Tool activity</h2><p>Invocations by ' + chartUnit + ' for ' + esc(periodLabel.toLowerCase()) + '.</p></div>' +
       '<div class="chart-legend"><span class="legend-invocations"><i></i>Invocations</span><span class="legend-errors"><i></i>Operational error</span></div></div>' +
       chartMarkup(data.buckets || [], dashboardPeriod) + "</section>";
   renderContent(liveMarkup, patch);
+  const overviewFilter = document.getElementById("overview-user-filter");
+  if (overviewFilter) overviewFilter.onchange = async () => {
+    overviewUserId = overviewFilter.value;
+    await loadOverview();
+  };
   document.querySelectorAll("[data-overview-range]").forEach((button) => {
     button.onclick = async () => {
       const nextRange = button.dataset.overviewRange || "today";
@@ -763,7 +777,7 @@ function learnKindClass(kind) {
 function learnScopeLabel(item) {
   const scope = String(item?.scope || "");
   if (scope === "global") return "Global";
-  return scope.charAt(0).toUpperCase() + scope.slice(1) + (item?.scopeKey ? " Â· " + item.scopeKey : "");
+  return scope.charAt(0).toUpperCase() + scope.slice(1) + (item?.scopeKey ? " \u00b7 " + item.scopeKey : "");
 }
 
 function learnSummary(items) {

@@ -587,7 +587,12 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     const requestedRange = url.searchParams.get("range");
     const range: DashboardRange = requestedRange === "7d" || requestedRange === "30d" ? requestedRange : "today";
     const period = dashboardPeriod(range);
-    const usage = await usageWindow(env, period, adminAuthorized ? undefined : selfUserId, true);
+    const selectedUserId = adminAuthorized ? url.searchParams.get("userId") : null;
+    const selectedState = selectedUserId ? await registryState(env) : null;
+    if (selectedUserId && !(selectedState?.users ?? []).some((user: any) => user.id === selectedUserId && !user.deletedAt)) {
+      return error(404, "user_not_found");
+    }
+    const usage = await usageWindow(env, period, selectedUserId || (adminAuthorized ? undefined : selfUserId), true);
 
     if (!adminAuthorized) {
       const state = await registryState(env);
@@ -621,8 +626,12 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       });
     }
 
-    const state = await registryState(env);
-    const statuses = await onlineAgents(env, state.agents ?? [], state.users ?? [], state.grants ?? []);
+    const state = selectedState ?? await registryState(env);
+    const visibleAgents = selectedUserId
+      ? (state.agents ?? []).filter((agent: any) => agent.ownerUserId === selectedUserId ||
+          (state.grants ?? []).some((grant: any) => grant.userId === selectedUserId && grant.agentId === agent.id))
+      : (state.agents ?? []);
+    const statuses = await onlineAgents(env, visibleAgents, state.users ?? [], state.grants ?? []);
     const activeUsers = new Set(
       (state.users ?? []).filter((user: any) => user.enabled && !user.deletedAt).map((user: any) => user.id),
     );
@@ -649,6 +658,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     }, 0);
     return Response.json({
       role: "admin",
+      selectedUserId,
       period,
       users: { total: (state.users ?? []).length, enabled: activeUsers.size },
       agents: { total: statuses.length, online: statuses.filter((agent: any) => agent.online).length },
