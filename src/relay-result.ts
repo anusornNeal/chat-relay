@@ -24,9 +24,17 @@ const HEADER = {
 } as const;
 
 function boundedMs(value: unknown): number | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return undefined;
   return Math.min(Math.max(0, Math.round(numeric)), 120_000);
+}
+
+function safeExitCode(value: unknown): number | undefined {
+  if (typeof value !== "number" && typeof value !== "string") return undefined;
+  if (typeof value === "string" && !/^-?\d+$/.test(value.trim())) return undefined;
+  const code = Number(value);
+  return Number.isSafeInteger(code) ? code : undefined;
 }
 
 function safeErrorCode(value: unknown): string | undefined {
@@ -53,10 +61,11 @@ export function relayResultHeaders(payload: unknown, timing: RelayResultTiming):
     headers.set(HEADER.payloadOk, result.ok ? "1" : "0");
   }
 
+  const exitCode = safeExitCode(result.exitCode);
   if (result.exitCode === null) {
     headers.set(HEADER.exitCode, "null");
-  } else if (Number.isFinite(Number(result.exitCode))) {
-    headers.set(HEADER.exitCode, String(Math.trunc(Number(result.exitCode))));
+  } else if (exitCode !== undefined) {
+    headers.set(HEADER.exitCode, String(exitCode));
   }
 
   const errorCode = safeErrorCode(result.errorCode) || safeErrorCode(result.error);
@@ -69,6 +78,7 @@ export function readRelayResultMetadata(headers: Headers): RelayResultMetadata {
 
   const payloadOkHeader = headers.get(HEADER.payloadOk);
   const exitCodeHeader = headers.get(HEADER.exitCode);
+  const exitCode = safeExitCode(exitCodeHeader);
   const errorCode = safeErrorCode(headers.get(HEADER.errorCode));
   const relayRoundTripMs = boundedMs(headers.get(HEADER.relayRoundTripMs));
   const transportMs = boundedMs(headers.get(HEADER.transportMs));
@@ -84,8 +94,8 @@ export function readRelayResultMetadata(headers: Headers): RelayResultMetadata {
         : {}),
     ...(exitCodeHeader === "null"
       ? { exitCode: null }
-      : exitCodeHeader !== null && Number.isFinite(Number(exitCodeHeader))
-        ? { exitCode: Math.trunc(Number(exitCodeHeader)) }
+      : exitCode !== undefined
+        ? { exitCode }
         : {}),
     ...(errorCode ? { errorCode } : {}),
     ...(relayRoundTripMs === undefined ? {} : { relayRoundTripMs }),
