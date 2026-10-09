@@ -14,7 +14,7 @@ import { readRelayResultMetadata } from "./relay-result";
 import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
-import { LEARN_BASELINE_CONTEXT } from "./learning-policy";
+import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT } from "./learning-policy";
 import { LearnPreflightGuard, attachLearnPrepareAdvisory } from "./learn-preflight-guard.mjs";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
@@ -1155,7 +1155,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   registerTool(
     "whoami",
-    { description: "Show the authenticated relay user. Relay Learn is available to new accounts: consider learn_prepare once when prior context matters and learn_put for durable user corrections or reusable preferences, not for ordinary tool calls.", inputSchema: {}, annotations: annotationsForTool("whoami"), ...oauthToolSecurity() } as any,
+    { description: "Show the authenticated relay user. " + LEARN_DISCOVERY_HINT, inputSchema: {}, annotations: annotationsForTool("whoami"), ...oauthToolSecurity() } as any,
     async () => instrumentTool(env, user, "whoami", {}, async () => {
       const value = toolResult({ ok: true, body: JSON.stringify({ user }) });
       return { value, ok: true };
@@ -1164,7 +1164,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   registerTool(
     "list_agents",
-    { description: "List agents this user can access, including scopes and online status.", inputSchema: {}, annotations: annotationsForTool("list_agents"), ...oauthToolSecurity() } as any,
+    { description: "List agents this user can access, including scopes and online status. " + LEARN_DISCOVERY_HINT, inputSchema: {}, annotations: annotationsForTool("list_agents"), ...oauthToolSecurity() } as any,
     async () => instrumentTool(env, user, "list_agents", {}, async () => {
       const call = await listUserAgents(env, user);
       return { value: toolResult(call), ok: call.ok };
@@ -1225,7 +1225,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
   registerTool(
     "ping_agent",
     {
-      description: "Check whether a permitted local agent is reachable.",
+      description: "Check whether a permitted local agent is reachable. " + LEARN_DISCOVERY_HINT,
       inputSchema: { agentId: agentIdSchema },
       annotations: annotationsForTool("ping_agent"),
       ...oauthToolSecurity(),

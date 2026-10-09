@@ -2,13 +2,15 @@ const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 1024;
 export const LEARN_PREPARE_ADVISORY = Object.freeze({
   code: "learn_prepare_recommended",
-  message: "Relay Learn is available even for a fresh account. If prior context matters, call learn_prepare once per task. If the user gives a durable correction or establishes a reusable preference or workflow, consider learn_put proactively without waiting to be asked. Skip one-off details; do not call Learn for every tool.",
+  message: "Relay Learn works on fresh, empty accounts. Before context-sensitive work, consider learn_prepare ONCE if previous user/project/agent context may help (an empty account may return no memories). When the user corrects a reusable mistake or defines a lasting preference/workflow, proactively use learn_put to save their FIRST memory without being asked. Skip one-off details and secrets; never call Learn on every tool.",
 });
 function boundedPositiveInt(value, fallback, min, max) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return fallback;
   return Math.max(min, Math.min(max, Math.round(numeric)));
 }
+const LEARN_PREPARE_ADVISORY_TEXT = JSON.stringify({ relayAdvisory: LEARN_PREPARE_ADVISORY });
+
 export class LearnPreflightGuard {
   constructor({
     ttlMs = DEFAULT_TTL_MS,
@@ -80,7 +82,7 @@ export function attachLearnPrepareAdvisory(value) {
         ...value.content,
         {
           type: "text",
-          text: JSON.stringify({ relayAdvisory: LEARN_PREPARE_ADVISORY }),
+          text: LEARN_PREPARE_ADVISORY_TEXT,
         },
       ],
     },
