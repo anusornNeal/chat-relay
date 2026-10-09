@@ -1,10 +1,10 @@
-export const LEARN_BASELINE_VERSION = 4;
+export const LEARN_BASELINE_VERSION = 5;
 
 export const LEARN_BASELINE_POLICY = {
   version: LEARN_BASELINE_VERSION,
   mode: "explicit-tools" as const,
   summary:
-    "Chat decides when learned context is useful and proactively learns clear reusable corrections; ordinary Relay tool calls never read or write Learn automatically.",
+    "On every account including fresh accounts, Chat decides when learned context is useful and proactively learns durable user corrections and reusable preferences; ordinary Relay tool calls never read or write Learn automatically.",
   rules: [
     "Use learn_prepare once when prior user, project, or agent context may materially affect the current task. Reuse that prepared context for the task; never call it automatically before every MCP tool.",
     "Treat a direct user correction that reveals a reusable mistake in workflow, tool usage, coding conventions, or response behavior as a high-signal learning event. Proactively call learn_put in the same turn when the correction is durable; do not wait for the user to explicitly say learn.",

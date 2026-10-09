@@ -2,7 +2,7 @@ const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 1024;
 export const LEARN_PREPARE_ADVISORY = Object.freeze({
   code: "learn_prepare_recommended",
-  message: "Learn context has not been prepared for this activity. If prior user, project, or agent context may materially affect the task, call learn_prepare once now and reuse it for the task. Do not call it before every tool.",
+  message: "Relay Learn is available even for a fresh account. If prior context matters, call learn_prepare once per task. If the user gives a durable correction or establishes a reusable preference or workflow, consider learn_put proactively without waiting to be asked. Skip one-off details; do not call Learn for every tool.",
 });
 function boundedPositiveInt(value, fallback, min, max) {
   const numeric = Number(value);

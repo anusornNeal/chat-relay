@@ -1155,7 +1155,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   registerTool(
     "whoami",
-    { description: "Show the authenticated relay user.", inputSchema: {}, annotations: annotationsForTool("whoami"), ...oauthToolSecurity() } as any,
+    { description: "Show the authenticated relay user. Relay Learn is available to new accounts: consider learn_prepare once when prior context matters and learn_put for durable user corrections or reusable preferences, not for ordinary tool calls.", inputSchema: {}, annotations: annotationsForTool("whoami"), ...oauthToolSecurity() } as any,
     async () => instrumentTool(env, user, "whoami", {}, async () => {
       const value = toolResult({ ok: true, body: JSON.stringify({ user }) });
       return { value, ok: true };
@@ -1177,7 +1177,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
   registerTool(
     "learn_prepare",
     {
-      description: "Prepare relevant learned context once for the current task when prior user/project/agent context may materially affect decisions. This is explicit and read-only: call it when useful, reuse the result for the task, and do not call it before every MCP tool.",
+      description: LEARN_BASELINE_CONTEXT + " Prepare relevant learned context once when prior user/project/agent context may materially affect decisions, including on fresh accounts. Read-only; reuse the result for the task, not before every tool.",
       inputSchema: {
         query: z.string().min(1).max(1200),
         toolHint: z.string().min(1).max(80).optional(),
