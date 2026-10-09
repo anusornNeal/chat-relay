@@ -1148,10 +1148,10 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
   // OpenAI supplies a tool-name hint for tools/call. Only register that tool
   // on this request, avoiding the CPU cost of registering the entire catalog.
   // Each invocation still gets a fresh server and request-scoped user/env.
-  const registerTool = (name: string, config: any, callback: any) => {
+  const registerTool = ((name: string, config: any, callback: any) => {
     if (requestedTool && name !== requestedTool) return;
-    server.registerTool(name, config, callback);
-  };
+    return server.registerTool(name, config, callback);
+  }) as McpServer["registerTool"];
 
   registerTool(
     "whoami",
@@ -1244,6 +1244,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
     payload: (args: any) => unknown,
     annotations?: Record<string, boolean>,
   ) => {
+    if (requestedTool && name !== requestedTool) return;
     registerTool(
       name,
       {
