@@ -310,7 +310,35 @@ export class DesktopManager {
     return this.runControl(() => this.runner("mouse_click", { x, y, button, clicks }));
   }
 
-  async keyboardInput(input = {}) {
+  async clickImageTarget(input = {}) {
+    const gate = this.gate();
+    if (gate) return gate;
+    const { imageWidth, imageHeight, desktopOriginX, desktopOriginY, desktopWidth, desktopHeight } = input;
+    const numbers = [imageWidth, imageHeight, desktopOriginX, desktopOriginY, desktopWidth, desktopHeight, input.x, input.y];
+    if (numbers.some((value) => !Number.isFinite(value)) ||
+        !numbers.every(Number.isInteger) ||
+        imageWidth <= 0 || imageHeight <= 0 || desktopWidth <= 0 || desktopHeight <= 0 ||
+        input.x < 0 || input.x >= imageWidth || input.y < 0 || input.y >= imageHeight) {
+      return { ok: false, error: "invalid_image_coordinates" };
+    }
+    const targetWidth = input.targetWidth ?? 1;
+    const targetHeight = input.targetHeight ?? 1;
+    if (![targetWidth, targetHeight].every(Number.isInteger) ||
+        targetWidth <= 0 || targetHeight <= 0 ||
+        input.x + targetWidth > imageWidth || input.y + targetHeight > imageHeight) {
+      return { ok: false, error: "invalid_target_bounds" };
+    }
+    const x = desktopOriginX + Math.floor((input.x + targetWidth / 2) * desktopWidth / imageWidth);
+    const y = desktopOriginY + Math.floor((input.y + targetHeight / 2) * desktopHeight / imageHeight);
+    const button = String(input.button || "left").toLowerCase();
+    const clicks = Number(input.clicks ?? 1);
+    if (!["left", "right", "middle"].includes(button)) return { ok: false, error: "invalid_button" };
+    if (clicks !== 1 && clicks !== 2) return { ok: false, error: "invalid_click_count" };
+    return this.runControl(async () => {
+      const result = await this.runner("mouse_click", { x, y, button, clicks });
+      return { ...result, target: { x, y, source: "image", verified: false } };
+    });
+  }  async keyboardInput(input = {}) {
     const gate = this.gate();
     if (gate) return gate;
 

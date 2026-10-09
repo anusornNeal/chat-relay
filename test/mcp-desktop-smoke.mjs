@@ -82,7 +82,10 @@ async function managerTests() {
   assert(windows.ok && windows.windows[0]?.windowId === "123", "window list failed");
   assert((await manager.focusWindow({ windowId: "123" })).ok, "window focus failed");
   assert((await manager.focusWindow({ windowId: "bad" })).error === "invalid_window_id", "invalid window id accepted");
-  assert((await manager.mouseClick({ x: 1.2, y: 2 })).error === "invalid_coordinates", "invalid coordinates accepted");
+  assert((await manager.clickImageTarget({ x: 100, y: 50, targetWidth: 20, targetHeight: 10, imageWidth: 960, imageHeight: 540, desktopOriginX: -1920, desktopOriginY: 0, desktopWidth: 1920, desktopHeight: 1080 })).ok, "image target click failed");
+  assert(runnerCalls.some((entry) => entry.operation === "mouse_click" && entry.args.x === -1700 && entry.args.y === 110), "image coordinate mapping incorrect");
+  assert((await manager.clickImageTarget({ x: 960, y: 1, imageWidth: 960, imageHeight: 540, desktopOriginX: 0, desktopOriginY: 0, desktopWidth: 1920, desktopHeight: 1080 })).error === "invalid_image_coordinates", "out of image bounds accepted");
+  assert((await manager.clickImageTarget({ x: 959, y: 1, targetWidth: 2, imageWidth: 960, imageHeight: 540, desktopOriginX: 0, desktopOriginY: 0, desktopWidth: 1920, desktopHeight: 1080 })).error === "invalid_target_bounds", "overflowing target accepted");  assert((await manager.mouseClick({ x: 1.2, y: 2 })).error === "invalid_coordinates", "invalid coordinates accepted");
   assert((await manager.mouseClick({ x: 1, y: 2, button: "side" })).error === "invalid_button", "invalid button accepted");
   assert((await manager.mouseClick({ x: 1, y: 2, clicks: 3 })).error === "invalid_click_count", "invalid click count accepted");
   assert((await manager.keyboardInput({})).error === "invalid_keyboard_input", "empty keyboard payload accepted");

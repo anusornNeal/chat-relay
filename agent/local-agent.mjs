@@ -246,6 +246,8 @@ async function handlePayload(payload) {
       return desktop.listWindows(payload);
     case "desktop.window.focus":
       return desktop.focusWindow(payload);
+    case "desktop.mouse.click_image":
+      return desktop.clickImageTarget(payload);
     case "desktop.mouse.click":
       return desktop.mouseClick(payload);
     case "desktop.keyboard.input":

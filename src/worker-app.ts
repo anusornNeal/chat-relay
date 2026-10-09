@@ -828,7 +828,7 @@ function scopeForAction(action: string): Scope {
   if (["agent.lifecycle.drain", "agent.lifecycle.resume", "agent.lifecycle.restart", "agent.lifecycle.upgrade"].includes(action)) return "process";
   if (action === "process.kill" || action === "process.list") return "process";
   if (action === "desktop.screenshot") return "desktop_read";
-  if (action === "desktop.mouse.click" || action === "desktop.keyboard.input" || action === "desktop.step") return "desktop_control";
+  if (action === "desktop.mouse.click" || action === "desktop.mouse.click_image" || action === "desktop.keyboard.input" || action === "desktop.step") return "desktop_control";
   return "read";
 }
 
@@ -1630,6 +1630,26 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
   );
 
   register(
+    "mouse_click_image",
+    "Click the center of a target rectangle identified in a screenshot. Provide screenshot image dimensions and desktopOrigin/desktopWidth/desktopHeight from that same screenshot's metadata. Never use display-scaled coordinates without converting them to image pixels. This maps to physical desktop pixels; a successful input delivery does not verify UI state.",
+    "desktop_control",
+    {
+      x: z.number().int().min(0),
+      y: z.number().int().min(0),
+      targetWidth: z.number().int().positive().optional(),
+      targetHeight: z.number().int().positive().optional(),
+      imageWidth: z.number().int().positive(),
+      imageHeight: z.number().int().positive(),
+      desktopOriginX: z.number().int(),
+      desktopOriginY: z.number().int(),
+      desktopWidth: z.number().int().positive(),
+      desktopHeight: z.number().int().positive(),
+      button: z.enum(["left", "right", "middle"]).optional(),
+      clicks: z.union([z.literal(1), z.literal(2)]).optional(),
+    },
+    (input) => ({ action: "desktop.mouse.click_image", ...input }),
+    { destructiveHint: true },
+  );  register(
     "keyboard_input",
     "Type Unicode text or send one named key/modifier chord to the active Windows desktop. Supply text or key, not both.",
     "desktop_control",

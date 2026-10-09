@@ -247,6 +247,8 @@ export function humanizeToolCall(payload = {}) {
       return "List open windows";
     case "desktop.window.focus":
       return `Focus window · ${cleanText(payload.title ?? payload.windowId ?? payload.handle ?? "", 64)}`;
+    case "desktop.mouse.click_image":
+      return "Click screenshot target";
     case "desktop.mouse.click": {
       const button = cleanText(payload.button || "left", 12);
       return `${button[0]?.toUpperCase() || "L"}${button.slice(1)} click`;
