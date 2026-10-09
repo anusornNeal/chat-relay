@@ -1142,10 +1142,18 @@ function oauthToolSecurity() {
 
 const SCREENSHOT_UI_URI = "ui://chat-relay/screenshot-v3.html";
 
-function createMcpServer(env: Env, user: AuthUser) {
+function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
   const server = new McpServer({ name: "chat-relay", version: SERVICE_VERSION });
 
-  server.registerTool(
+  // OpenAI supplies a tool-name hint for tools/call. Only register that tool
+  // on this request, avoiding the CPU cost of registering the entire catalog.
+  // Each invocation still gets a fresh server and request-scoped user/env.
+  const registerTool = (name: string, config: any, callback: any) => {
+    if (requestedTool && name !== requestedTool) return;
+    server.registerTool(name, config, callback);
+  };
+
+  registerTool(
     "whoami",
     { description: "Show the authenticated relay user.", inputSchema: {}, annotations: annotationsForTool("whoami"), ...oauthToolSecurity() } as any,
     async () => instrumentTool(env, user, "whoami", {}, async () => {
@@ -1154,7 +1162,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     }),
   );
 
-  server.registerTool(
+  registerTool(
     "list_agents",
     { description: "List agents this user can access, including scopes and online status.", inputSchema: {}, annotations: annotationsForTool("list_agents"), ...oauthToolSecurity() } as any,
     async () => instrumentTool(env, user, "list_agents", {}, async () => {
@@ -1166,7 +1174,7 @@ function createMcpServer(env: Env, user: AuthUser) {
   const learnScopeSchema = z.object({ scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional() });
   const learnKindSchema = z.enum(["preference", "response_style", "work_style", "coding_style", "problem_solving", "project_context", "tool_pattern", "workflow", "correction", "agent_context"]);
 
-  server.registerTool(
+  registerTool(
     "learn_prepare",
     {
       description: "Prepare relevant learned context once for the current task when prior user/project/agent context may materially affect decisions. This is explicit and read-only: call it when useful, reuse the result for the task, and do not call it before every MCP tool.",
@@ -1193,28 +1201,28 @@ function createMcpServer(env: Env, user: AuthUser) {
     }),
   );
 
-  server.registerTool("learn_get", { description: "Read raw learned memories for targeted inspection or deduplication. Prefer learn_prepare once for task-level context; do not call learn_get automatically before ordinary MCP tools.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
+  registerTool("learn_get", { description: "Read raw learned memories for targeted inspection or deduplication. Prefer learn_prepare once for task-level context; do not call learn_get automatically before ordinary MCP tools.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
 
-  server.registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory only when Chat decides durable learning is warranted. Never write memory merely because an ordinary MCP tool ran. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
+  registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory only when Chat decides durable learning is warranted. Never write memory merely because an ordinary MCP tool ran. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_put", args, async () => {
       const { call, learnChange } = await learningMutationCall(env, user, "/put", args);
       return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode, learnChange };
     }));
 
-  server.registerTool("learn_delete", { description: "Remove a learned memory when it is no longer valid or useful.", inputSchema: { id: z.string().min(1).max(400) }, annotations: annotationsForTool("learn_delete"), ...oauthToolSecurity() } as any,
+  registerTool("learn_delete", { description: "Remove a learned memory when it is no longer valid or useful.", inputSchema: { id: z.string().min(1).max(400) }, annotations: annotationsForTool("learn_delete"), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_delete", args, async () => {
       const { call, learnChange } = await learningMutationCall(env, user, "/delete", args);
       return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode, learnChange };
     }));
 
-  server.registerTool("learn_feedback", { description: "Reinforce or weaken one learned memory for this authenticated account.", inputSchema: { id: z.string().min(1).max(400), value: z.enum(["positive", "negative"]) }, annotations: annotationsForTool("learn_feedback", { destructiveHint: false }), ...oauthToolSecurity() } as any,
+  registerTool("learn_feedback", { description: "Reinforce or weaken one learned memory for this authenticated account.", inputSchema: { id: z.string().min(1).max(400), value: z.enum(["positive", "negative"]) }, annotations: annotationsForTool("learn_feedback", { destructiveHint: false }), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_feedback", args, async () => {
       const { call, learnChange } = await learningMutationCall(env, user, "/feedback", args);
       return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode, learnChange };
     }));
 
-  server.registerTool(
+  registerTool(
     "ping_agent",
     {
       description: "Check whether a permitted local agent is reachable.",
@@ -1236,7 +1244,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     payload: (args: any) => unknown,
     annotations?: Record<string, boolean>,
   ) => {
-    server.registerTool(
+    registerTool(
       name,
       {
         description,
@@ -1517,7 +1525,7 @@ function createMcpServer(env: Env, user: AuthUser) {
   );
 
 
-  server.registerTool(
+  registerTool(
     "create_temp_artifact",
     {
       description: "Create a short-lived URL for one explicit local file inside the agent's allowed roots. The file is bounded to 40 KiB and the URL expires after 5 minutes by default.",
@@ -1546,7 +1554,7 @@ function createMcpServer(env: Env, user: AuthUser) {
       }),
   );
 
-  server.registerTool(
+  registerTool(
     "screenshot",
     {
       description: "Capture a full monitor and return a temporary JPEG URL valid for 5 minutes. monitor can be primary, secondary, or a zero-based monitor index. Set native=true to preserve native pixel dimensions; otherwise maxWidth controls the bounded preview size. Requires local desktop opt-in and desktop_read permission.",
@@ -1644,7 +1652,7 @@ function createMcpServer(env: Env, user: AuthUser) {
     { destructiveHint: true },
   );
 
-  server.registerTool(
+  registerTool(
     "desktop_step",
     {
       description: "Run 1-20 desktop actions in one local round trip and optionally capture the target monitor afterward. Use this for fast computer-use loops. captureAfter defaults to false; set captureAfter=true when you need a screenshot afterward. Capturing requires both desktop_control and desktop_read permission.",
@@ -2103,7 +2111,14 @@ export default {
         ...(await activityContextForRequest(request)),
         executionCtx: ctx,
       });
-      return createMcpHandler(() => createMcpServer(env, user), {
+      // Headers are optimization hints only: MCP still validates the actual
+      // JSON-RPC method, tool name, and arguments before invoking a callback.
+      // Other MCP clients (no hints) keep the complete tool catalog.
+      const hintedName = request.headers.get("mcp-name");
+      const requestedTool = request.headers.get("mcp-method") === "tools/call"
+        && hintedName && /^[a-z][a-z0-9_]{0,79}$/.test(hintedName)
+        ? hintedName : undefined;
+      return createMcpHandler(() => createMcpServer(env, user, requestedTool), {
         route: "/mcp",
         responseMode: "json",
       })(request, env, ctx);
