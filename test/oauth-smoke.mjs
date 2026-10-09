@@ -55,7 +55,7 @@ function formBody(values) {
   return new URLSearchParams(values);
 }
 
-async function mcpRpc(token, id, method, params = {}, queryKey = false) {
+async function mcpRpc(token, id, method, params = {}, queryKey = false, extraHeaders = {}) {
   const response = await fetch(
     queryKey ? `${base}/mcp?key=${encodeURIComponent(token)}` : `${base}/mcp`,
     {
@@ -64,6 +64,7 @@ async function mcpRpc(token, id, method, params = {}, queryKey = false) {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
         ...(queryKey ? {} : { authorization: `Bearer ${token}` }),
+        ...extraHeaders,
       },
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
     },
@@ -535,6 +536,31 @@ if (!ownerAgentsData?.agents?.some((agent) => agent.id === "default")) {
   throw new Error("migrated owner lost default agent grant");
 }
 console.log("migrated owner OAuth identity and grant ok");
+
+// OpenAI sends the requested MCP tool name as a hint. A tool call must work
+// with the narrowed registration, while an absent hint keeps generic clients
+// working and a mismatched hint must never execute a different tool.
+const hintedWho = await mcpRpc(ownerToken.data.access_token, 41, "tools/call", {
+  name: "whoami", arguments: {},
+}, false, { "Mcp-Method": "tools/call", "Mcp-Name": "whoami" });
+const hintedWhoText = hintedWho.result?.content?.[0]?.text;
+if (!hintedWhoText || JSON.parse(hintedWhoText).user?.id !== "owner") {
+  throw new Error("hinted MCP tool call failed");
+}
+const mismatchedHint = await mcpRpc(ownerToken.data.access_token, 42, "tools/call", {
+  name: "whoami", arguments: {},
+}, false, { "Mcp-Method": "tools/call", "Mcp-Name": "list_agents" });
+if (!mismatchedHint.error && mismatchedHint.result?.content?.[0]?.text?.includes('"user"')) {
+  throw new Error("mismatched MCP hint unexpectedly dispatched another tool");
+}
+const hintedCatalog = await mcpRpc(ownerToken.data.access_token, 43, "tools/list", {}, false, {
+  "Mcp-Method": "tools/list", "Mcp-Name": "whoami",
+});
+if (!hintedCatalog.result?.tools?.some((item) => item.name === "ping_agent") ||
+    !hintedCatalog.result?.tools?.some((item) => item.name === "list_agents")) {
+  throw new Error("MCP tools/list catalog was pruned");
+}
+console.log("MCP hinted tool registration and full discovery compatibility ok");
 
 const legacyTools = await mcpRpc(callerToken, 5, "tools/list", {}, true);
 if (!legacyTools.result?.tools?.some((item) => item.name === "whoami")) {
