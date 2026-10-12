@@ -1331,7 +1331,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   register(
     "stat_path",
-    "Get metadata for a file or directory.",
+    "Get metadata for a file or directory within the agent allowedRoots (see get_config). Do not use terminal commands to bypass denied paths.",
     "read",
     { path: z.string().min(1).max(2048) },
     ({ path }) => ({ action: "fs.stat", path }),
@@ -1408,7 +1408,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   register(
     "start_search",
-    "Search file names or text content under an allowed path. Returns a search session ID.",
+    "Prefer this over shell Select-String/grep for file and content searches inside allowedRoots. Returns a search session ID.",
     "read",
     {
       path: z.string().min(1).max(2048),
@@ -1450,7 +1450,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   register(
     "edit_block",
-    "Replace an exact text block in a UTF-8 file.",
+    "Replace an exact text block in a UTF-8 file. Read current contents first; if replacement_count_mismatch occurs, re-read instead of retrying stale oldText.",
     "write",
     {
       path: z.string().min(1).max(2048),
@@ -1510,7 +1510,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   register(
     "list_processes",
-    "List Windows processes with PID, name, command line, and executable path.",
+    "Prefer this for process inspection instead of shell Get-CimInstance/Win32_Process. Returns PID, name, command line, and executable path.",
     "process",
     { filter: z.string().max(200).optional() },
     ({ filter }) => ({ action: "process.list", filter }),
@@ -1748,7 +1748,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   register(
     "terminal_exec",
-    "Run one PowerShell command and wait for completion. Use for commands that finish within 20 seconds.",
+    "Run one shell command and wait up to 20 seconds. Prefer list_processes for process inspection, start_search for source search, and file tools for edits. Security policy blocks dangerous commands; do not retry blocked commands unchanged.",
     "terminal",
     {
       command: z.string().min(1).max(4000),

@@ -29,13 +29,14 @@ const MAX_RETAINED_BATCHES = 64;
 const ENDED_TTL_MS = 30 * 60 * 1000;
 
 const BLOCKED_COMMANDS = [
-  /\b(mkfs|format|mount|umount|fdisk|dd|parted|diskpart|sudo|su|passwd)\b/i,
+  /\b(mkfs|mount|umount|fdisk|dd|parted|diskpart|sudo|su|passwd)\b/i,
+  /\bformat\b(?!-(?:List|Table)\b)/i,
   /\b(adduser|useradd|usermod|groupadd|chsh|visudo|shutdown|reboot|halt)\b/i,
   /\b(poweroff|init|iptables|firewall|netsh|sfc|bcdedit|runas|cipher|takeown)\b/i,
   /\b(reg|sc)\.exe\b/i,
 ];
 
-function validateCommand(command) {
+export function validateCommand(command) {
   if (typeof command !== "string" || command.length === 0 || command.length > 4000) {
     throw new Error("invalid_command");
   }

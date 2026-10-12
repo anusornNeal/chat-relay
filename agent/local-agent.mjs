@@ -14,6 +14,7 @@ import {
   summarizeAgentWork,
 } from "./lifecycle.mjs";
 import { humanizeToolCall } from "./toolcall-summary.mjs";
+import { toolErrorGuidance } from "./tool-error-guidance.mjs";
 import {
   HeartbeatAckWatchdog,
   HEARTBEAT_ACK_TIMEOUT_REASON,
@@ -560,7 +561,10 @@ function connect() {
         responseBytes,
         ...(result && typeof result === "object" && result.ok === false && result.error ? { error: String(result.error) } : {}),
       });
-      sendSocketResponse(socket, message.requestId, result, responseMeta);
+      const advised = result && typeof result === "object" && result.ok === false && result.error
+        ? { ...result, ...toolErrorGuidance(action, String(result.error), message.payload) }
+        : result;
+      sendSocketResponse(socket, message.requestId, advised, responseMeta);
     } catch (error) {
       recentCalls.push({
         at: new Date().toISOString(),
@@ -588,7 +592,7 @@ function connect() {
         responseBytes,
         error: errorPayload.error,
       });
-      sendSocketResponse(socket, message.requestId, errorPayload);
+      sendSocketResponse(socket, message.requestId, { ...errorPayload, ...toolErrorGuidance(action, errorPayload.error, message.payload) });
     }
   });
 
