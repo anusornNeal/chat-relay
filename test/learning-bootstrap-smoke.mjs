@@ -7,6 +7,7 @@ const bundled = await build({
   stdin: {
     contents: [
       'export * from "./src/context-routing";',
+      'export * from "./src/project-identity";',
       'export * from "./src/learning-relevance";',
     ].join("\n"),
     resolveDir: process.cwd(),
@@ -28,6 +29,7 @@ const bundled = await build({
 
 const mod = await import("data:text/javascript;base64," + Buffer.from(bundled.outputFiles[0].text).toString("base64"));
 const {
+  canonicalLearnProjectKey,
   extractRoutingSignals,
   projectKeyForSignals,
   preferredAgentForContext,
@@ -36,6 +38,14 @@ const {
   selectRelevantLearnRecords,
   buildRelevantLearnEnvelope,
 } = mod;
+
+assert.equal(canonicalLearnProjectKey("flowly"), "flowly");
+assert.equal(canonicalLearnProjectKey("C:/Users/tatar/Projects/Flowly"), "flowly");
+assert.equal(canonicalLearnProjectKey("C:/Users/tatar/Projects/flowly".replaceAll("/", "\\")), "flowly");
+assert.equal(canonicalLearnProjectKey("/Users/tatar/Projects/flowly"), "flowly");
+assert.equal(canonicalLearnProjectKey("C:/Users/tatar/Projects/buddy/android"), "C:/Users/tatar/Projects/buddy/android");
+assert.equal(canonicalLearnProjectKey("/opt/repos/flowly"), "/opt/repos/flowly");
+assert.equal(canonicalLearnProjectKey(null), null);
 
 const now = new Date().toISOString();
 const memory = (id, key, kind, scope, scopeKey, content, confidence = 100) => ({

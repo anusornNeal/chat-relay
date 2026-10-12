@@ -13,6 +13,7 @@ import { error, hasPayload, readJson } from "./http-utils";
 import { readRelayResultMetadata } from "./relay-result";
 import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
+import { canonicalLearnProjectKey } from "./project-identity";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
 import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT } from "./learning-policy";
 import { LearnPreflightGuard, attachLearnPrepareAdvisory } from "./learn-preflight-guard.mjs";
@@ -72,8 +73,8 @@ type LearnPrepareArgs = {
 };
 
 function normalizeLearnPrepareProjectKey(value: unknown) {
-  const projectKey = String(value ?? "").trim().slice(0, 200);
-  return projectKey || null;
+  const projectKey = String(value ?? "").trim();
+  return canonicalLearnProjectKey(projectKey);
 }
 
 function normalizeLearnPrepareAgentId(value: unknown) {
@@ -116,7 +117,7 @@ async function prepareLearnContext(
   const activeScopes: LearnScopeSelector[] = [globalScope];
   let route = routingContext(args, records);
   const explicitProjectKey = normalizeLearnPrepareProjectKey(args.projectKey);
-  const projectKey = explicitProjectKey ?? route.projectKey ?? null;
+  const projectKey = explicitProjectKey ?? canonicalLearnProjectKey(route.projectKey);
 
   if (projectKey) {
     const projectScope: LearnScopeSelector = { scope: "project", scopeKey: projectKey };

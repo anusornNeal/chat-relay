@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { canonicalLearnProjectKey } from "./project-identity";
 
 export type LearnScope = "global" | "project" | "agent";
 export type LearnKind =
@@ -334,6 +335,7 @@ export class Learning extends DurableObject {
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_kind ON ${TABLE}(kind, updated_at)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_identity ON ${TABLE}(kind, scope, scope_key, memory_key)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_retrieval ON ${TABLE}(scope, scope_key, kind, confidence DESC, positive_feedback DESC, negative_feedback ASC, updated_at DESC)`);
+    this.migrateProjectKeys();
 
   }
 
@@ -345,6 +347,22 @@ export class Learning extends DurableObject {
     if (url.pathname === "/delete" && request.method === "POST") return this.delete(request);
     if (url.pathname === "/feedback" && request.method === "POST") return this.feedback(request);
     return Response.json({ error: "not_found" }, { status: 404 });
+  }
+
+  // One bounded migration per account DO cold start, not per tool call.
+  // Re-key only direct project roots, retaining IDs, content, feedback and timestamps.
+  private migrateProjectKeys() {
+    const rows = this.ctx.storage.sql.exec<{ id: string; scope_key: string }>(
+      `SELECT id, scope_key FROM ${TABLE} WHERE scope = 'project' AND scope_key IS NOT NULL LIMIT ?`,
+      MAX_MEMORIES + 1,
+    ).toArray();
+    if (rows.length > MAX_MEMORIES) return; // Never partially migrate an oversized legacy account.
+    for (const row of rows) {
+      const canonical = canonicalLearnProjectKey(row.scope_key);
+      if (canonical && canonical !== row.scope_key) {
+        this.ctx.storage.sql.exec(`UPDATE ${TABLE} SET scope_key = ? WHERE id = ?`, canonical, row.id);
+      }
+    }
   }
 
   private async ensureMemoryCapacity() {
@@ -428,7 +446,7 @@ export class Learning extends DurableObject {
         now;
 
       const item: LearnRecord = {
-        id: canonicalId,
+        id: canonicalExisting?.id ?? canonicalId,
         key: canonicalKey,
         kind: "project_context",
         scope: "project",
@@ -441,7 +459,7 @@ export class Learning extends DurableObject {
         updatedAt: now,
       };
 
-      const fragments = bucketRows.filter((record) => record.id !== canonicalId);
+      const fragments = bucketRows.filter((record) => record.id !== item.id);
       const writeNeeded = !canonicalExisting ||
         canonicalExisting.content !== item.content ||
         canonicalExisting.confidence !== item.confidence ||
@@ -547,7 +565,7 @@ export class Learning extends DurableObject {
       if (scope === "global") {
         scopeSelectors.push({ scope, scopeKey: null });
       } else {
-        const scopeKey = cleanText(entry?.scopeKey, 200);
+        const scopeKey = scope === "project" ? canonicalLearnProjectKey(entry?.scopeKey) : cleanText(entry?.scopeKey, 200);
         if (scopeKey) scopeSelectors.push({ scope, scopeKey });
       }
     }
@@ -665,7 +683,7 @@ export class Learning extends DurableObject {
     }
     const key = cleanText(rawKey, 160);
     const content = cleanText(rawContent, 4000);
-    const scopeKey = scope === "global" ? null : cleanText(rawScopeKey, 200);
+    const scopeKey = scope === "global" ? null : scope === "project" ? canonicalLearnProjectKey(rawScopeKey) : cleanText(rawScopeKey, 200);
     if (!kind || !scope || !key || !content || (scope !== "global" && !scopeKey)) {
       return Response.json({ error: "invalid_memory" }, { status: 400 });
     }

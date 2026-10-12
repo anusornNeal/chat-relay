@@ -61,6 +61,20 @@ class FakeSql {
       return new Cursor();
     }
 
+    if (q.startsWith("SELECT id, scope_key FROM learning_memory_v1 WHERE scope = 'project' AND scope_key IS NOT NULL LIMIT ?")) {
+      return new Cursor([...this.rows.values()]
+        .filter((r) => r.scope === "project" && r.scope_key != null)
+        .slice(0, Number(args[0]))
+        .map((r) => ({ id: r.id, scope_key: r.scope_key })));
+    }
+
+    if (q.startsWith("UPDATE learning_memory_v1 SET scope_key = ? WHERE id = ?")) {
+      const [scopeKey, id] = args;
+      const row = this.rows.get(id);
+      if (row) { row.scope_key = scopeKey; this.mutations++; }
+      return new Cursor();
+    }
+
     if (q.startsWith("SELECT id FROM learning_memory_v1 WHERE memory_key IS NULL")) {
       return new Cursor([...this.rows.values()].filter((row) => row.memory_key == null).map((row) => ({ id: row.id })));
     }
@@ -281,6 +295,54 @@ assert.equal(balanced.items.filter((x)=>x.kind==="workflow").length,1);
 assert.equal(balanced.items.find((x)=>x.kind==="workflow")?.key,"workflow-b");
 assert.equal(balanced.items.filter((x)=>x.kind==="coding_style").length,1);
 assert.equal(balanced.items.find((x)=>x.kind==="coding_style")?.key,"coding-a");
+
+const flowPath = "C:/Users/tatar/Projects/flowly";
+const seeded = (id, key, kind, scopeKey, content, feedback = 0) => ({
+  id, memory_key: key, kind, scope: "project", scope_key: scopeKey, content,
+  confidence: 97, positive_feedback: feedback, negative_feedback: 0,
+  created_at: "2026-10-01T00:00:00.000Z", updated_at: "2026-10-02T00:00:00.000Z",
+});
+const duplicateProject = fixture({rows: [
+  seeded("legacy-path-id", "parallel-flow", "workflow", flowPath, "Use parallel tasks", 1),
+  seeded("existing-name-id", "visual-qa", "workflow", "flowly", "QA requires explicit verdict"),
+  seeded("nested-repo-id", "android-only", "workflow", "C:/Users/tatar/Projects/buddy/android", "Separate nested repository"),
+]});
+assert.equal(duplicateProject.sql.mutations, 1, "cold-start migration must only update legacy path scope");
+assert.equal(duplicateProject.sql.rows.get("legacy-path-id").scope_key, "flowly");
+assert.equal(duplicateProject.sql.rows.get("legacy-path-id").positive_feedback, 1, "migration preserves feedback");
+const canonical = await duplicateProject.call("/get", {scopes:[{scope:"project",scopeKey:"flowly"}],limit:10});
+const byPath = await duplicateProject.call("/get", {scopes:[{scope:"project",scopeKey:flowPath.replaceAll("/", "\\")}],limit:10});
+assert.deepEqual(canonical.items.map(x=>x.id).sort(), ["existing-name-id", "legacy-path-id"]);
+assert.deepEqual(byPath.items.map(x=>x.id).sort(), canonical.items.map(x=>x.id).sort());
+assert.equal((await duplicateProject.call("/profile",{limit:100})).items.filter(x=>x.scopeKey==="flowly").length,2,
+  "dashboard should display one Flowly group with both memories");
+const oldIdWrite = await duplicateProject.call("/put", {key:"parallel-flow",kind:"workflow",scope:"project",scopeKey:flowPath,content:"Use parallel tasks",confidence:97});
+assert.equal(oldIdWrite.changed,false,"path alias must not create or rewrite a duplicate");
+assert.equal(oldIdWrite.item.id,"legacy-path-id","old memory IDs stay addressable");
+assert.equal(duplicateProject.sql.mutations,1,"repeat get/profile/put must not add writes");
+assert.equal((await duplicateProject.call("/feedback",{id:"legacy-path-id",value:"negative"})).item.negativeFeedback,1);
+assert.equal((await duplicateProject.call("/get",{scopes:[{scope:"project",scopeKey:"C:/Users/tatar/Projects/buddy/android"}]})).items.length,1,
+  "nested project paths must not be collapsed into the containing folder");
+const beforeRestart=duplicateProject.sql.mutations;
+new Learning({storage:{sql:duplicateProject.sql}}, {});
+assert.equal(duplicateProject.sql.mutations,beforeRestart,"cold-start migration is idempotent");
+const brandNew=await duplicateProject.call("/put",{key:"new-flow",kind:"workflow",scope:"project",scopeKey:flowPath,content:"A new workflow"});
+assert.equal(brandNew.item.scopeKey,"flowly","new writes use canonical project identity");
+assert.equal((await duplicateProject.call("/get",{scopes:[{scope:"project",scopeKey:"flowly"}]})).items.length,3);
+
+const migratedContext = fixture({rows:[
+  seeded("old-context-id", "project-context:ux", "project_context", flowPath,
+    "- [flowly-ux] Preserve project UX guidance", 1),
+]});
+const contextResult = await migratedContext.call("/put",{
+  key:"flowly-ux",kind:"project_context",scope:"project",scopeKey:"flowly",
+  content:"Preserve project UX guidance",confidence:97,
+});
+assert.equal(contextResult.item.id,"old-context-id",
+  "canonical project-context updates must preserve an existing migrated memory ID");
+assert.equal(migratedContext.sql.rows.size,1,
+  "updating migrated context must not drop existing project context");
+assert.equal(migratedContext.sql.rows.get("old-context-id").positive_feedback,1);
 
 const tokenAware=fixture();
 const buildContext=await tokenAware.call("/put",{key:"build-release-pipeline",kind:"project_context",scope:"project",scopeKey:"build-project",content:"Build and release conventions for the project",confidence:90});
