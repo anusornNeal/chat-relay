@@ -566,7 +566,17 @@ async function activityIdForSource(source: string | undefined): Promise<string |
 }
 
 async function activityContextForRequest(request: Request): Promise<ToolActivityContext> {
-  const activitySource = [
+  let conversationId: string | undefined;
+  if (request.method === "POST" && request.headers.get("content-type")?.includes("application/json")) {
+    try {
+      const body = await request.clone().json() as { method?: string; params?: { _meta?: Record<string, unknown> } };
+      const candidate = body.method === "tools/call" ? body.params?._meta?.["openai/session"] : undefined;
+      if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 512) conversationId = candidate;
+    } catch {
+      // Leave identity unset; the MCP handler validates JSON.
+    }
+  }
+  const activitySource = conversationId ? "openai/session:" + conversationId : [
     "mcp-session-id",
     "x-openai-conversation-id",
     "x-openai-chat-id",
