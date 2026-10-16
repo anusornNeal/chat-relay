@@ -57,6 +57,18 @@ Limit filesystem access to a specific root:
 npx @anusornneal/chat-relay@latest remote --root "C:\Users\you\Projects"
 ```
 
+## Self-hosting on your own Cloudflare account
+
+A Git clone includes source and deployment templates, not Cloudflare resources, accounts, secrets, or existing data. The default `wrangler.jsonc` contains no production URL or Google OAuth client ID.
+
+1. Create your own Cloudflare account and Google OAuth Web application. Register `https://YOUR-WORKER.workers.dev/admin/google/callback` as an authorized redirect URI.
+2. Copy `wrangler.selfhost.example.jsonc` to `wrangler.selfhost.jsonc`, and update `PUBLIC_BASE_URL`, `GOOGLE_CLIENT_ID` and Worker name.
+3. Supply Worker secrets using `npx wrangler secret put SECRET_NAME --config wrangler.selfhost.jsonc` for `ADMIN_TOKEN`, `AGENT_TOKEN`, `CALLER_TOKEN`, and `GOOGLE_CLIENT_SECRET`. Never commit values.
+4. Run `npm run deploy:selfhost`. Missing values or the original hosted production URL are rejected.
+5. Connect ChatGPT to `https://YOUR-WORKER.workers.dev/mcp`, then connect an agent using `npx @anusornneal/chat-relay@latest remote --relay https://YOUR-WORKER.workers.dev`.
+
+The CLI's no-argument mode remains connected to the hosted service for existing users. Setting `--relay` explicitly changes the target (and triggers sign-in if it differs). Administrative scripts require `RELAY_URL` to be explicitly configured. The hosted production deployment uses `wrangler.production.jsonc` and is only enabled through an explicit CI deployment flag.
+
 ## `npx` commands
 
 | Command | What it does |

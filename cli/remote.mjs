@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { loadConfig, saveConfig } from "./config.mjs";
-import { login, requestJson } from "./device-login.mjs";
+import { login, needsRelayLogin, requestJson } from "./device-login.mjs";
 import { acquireRunnerOwnership, RunnerAlreadyActiveError } from "./runner-ownership.mjs";
 import { getAgentVersion } from "../agent/protocol.mjs";
 import { AGENT_UPGRADE_EXIT_CODE } from "../agent/lifecycle.mjs";
@@ -94,7 +94,7 @@ function spawnAgent(config, { tui = null, onConnectionState = null } = {}) {
 export async function remote(options = {}) {
   stopping = false;
   let config = loadConfig();
-  if (!(await validateConfig(config))) {
+  if (needsRelayLogin(config, options.relayUrl) || !(await validateConfig(config))) {
     console.log("No valid Chat Relay login found. Starting sign in...");
     config = await login(options);
   }

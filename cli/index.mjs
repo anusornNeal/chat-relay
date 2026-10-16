@@ -1,5 +1,5 @@
 import { clearConfig, configPath, loadConfig, saveConfig } from "./config.mjs";
-import { login, requestJson } from "./device-login.mjs";
+import { login, needsRelayLogin, requestJson } from "./device-login.mjs";
 import { protocolCompatibility, remote, validateConfig } from "./remote.mjs";
 import { launchLatestRemote } from "./self-update.mjs";
 import { AGENT_UPGRADE_EXIT_CODE } from "../agent/lifecycle.mjs";
@@ -240,7 +240,7 @@ export async function runCli(argv = process.argv.slice(2)) {
 
   if (command === "login") {
     const current = loadConfig();
-    if (!options.force && await validateConfig(current)) {
+    if (!options.force && !needsRelayLogin(current, options.relayUrl) && await validateConfig(current)) {
       console.log(`Already signed in as ${current.user?.name || current.user?.login || "user"}.`);
       console.log("Use --force to sign in again.");
       return 0;

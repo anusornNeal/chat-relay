@@ -1,4 +1,4 @@
-# Cloudflare Worker URL
+# Cloudflare Worker URL for self-hosting or local development (admin commands require this)
 RELAY_URL=https://chat-relay.example.workers.dev
 
 # Local agent identity

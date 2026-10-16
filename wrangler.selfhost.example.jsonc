@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chat-relay-selfhost",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-29",
+  "vars": {
+    "GOOGLE_CLIENT_ID": "REPLACE_WITH_YOUR_GOOGLE_CLIENT_ID",
+    "PUBLIC_BASE_URL": "https://YOUR-WORKER.workers.dev"
+  },
+  "assets": { "directory": "./dashboard", "binding": "ASSETS", "run_worker_first": true },
+  "durable_objects": { "bindings": [
+    { "name": "RELAY", "class_name": "Relay" },
+    { "name": "REGISTRY", "class_name": "Registry" },
+    { "name": "USAGE", "class_name": "Usage" },
+    { "name": "AUDIT", "class_name": "Audit" },
+    { "name": "DASHBOARD", "class_name": "DashboardHub" },
+    { "name": "LEARNING", "class_name": "Learning" }
+  ] },
+  "secrets": { "required": ["ADMIN_TOKEN", "AGENT_TOKEN", "CALLER_TOKEN", "GOOGLE_CLIENT_SECRET"] },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Relay"] },
+    { "tag": "v2", "new_sqlite_classes": ["Registry"] },
+    { "tag": "v3", "new_sqlite_classes": ["Usage"] },
+    { "tag": "v4", "new_sqlite_classes": ["Audit"] },
+    { "tag": "v5", "new_sqlite_classes": ["DashboardHub"] },
+    { "tag": "v6", "new_sqlite_classes": ["Learning"] }
+  ]
+}

@@ -9,7 +9,13 @@ import {
   saveIdentity,
 } from "./config.mjs";
 
+// Hosted mode default. Self-hosted deployments must select their own URL with --relay.
 const DEFAULT_RELAY_URL = "https://chat-relay.anusorn-hank.workers.dev";
+
+export function needsRelayLogin(config, requestedRelayUrl) {
+  if (!requestedRelayUrl) return false;
+  return String(config?.relayUrl || "").replace(/\/+$/, "") !== String(requestedRelayUrl).replace(/\/+$/, "");
+}
 
 function sanitizeAgentId(value) {
   const normalized = value.toLowerCase().trim()
@@ -73,7 +79,7 @@ function openBrowser(url) {
 
 export async function login(options = {}) {
   const existing = loadConfig() || {};
-  const relayUrl = String(options.relayUrl || existing.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, "");
+  const relayUrl = String(options.relayUrl || process.env.RELAY_URL || existing.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, "");
   const hostname = os.hostname();
   const identity = loadIdentity() || {};
   const requestedAgentId = options.agentId ||

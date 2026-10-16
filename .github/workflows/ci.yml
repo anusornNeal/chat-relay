@@ -232,4 +232,6 @@ jobs:
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
 
       - name: Deploy Cloudflare Worker
-        run: npm run deploy
+        env:
+          CHAT_RELAY_PRODUCTION_DEPLOY: "1"
+        run: npm run deploy:production

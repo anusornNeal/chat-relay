@@ -14,7 +14,12 @@ function loadVars() {
 }
 
 const vars = loadVars();
-const base = (process.env.RELAY_URL || vars.RELAY_URL || "https://chat-relay.anusorn-hank.workers.dev").replace(/\/$/, "");
+const configuredRelayUrl = process.env.RELAY_URL || vars.RELAY_URL;
+if (!configuredRelayUrl) {
+  console.error("RELAY_URL is required for admin operations. Set it explicitly to the intended Worker URL.");
+  process.exit(1);
+}
+const base = configuredRelayUrl.replace(/\/$/, "");
 const adminToken = process.env.ADMIN_TOKEN || vars.ADMIN_TOKEN;
 
 if (!adminToken) {
