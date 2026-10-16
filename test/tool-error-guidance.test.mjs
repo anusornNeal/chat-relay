@@ -11,6 +11,31 @@ test("safe PowerShell formatting cmdlets do not trigger disk format safety rule"
   }
 });
 
+test("disk formatter rule distinguishes executable commands from harmless text", () => {
+  for (const command of [
+    "git branch backup/buddy2-pre-format-20261015 HEAD",
+    "git stash push -m 'backup buddy2 pending format before history reword'",
+    "git log -1 --format='%h %s'",
+    "git format-patch -1",
+    "Get-Content 'C:\\Program Files\\Android\\Android Studio\\bin\\format.bat'",
+    "node scripts/validate-formatting.mjs",
+  ]) {
+    assert.doesNotThrow(() => validateCommand(command), command);
+  }
+  for (const command of [
+    "format C:",
+    "FORMAT.COM D: /Q",
+    "format.exe E: /Q",
+    "Get-Date; format E: /Q",
+    "Get-Date | format D:",
+    "cmd /c format C:",
+    "cmd.exe /c format.com D:",
+    "Format-Volume -DriveLetter D",
+  ]) {
+    assert.throws(() => validateCommand(command), /command_blocked/, command);
+  }
+});
+
 test("blocked process and search commands get safe, actionable alternatives", () => {
   const processAdvice = toolErrorGuidance("terminal.exec", "command_blocked", { command: "Get-CimInstance Win32_Process" });
   assert.equal(processAdvice.suggestedTool, "list_processes");
