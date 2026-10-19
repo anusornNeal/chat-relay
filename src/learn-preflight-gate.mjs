@@ -7,7 +7,7 @@ const MAX_BLOCKS = 2;
 const FALLBACK_MS = 5 * 60 * 1000;
 const EXEMPT_TOOLS = new Set([
   "whoami", "list_agents", "learn_prepare", "learn_get", "learn_put",
-  "learn_delete", "learn_feedback",
+  "learn_delete", "learn_feedback", "learn_merge_projects",
 ]);
 
 export function preflightIdentity(meta, headers) {

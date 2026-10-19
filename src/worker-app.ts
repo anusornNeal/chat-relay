@@ -1170,7 +1170,7 @@ const OPEN_WORLD_TOOLS = new Set([
 ]);
 
 const DESTRUCTIVE_TOOLS = new Set([
-  "write_file", "edit_block", "move_path", "delete_path", "kill_process", "learn_delete",
+  "write_file", "edit_block", "move_path", "delete_path", "kill_process", "learn_delete", "learn_merge_projects",
   "mouse_click", "keyboard_input", "desktop_step", "clipboard_write", "focus_window",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write", "terminal_kill",
   "terminal_batch_start", "terminal_batch_cancel",
@@ -1257,6 +1257,27 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   registerTool("learn_get", { description: "Read raw learned memories for targeted inspection or deduplication. Prefer learn_prepare once for task-level context; do not call learn_get automatically before ordinary MCP tools.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
+
+  if (!requestedTool || requestedTool === "learn_merge_projects") registerTool(
+    "learn_merge_projects",
+    {
+      description: "Safely merge two Learn projects for the authenticated account. ALWAYS call action=preview first, show the preview counts/conflicts and ASK the user to confirm. NEVER call action=commit unless the user explicitly confirms after seeing that preview. On approval, call action=commit with confirmed=true and confirmationToken. Tokens are one-time, expire after 10 minutes and become stale if source/target memories change. Merging creates a permanent alias and preserves memories/feedback. Do not infer that similarly named projects are the same.",
+      inputSchema: {
+        from: z.string().min(1).max(200),
+        to: z.string().min(1).max(200),
+        action: z.enum(["preview", "commit"]),
+        confirmed: z.boolean().optional(),
+        confirmationToken: z.string().uuid().optional(),
+      },
+      annotations: annotationsForTool("learn_merge_projects"),
+      ...oauthToolSecurity(),
+    } as any,
+    async (args) => instrumentTool(env, user, "learn_merge_projects", args, async () => {
+      const path = args.action === "commit" ? "/project-merge-confirm" : "/project-merge-preview";
+      const call = await learningCall(env, user, path, args);
+      return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+    }),
+  );
 
   registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory only when Chat decides durable learning is warranted. Never write memory merely because an ordinary MCP tool ran. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_put", args, async () => {

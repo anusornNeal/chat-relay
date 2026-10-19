@@ -229,6 +229,7 @@ The MCP surface is:
 - `learn_get` reads raw memories for selected scopes when targeted inspection is needed.
 - `learn_put` creates or updates one durable memory when Chat decides a reusable signal is worth keeping.
 - `learn_delete` removes one memory.
+- `learn_merge_projects` supports direct chat project merging without desktop control. Call `action=preview` with `from` and `to` first; show counts/conflicting keys and obtain explicit user confirmation before `action=commit` with `confirmed=true` and the one-use `confirmationToken`. Previews expire after 10 minutes or when source/target memory metadata changes. Merges use the existing account-scoped transactional backend, preserve IDs and feedback, and permanently alias the source name. The tool never merges based on similar names automatically.
 - `learn_feedback` records positive or negative feedback on one memory.
 
 Memories are partitioned by authenticated account using a dedicated Learning Durable Object selected from the server-side `user.id`. Callers cannot provide or override an account id. Supported scopes are `global`, `project`, and `agent`; project and agent memories require a scope key.

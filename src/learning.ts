@@ -48,6 +48,25 @@ const TABLE = "learning_memory_v1";
 const PROJECT_ALIAS_TABLE = "learning_project_alias_v1";
 const MAX_PROJECT_ALIASES = 64;
 const MAX_PROJECT_MERGE_ROWS = 64; // Bound synchronous SQL writes on Cloudflare Free.
+const MERGE_PREVIEW_TTL_MS = 10 * 60 * 1000;
+// Small deterministic revision for detecting changes between explicit preview and commit.
+// Uses metadata: every normal Learn mutation changes updated_at.
+function projectMergeRevision(from: string, to: string, source: any[], destination: any[]) {
+  const snapshot = JSON.stringify([from, to, ...[source, destination].map((rows) =>
+    rows.map((row) => [
+      row.id, row.memory_key, row.kind, row.updated_at, row.content?.length,
+      row.confidence, row.positive_feedback, row.negative_feedback,
+    ])
+  )]);
+  let h1 = 2166136261;
+  let h2 = 2246822519;
+  for (let i = 0; i < snapshot.length; i++) {
+    h1 = Math.imul(h1 ^ snapshot.charCodeAt(i), 16777619);
+    h2 = Math.imul(h2 ^ snapshot.charCodeAt(i), 1597334677);
+  }
+  return (h1 >>> 0).toString(16) + ":" + (h2 >>> 0).toString(16);
+}
+
 const KIND_VALUES: LearnKind[] = [
   "preference",
   "response_style",
@@ -342,6 +361,10 @@ export class Learning extends DurableObject {
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS ${PROJECT_ALIAS_TABLE} (
       alias_key TEXT PRIMARY KEY, project_key TEXT NOT NULL
     ) WITHOUT ROWID`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS learning_project_merge_preview_v1 (
+      token TEXT PRIMARY KEY, source_key TEXT NOT NULL, target_key TEXT NOT NULL,
+      revision TEXT NOT NULL, expires_at INTEGER NOT NULL
+    ) WITHOUT ROWID`);
     this.migrateProjectKeys();
 
   }
@@ -375,6 +398,8 @@ export class Learning extends DurableObject {
       return Response.json({ ok: true });
     }
     if (url.pathname === "/project-resolve" && request.method === "POST") return this.resolveProject(request);
+    if (url.pathname === "/project-merge-preview" && request.method === "POST") return this.previewProjectMerge(request);
+    if (url.pathname === "/project-merge-confirm" && request.method === "POST") return this.mergeProject(request, true);
     if (url.pathname === "/project-merge" && request.method === "POST") return this.mergeProject(request);
     if (url.pathname === "/get" && request.method === "POST") return this.get(request);
     if (url.pathname === "/profile" && request.method === "POST") return this.profile(request);
@@ -432,7 +457,69 @@ export class Learning extends DurableObject {
     return Response.json({ projectKey, alias: original === projectKey ? null : original });
   }
 
-  private async mergeProject(request: Request): Promise<Response> {
+  private async previewProjectMerge(request: Request): Promise<Response> {
+    const body = await request.json<any>().catch(() => null);
+    const from = canonicalLearnProjectKey(body?.from);
+    const to = canonicalLearnProjectKey(body?.to);
+    if (!from || !to || from === to) return Response.json({ error: "invalid_project_merge" }, { status: 400 });
+    const target = this.resolveProjectKey(to);
+    if (!target || from === target) return Response.json({ error: "invalid_project_merge" }, { status: 400 });
+    const previous = this.ctx.storage.sql.exec<{ project_key: string }>(
+      `SELECT project_key FROM ${PROJECT_ALIAS_TABLE} WHERE alias_key=? LIMIT 1`, from,
+    ).toArray()[0];
+    if (previous && previous.project_key !== target)
+      return Response.json({ error: "alias_conflict", projectKey: previous.project_key }, { status: 409 });
+    if (previous?.project_key === target)
+      return Response.json({ ok: true, alreadyMerged: true, from, to: target, sourceCount: 0, confirmationToken: null });
+
+    const source = this.ctx.storage.sql.exec<any>(
+      `SELECT * FROM ${TABLE} WHERE scope='project' AND scope_key=? ORDER BY id LIMIT ?`,
+      from, MAX_PROJECT_MERGE_ROWS + 1,
+    ).toArray();
+    if (source.length > MAX_PROJECT_MERGE_ROWS)
+      return Response.json({ error: "merge_too_large", limit: MAX_PROJECT_MERGE_ROWS }, { status: 409 });
+    const destination = this.ctx.storage.sql.exec<any>(
+      `SELECT * FROM ${TABLE} WHERE scope='project' AND scope_key=? ORDER BY id LIMIT ?`,
+      target, MAX_MEMORIES + 1,
+    ).toArray();
+    if (destination.length > MAX_MEMORIES)
+      return Response.json({ error: "merge_too_large" }, { status: 409 });
+    const aliasCount = this.ctx.storage.sql.exec<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM ${PROJECT_ALIAS_TABLE}`,
+    ).toArray()[0]?.count ?? 0;
+    if (aliasCount >= MAX_PROJECT_ALIASES)
+      return Response.json({ error: "alias_limit" }, { status: 409 });
+
+    const byIdentity = new Map(destination.map((row: any) => [row.kind + "\0" + row.memory_key, row]));
+    const conflicts: Array<{ key: string; kind: string }> = [];
+    let identical = 0;
+    for (const row of source) {
+      const existing = byIdentity.get(row.kind + "\0" + row.memory_key) as any;
+      if (existing?.content === row.content) identical++;
+      else if (existing) conflicts.push({ key: String(row.memory_key), kind: String(row.kind) });
+    }
+    const token = crypto.randomUUID();
+    const expiresAt = Date.now() + MERGE_PREVIEW_TTL_MS;
+    this.ctx.storage.sql.exec(
+      "DELETE FROM learning_project_merge_preview_v1 WHERE token IN (SELECT token FROM learning_project_merge_preview_v1 WHERE expires_at <= ? LIMIT 32)",
+      Date.now(),
+    );
+    this.ctx.storage.sql.exec(
+      "INSERT INTO learning_project_merge_preview_v1 (token,source_key,target_key,revision,expires_at) VALUES (?,?,?,?,?)",
+      token, from, target, projectMergeRevision(from, target, source, destination), expiresAt,
+    );
+    return Response.json({
+      ok: true, action: "preview", from, to: target,
+      sourceCount: source.length, targetCount: destination.length,
+      willMove: source.length - identical, willDeduplicate: identical,
+      willRename: conflicts.length, conflicts: conflicts.slice(0, 12),
+      resultingCount: source.length + destination.length - identical,
+      confirmationToken: token, expiresAt: new Date(expiresAt).toISOString(),
+      instruction: "Show the preview and obtain explicit user approval before commit. Then call learn_merge_projects with action=commit, confirmed=true and this confirmationToken.",
+    });
+  }
+
+  private async mergeProject(request: Request, requireConfirmation = false): Promise<Response> {
     const body = await request.json<any>().catch(() => null);
     const from = canonicalLearnProjectKey(body?.from);
     const to = canonicalLearnProjectKey(body?.to);
@@ -458,6 +545,23 @@ export class Learning extends DurableObject {
     ).toArray();
     if (currentAliases.length >= MAX_PROJECT_ALIASES && !previous) {
       return Response.json({ error: "alias_limit" }, { status: 409 });
+    }
+
+    let confirmationToken: string | null = null;
+    if (requireConfirmation) {
+      const token = String(body?.confirmationToken ?? "");
+      if (body?.confirmed !== true || !/^[a-f0-9-]{36}$/i.test(token))
+        return Response.json({ error: "merge_confirmation_required" }, { status: 403 });
+      const grant = this.ctx.storage.sql.exec<{
+        source_key: string; target_key: string; revision: string; expires_at: number
+      }>(
+        "SELECT source_key,target_key,revision,expires_at FROM learning_project_merge_preview_v1 WHERE token=? LIMIT 1", token,
+      ).toArray()[0];
+      if (!grant || grant.source_key !== from || grant.target_key !== target || grant.expires_at <= Date.now())
+        return Response.json({ error: "merge_preview_expired", retryPreview: true }, { status: 409 });
+      if (grant.revision !== projectMergeRevision(from, target, source, destination))
+        return Response.json({ error: "merge_preview_stale", retryPreview: true }, { status: 409 });
+      confirmationToken = token;
     }
 
     let moved = 0;
@@ -491,6 +595,10 @@ export class Learning extends DurableObject {
         collisions.set(row.kind + "\0" + key, { ...row, memory_key: key });
         moved++;
       }
+      // Single-use token is consumed atomically with the merge.
+      if (confirmationToken) this.ctx.storage.sql.exec(
+        "DELETE FROM learning_project_merge_preview_v1 WHERE token=?", confirmationToken,
+      );
       // Flatten aliases that pointed to this source before saving the source mapping.
       this.ctx.storage.sql.exec(`UPDATE ${PROJECT_ALIAS_TABLE} SET project_key=? WHERE project_key=?`, target, from);
       this.ctx.storage.sql.exec(
