@@ -4,6 +4,8 @@ Remote MCP relay that lets ChatGPT work with a local Windows or macOS machine th
 
 **Dashboard:** https://chat-relay.anusorn-hank.workers.dev/
 
+**Shared Learn Groups:** See [group setup, roles, approval flow and resource limits](docs/shared-learn.md).
+
 **Release status:** v1.0 stable for internal use. Windows and macOS local agents are supported; Linux desktop control is not currently implemented. Post-1.0 fixes and operational hardening are shipped as normal patch releases.
 
 ## Quick start
