@@ -535,6 +535,23 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       pieces.length === 3 && request.method === "POST") {
       action = "alias-remove"; args.alias = body?.alias;
     }
+    else if (pieces[1] === "candidates" && pieces.length === 2 && request.method === "GET") {
+      // The full Users API stays admin-only. Group owners may discover only
+      // active users eligible for this group; never return credentials or emails.
+      const detailResponse = await sharedGroupCall(env, "/groups/detail", selfUserId, { groupId });
+      if (!detailResponse.ok) return groupResponse(detailResponse);
+      const groupData = await detailResponse.json<any>();
+      if (groupData.group?.role !== "owner") return error(403, "forbidden");
+      const existingIds = new Set((groupData.members ?? []).map((member: any) => member.userId));
+      const registry = await registryState(env);
+      const candidates = (registry.users ?? [])
+        .filter((user: any) => user.enabled === true && !user.deletedAt && !existingIds.has(user.id))
+        .map((user: any) => ({ id: String(user.id), name: String(user.name || user.id) }))
+        .sort((a: any, b: any) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+      return Response.json({ items: candidates.slice(0, 200), hasMore: candidates.length > 200 }, {
+        headers: { "cache-control": "private, no-store" },
+      });
+    }
     else if (pieces[1] === "members" && pieces.length === 2 && request.method === "POST") {
       action = "invite";
       args.userId = body?.userId;

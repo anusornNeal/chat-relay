@@ -150,17 +150,46 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
         '<button type="button" class="button small danger" data-remove-member="' + esc(m.userId) + '">Remove</button>' : '') +
       '</div>').join('');
     const fields='<div class="learn-shared-members">' + rows + '</div>' +
-      (isOwner() ? '<label>Invite existing account ID<input name="userId" required placeholder="user-google-..."></label>' +
+      (isOwner() ? '<label>Select existing user<select name="userId" required disabled aria-label="Existing account">' +
+        '<option value="">Loading users...</option></select></label>' +
         '<label>Role<select name="role"><option value="member">Member - propose</option>' +
         '<option value="editor">Editor - review</option><option value="viewer">Viewer - read only</option></select></label>' :
         '<p class="learn-shared-muted">Only the group owner can manage members.</p>');
     dialog("Members · " + detail.group.name,fields,async values=>{
       if (!isOwner()) return;
+      if (!values.userId) throw new Error("Select a user to invite.");
       await write(groupUrl(selectedGroupId)+"/members",values);
       await show();setNotice("Member invited.");
     });
     const d=document.querySelector("dialog.learn-shared-dialog:last-of-type");
     if (!isOwner()) d.querySelector("[data-submit]").hidden=true;
+    const submit = d.querySelector("[data-submit]");
+    if (isOwner()) {
+      const userSelect = d.querySelector('select[name="userId"]');
+      submit.disabled = true;
+      // Fetch on Members open only. Do not poll during regular Learn rendering.
+      void api(groupUrl(selectedGroupId) + "/candidates").then((result) => {
+        if (!d.isConnected) return;
+        const users = Array.isArray(result.items) ? result.items : [];
+        userSelect.innerHTML = '<option value="">' +
+          (users.length ? 'Choose a user...' : 'No available users') + '</option>' +
+          users.map((user) => '<option value="' + esc(user.id) + '">' +
+            esc(user.name) + ' (' + esc(user.id) + ')</option>').join('');
+        userSelect.disabled = users.length === 0;
+        submit.disabled = users.length === 0;
+        if (result.hasMore) {
+          const note = d.querySelector(".learn-shared-dialog-error");
+          note.textContent = "Showing the first 200 available accounts.";
+          note.hidden = false;
+        }
+      }).catch(() => {
+        if (!d.isConnected) return;
+        userSelect.innerHTML = '<option value="">Unable to load users</option>';
+        const note = d.querySelector(".learn-shared-dialog-error");
+        note.textContent = "Could not load users. Reopen Members to retry.";
+        note.hidden = false;
+      });
+    }
     d.querySelectorAll("[data-remove-member]").forEach(el=>el.onclick=async ()=>{
       if (!window.confirm("Remove this member's access?"))return;
       try {

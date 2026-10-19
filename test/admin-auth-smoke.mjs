@@ -64,6 +64,31 @@ const nonAdminOverview = await browser("/admin/api/overview", { cookie: nonAdmin
 if (!nonAdminOverview.response.ok || nonAdminOverview.data.role !== "user") throw new Error(`self overview failed: ${nonAdminOverview.text}`);
 const nonAdminUsers = await browser("/admin/api/users", { cookie: nonAdminCookie });
 if (nonAdminUsers.response.status !== 403 || nonAdminUsers.data.error !== "admin_required") throw new Error("non-admin accessed Users API");
+// Non-admin group owners can choose from existing active accounts without
+// receiving admin-only user details or enumerating another group's members.
+const groupCreation = await browser("/admin/api/learn/groups", {
+  method: "POST", cookie: nonAdminCookie, csrf: nonAdminLogin.data.csrfToken,
+  origin: base, body: { name: "Picker " + suffix, projectKey: "picker-" + suffix },
+});
+if (groupCreation.response.status !== 201) throw new Error("non-admin could not create Learn group: " + groupCreation.text);
+const pickerPath = "/admin/api/learn/groups/" + groupCreation.data.group.id + "/candidates";
+const invitees = await browser(pickerPath, { cookie: nonAdminCookie });
+if (!invitees.response.ok || !invitees.data.items.some((item) => item.id === "owner" && item.name) ||
+    invitees.data.items.some((item) => item.id === user.data.user.id) ||
+    invitees.data.items.some((item) => "email" in item || "login" in item || "tokenHash" in item)) {
+  throw new Error("group user dropdown candidates are missing or expose private user data: " + invitees.text);
+}
+const anonymousInvitees = await browser(pickerPath);
+if (anonymousInvitees.response.status !== 401) throw new Error("anonymous access to group candidates was allowed");
+const invitation = await browser("/admin/api/learn/groups/" + groupCreation.data.group.id + "/members", {
+  method: "POST", cookie: nonAdminCookie, csrf: nonAdminLogin.data.csrfToken,
+  origin: base, body: { userId: "owner", role: "member" },
+});
+if (invitation.response.status !== 201) throw new Error("group invitation failed: " + invitation.text);
+const afterInvitation = await browser(pickerPath, { cookie: nonAdminCookie });
+if (!afterInvitation.response.ok || afterInvitation.data.items.some((item) => item.id === "owner")) {
+  throw new Error("existing member still appeared in group user dropdown");
+}
 const nonAdminErrors = await browser("/admin/api/errors", { cookie: nonAdminCookie });
 if (nonAdminErrors.response.status !== 403 || nonAdminErrors.data.error !== "admin_required") throw new Error("non-admin accessed Errors API");
 
@@ -99,6 +124,10 @@ const session = await browser("/admin/session", { cookie });
 if (!session.response.ok || session.data.user?.id !== "owner" || session.data.user?.admin !== true) {
   throw new Error(`admin session read failed: ${session.text}`);
 }
+const outsiderPicker = await browser(pickerPath, { cookie });
+if (outsiderPicker.response.status !== 403) {
+  throw new Error("another account could browse a foreign group's candidate users: " + outsiderPicker.text);
+}
 const browserUsers = await browser("/admin/api/users", { cookie });
 if (!browserUsers.response.ok) throw new Error(`browser admin API read failed: ${browserUsers.text}`);
 
@@ -123,6 +152,10 @@ const softDeleted = await browser("/admin/api/users/soft-delete", {
   method: "POST", cookie, csrf, origin: base, body: { userId: managedId },
 });
 if (!softDeleted.response.ok || softDeleted.data.user?.enabled !== false || !softDeleted.data.user?.deletedAt) throw new Error(`soft delete failed: ${softDeleted.text}`);
+const pickerAfterDelete = await browser(pickerPath, { cookie: nonAdminCookie });
+if (!pickerAfterDelete.response.ok || pickerAfterDelete.data.items.some((item) => item.id === managedId)) {
+  throw new Error("deleted account appeared in Shared Learn user dropdown");
+}
 const revokedManagedSession = await browser("/admin/session", { cookie: managedCookie });
 if (revokedManagedSession.response.status !== 401) throw new Error("soft-deleted user session remained valid");
 const blockedManagedLogin = await browser("/admin/session/login", { method: "POST", body: { login: managedLogin, password: managedPassword } });
