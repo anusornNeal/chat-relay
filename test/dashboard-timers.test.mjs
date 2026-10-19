@@ -24,7 +24,7 @@ const context = vm.createContext({
   setLiveState() {}, $: () => null, topicsTouchActiveView: () => true,
   loadActive: async () => { loads++; return true; }, applyToolLifecycle() {},
 });
-vm.runInContext(`let currentUser = {}; let liveSocket = null; let reconnectTimer = null; let fallbackStartTimer = null; let fallbackPollTimer = null; let heartbeatTimer = null; let runningClockTimer = null; let liveRefreshTimer = null; let reconnectAttempt = 0; let socketEverOpened = false; let lastPongAt = 0; let refreshRunning = false; let refreshQueued = false; let dataRetryTimer = null; let dataRetryAttempt = 0; let lastLiveRefreshAt = 0; const DATA_RETRY_MAX_MS = 300000; const pendingLiveTopics = new Set();\n${functions}`, context);
+vm.runInContext(`let currentUser = {}; let activeView = "overview"; let liveSocket = null; let reconnectTimer = null; let fallbackStartTimer = null; let fallbackPollTimer = null; let heartbeatTimer = null; let runningClockTimer = null; let liveRefreshTimer = null; let reconnectAttempt = 0; let socketEverOpened = false; let lastPongAt = 0; let refreshRunning = false; let refreshQueued = false; let dataRetryTimer = null; let dataRetryAttempt = 0; let lastLiveRefreshAt = 0; const DATA_RETRY_MAX_MS = 300000; const pendingLiveTopics = new Set();\n${functions}`, context);
 const run = code => vm.runInContext(code, context);
 run('queueLiveRefresh(["calls"]);');
 const first = [...timers][0];

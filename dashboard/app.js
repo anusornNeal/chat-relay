@@ -1,3 +1,5 @@
+import { renderLearnMarkdown } from "./learn-markdown.js";
+
 let csrf = sessionStorage.getItem("chat_relay_csrf") || "";
 let currentUser = null;
 let activeView = "overview";
@@ -999,12 +1001,12 @@ function renderLearnProfile({ patch = false } = {}) {
     const radioName = "learn-feedback-detail-" + String(selected.id).replace(/[^a-z0-9_-]/gi, "-");
     const scopePath = selected.scope === "global" ? "Global" : learnScopeLabel(selected);
     detailHtml =
-      '<div class="learn-detail-top"><span class="learn-type-pill ' + esc(learnKindClass(selected.kind)) + '"><i class="learn-tree-dot ' + esc(learnKindClass(selected.kind)) + '"></i>' + esc(learnKindLabel(selected.kind)) + '</span>' +
+      '<div class="learn-detail-scroll"><div class="learn-detail-top"><span class="learn-type-pill ' + esc(learnKindClass(selected.kind)) + '"><i class="learn-tree-dot ' + esc(learnKindClass(selected.kind)) + '"></i>' + esc(learnKindLabel(selected.kind)) + '</span>' +
         '<button class="learn-detail-more" type="button" aria-label="More memory actions">' + icon("more") + '</button></div>' +
       '<h3>' + esc(selected.key) + '</h3>' +
       '<div class="learn-detail-path">' + icon("folder") + esc(scopePath) + ' / ' + esc(learnKindLabel(selected.kind)) + '</div>' +
       '<div class="learn-detail-rule"></div>' +
-      '<div class="learn-detail-section"><label>Memory</label><p>' + esc(selected.content) + '</p></div>' +
+      '<div class="learn-detail-section"><label>Memory</label><div class="learn-markdown">' + renderLearnMarkdown(selected.content) + '</div></div>' +
       '<div class="learn-detail-meta">' +
         '<div><span>Confidence</span><strong>' + esc(selected.confidence) + '%</strong></div>' +
         '<div><span>Updated</span><strong>' + esc(bkkDateTime(selected.updatedAt)) + '</strong></div>' +
@@ -1015,7 +1017,7 @@ function renderLearnProfile({ patch = false } = {}) {
       '<div class="learn-detail-section"><label>Feedback</label><div class="learn-detail-feedback" role="radiogroup" aria-label="Feedback for ' + esc(selected.key) + '">' +
         '<label class="learn-detail-radio useful' + (positiveChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="positive" data-learn-feedback="positive" data-memory-id="' + esc(selected.id) + '"' + positiveChecked + '>' + icon("thumbUp") + '<span>Useful</span></label>' +
         '<label class="learn-detail-radio not-useful' + (negativeChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="negative" data-learn-feedback="negative" data-memory-id="' + esc(selected.id) + '"' + negativeChecked + '>' + icon("thumbDown") + '<span>Not useful</span></label>' +
-      '</div></div>' +
+      '</div></div></div>' +
       '<div class="learn-detail-footer"><button class="button danger learn-detail-remove" type="button" data-learn-delete="' + esc(selected.id) + '">' + icon("trash") + 'Remove memory</button></div>';
   }
 
