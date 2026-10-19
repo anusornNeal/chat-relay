@@ -16,7 +16,7 @@ import { preferredAgentForContext, routingContext } from "./context-routing";
 import { canonicalLearnProjectKey } from "./project-identity";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
 import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT } from "./learning-policy";
-import { LearnPreflightGuard, attachLearnPrepareAdvisory } from "./learn-preflight-guard.mjs";
+import { LearnPreflightGuard, attachLearnPrepareAdvisory, attachLearnReflectionAdvisory, isLearningCheckpointTool } from "./learn-preflight-guard.mjs";
 import { LearnGateCache, preflightIdentity, preflightScope, preflightPreparationScopes, isPreflightExempt, preflightRequired } from "./learn-preflight-gate.mjs";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
@@ -716,6 +716,10 @@ async function instrumentTool<T>(
       }
     }
 
+    if (tool === "learn_put" && outcome.ok && outcome.learnChange && activityId) {
+      learnPreflightGuard.markLearned(user.id, activityId);
+    }
+
     if (outcome.agentId && (outcome.ok || outcome.errorSource === "agent")) {
       noteRecentLearnAgent(user.id, outcome.agentId);
     }
@@ -733,6 +737,13 @@ async function instrumentTool<T>(
       && Array.isArray((outcome.value as any)?.content);
     if (canAttachLearnAdvisory && learnPreflightGuard.claimReminder(user.id, activityId)) {
       return attachLearnPrepareAdvisory(outcome.value).value as T;
+    }
+
+    // Reconsider durable user corrections at one work checkpoint per activity.
+    // No automatic Learn storage reads or writes; Chat still chooses the content.
+    if (outcome.ok && canAttachLearnAdvisory && isLearningCheckpointTool(tool, args)
+      && learnPreflightGuard.claimReflection(user.id, activityId)) {
+      return attachLearnReflectionAdvisory(outcome.value).value as T;
     }
 
     return outcome.value;

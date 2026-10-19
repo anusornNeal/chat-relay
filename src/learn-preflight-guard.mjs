@@ -9,7 +9,22 @@ function boundedPositiveInt(value, fallback, min, max) {
   if (!Number.isFinite(numeric)) return fallback;
   return Math.max(min, Math.min(max, Math.round(numeric)));
 }
+export const LEARN_REFLECTION_ADVISORY = Object.freeze({
+  code: "learn_reflection_recommended",
+  message: "Before finishing, check whether the user supplied a reusable correction, preference, coding convention, or workflow rule. If so, proactively call learn_put once with the right account-scoped global/project/agent scope; use prepared context or targeted learn_get to avoid duplication. Never learn one-off details, secrets, or raw tool output. If nothing durable emerged, do not write Learn. This reminder does not mean anything was saved.",
+});
+
 const LEARN_PREPARE_ADVISORY_TEXT = JSON.stringify({ relayAdvisory: LEARN_PREPARE_ADVISORY });
+const LEARN_REFLECTION_ADVISORY_TEXT = JSON.stringify({ relayAdvisory: LEARN_REFLECTION_ADVISORY });
+
+// An inexpensive checkpoint, not text mining of user messages or tool output.
+const CHANGE_TOOLS = new Set(["write_file", "edit_block", "move_path", "create_directory", "delete_path", "cleanup_worktree"]);
+export function isLearningCheckpointTool(tool, args) {
+  if (CHANGE_TOOLS.has(tool)) return true;
+  if (tool !== "terminal_exec") return false;
+  const command = typeof args?.command === "string" ? args.command.slice(0, 4000) : "";
+  return /(?:^|[\s;&|])git\s+(?:commit|push)\b/i.test(command);
+}
 
 export class LearnPreflightGuard {
   constructor({
@@ -45,7 +60,7 @@ export class LearnPreflightGuard {
     this.prune(now);
     let state = this.states.get(key);
     if (!state) {
-      state = { prepared: false, reminderSent: false, expiresAt: now + this.ttlMs };
+      state = { prepared: false, reminderSent: false, reflectionSent: false, expiresAt: now + this.ttlMs };
     } else {
       state.expiresAt = now + this.ttlMs;
       this.states.delete(key);
@@ -66,10 +81,32 @@ export class LearnPreflightGuard {
     state.reminderSent = true;
     return true;
   }
+  claimReflection(userId, activityId) {
+    const state = this.touch(userId, activityId);
+    if (!state || state.reflectionSent) return false;
+    state.reflectionSent = true;
+    return true;
+  }
+  markLearned(userId, activityId) {
+    const state = this.touch(userId, activityId);
+    if (state) state.reflectionSent = true;
+  }
   size() {
     this.prune();
     return this.states.size;
   }
+}
+export function attachLearnReflectionAdvisory(value) {
+  if (!value || typeof value !== "object" || !Array.isArray(value.content)) {
+    return { value, attached: false };
+  }
+  return {
+    value: {
+      ...value,
+      content: [...value.content, { type: "text", text: LEARN_REFLECTION_ADVISORY_TEXT }],
+    },
+    attached: true,
+  };
 }
 export function attachLearnPrepareAdvisory(value) {
   if (!value || typeof value !== "object" || !Array.isArray(value.content)) {

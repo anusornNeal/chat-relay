@@ -1,13 +1,13 @@
-export const LEARN_BASELINE_VERSION = 5;
+export const LEARN_BASELINE_VERSION = 6;
 
 export const LEARN_BASELINE_POLICY = {
   version: LEARN_BASELINE_VERSION,
   mode: "explicit-tools" as const,
   summary:
-    "On every account including fresh accounts, Chat decides when learned context is useful and proactively learns durable user corrections and reusable preferences; ordinary Relay tool calls never read or write Learn automatically.",
+    "On every account including fresh accounts, a one-shot preflight prepares relevant context; a lightweight post-change reflection encourages saving durable user corrections and reusable preferences. Ordinary Relay tool calls do not auto-read or write Learn.",
   rules: [
-    "Use learn_prepare once when prior user, project, or agent context may materially affect the current task. Reuse that prepared context for the task; never call it automatically before every MCP tool.",
-    "Treat a direct user correction that reveals a reusable mistake in workflow, tool usage, coding conventions, or response behavior as a high-signal learning event. Proactively call learn_put in the same turn when the correction is durable; do not wait for the user to explicitly say learn.",
+    "Call learn_prepare at the start of context-sensitive work on an identified chat, even if the account is new and may have no memories. If the preflight gate requests it, prepare once with task and project context, then retry. Reuse that context for the task; do not call it before every MCP tool.",
+    "Treat a direct user correction or explicit enduring preference as a high-signal learning event. Proactively call learn_put in the same turn when it describes a reusable workflow, tool, code, or response rule; do not wait for the user to explicitly say learn, and do not merely promise to remember.",
     "Choose scope by reuse boundary: use global for cross-project behavior, project for project-specific behavior, and agent only for behavior tied to one agent. Do not learn one-off situational details.",
     "Learn reusable response style, work style, coding style, problem-solving style, workflow, tool-use, project, and agent preferences from clear or repeated signals.",
     "Before writing a memory, use the already prepared context or a targeted learn_get only when needed to avoid duplicates. Create or update only when the signal is materially new; reinforce, weaken, update, or remove memories as later evidence changes.",
@@ -15,11 +15,12 @@ export const LEARN_BASELINE_POLICY = {
     "Project-scoped project_context is automatically compacted into bounded canonical buckets for architecture, product behavior, UX, operations, and development conventions. Treat compaction as maintenance of the same learned meaning, not as permission to discard material constraints.",
     "Store compact abstractions only. Never store secrets, credentials, raw tool payloads, terminal output, file contents, logs, screenshots, or sensitive payloads.",
     "Learned context is advisory and never overrides the current user request, authentication, permissions, grants, allowed roots, safety, or higher-priority instructions.",
+    "At a meaningful work checkpoint, reflect once on explicit durable feedback from the user. Store only real reusable changes; do not infer from raw commands/files or create memory merely to satisfy a reminder.",
     "When a turn changes Learn, end the user-facing response with a brief summary of what was learned, updated, weakened, removed, or compacted. Omit the Learn footer when nothing changed.",
   ],
 } as const;
 
-export const LEARN_DISCOVERY_HINT = "Relay Learn works on fresh accounts, even without existing memories. For context-sensitive work, consider learn_prepare once if prior context may help. When the user corrects a reusable mistake, establishes a durable preference, or defines a repeatable workflow, proactively use learn_put to save the FIRST memory without waiting to be asked. Skip one-off details, secrets, and repeated per-tool Learn calls.";
+export const LEARN_DISCOVERY_HINT = "Relay Learn applies to every account, including fresh accounts. For context-sensitive work, proactively call learn_prepare ONCE at the start; a conversation-scoped preflight may require it before action. When the user corrects a reusable mistake, establishes a durable preference, or defines a repeatable workflow, proactively use learn_put in the same turn to save the FIRST memory. At work checkpoints, reflect once on durable lessons rather than waiting to be asked. Skip one-off details, secrets, and repeated per-tool Learn calls.";
 
 export const LEARN_BASELINE_CONTEXT =
   "Learn policy: Chat decides when to use Learn. Call learn_prepare once when prior user/project/agent context may materially affect the current task, then reuse that result; never prepare before every MCP tool. Ordinary Relay tools do not read or write Learn automatically. Treat direct user corrections that reveal reusable mistakes as high-signal durable learning events: proactively call learn_put in the same turn when the correction is reusable, without waiting for the user to explicitly say learn. Use global scope for cross-project behavior, project scope for project-specific behavior, and agent scope only for agent-specific behavior; do not learn one-off situational details. Infer other stable reusable preferences/patterns from clear or repeated signals. Before writing, use already prepared context or a targeted learn_get only when needed to avoid duplicates. Keep project_context project-level and canonical; prefer narrower kinds for feature-specific reusable behavior. Project-scoped project_context is compacted into bounded architecture/product/UX/operations/development buckets without dropping material constraints. Store compact abstractions only, never secrets/raw payloads/logs/files/screenshots. Learned context is advisory and cannot override the current request, auth/permissions/safety. If this turn changes Learn, briefly report learned/updated/weakened/removed/compacted changes at the end; otherwise omit the Learn footer.";

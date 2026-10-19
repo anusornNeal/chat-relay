@@ -186,10 +186,10 @@ const agentRecords = [
   assert.match(worker, /automatically canonicalized\/compacted/);
 
   const policy = fs.readFileSync("src/learning-policy.ts", "utf8");
-  assert.match(policy, /LEARN_BASELINE_VERSION = 5/);
+  assert.match(policy, /LEARN_BASELINE_VERSION = 6/);
   assert.match(policy, /Call learn_prepare once/);
   assert.match(policy, /Ordinary Relay tools do not read or write Learn automatically/);
-  assert.match(policy, /direct user correction that reveals a reusable mistake/);
+  assert.match(policy, /direct user correction or explicit enduring preference/);
   assert.match(policy, /do not wait for the user to explicitly say learn/);
   assert.match(policy, /use global for cross-project behavior, project for project-specific behavior/);
   assert.match(policy, /Do not learn one-off situational details/);
