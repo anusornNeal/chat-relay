@@ -274,6 +274,7 @@ export class Registry extends DurableObject {
     switch (path) {
       case "/bootstrap": return this.bootstrap(body);
       case "/users/create": return this.createUser(body);
+      case "/users/lookup": return this.lookupGroupUser(body);
       case "/agents/create": return this.createAgent(body);
       case "/grants/upsert": return this.upsertGrant(body);
       case "/grants/delete": return this.deleteGrant(body);
@@ -402,6 +403,14 @@ export class Registry extends DurableObject {
       [key.grant(user.id, agent.id)]: grant,
     });
     return json({ ok: true, user: { id: user.id, name: user.name }, agent: { id: agent.id, name: agent.name } });
+  }
+
+  private async lookupGroupUser(body: any): Promise<Response> {
+    const userId = String(body?.userId ?? "");
+    if (!/^[a-zA-Z0-9._:-]{2,160}$/.test(userId)) return json({ error: "invalid_user" }, 400);
+    const user = await this.ctx.storage.get<UserRecord>(key.user(userId));
+    if (!user || !user.enabled || user.deletedAt) return json({ error: "user_unavailable" }, 404);
+    return json({ ok: true, user: { id: user.id, name: user.name } });
   }
 
   private async createUser(body: any): Promise<Response> {

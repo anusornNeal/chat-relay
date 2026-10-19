@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { canonicalLearnProjectKey } from "./project-identity";
+import { SharedLearnGroups } from "./shared-learn";
 
 export type LearnScope = "global" | "project" | "agent";
 export type LearnKind =
@@ -26,6 +27,9 @@ export type LearnRecord = {
   confidence: number;
   positiveFeedback: number;
   negativeFeedback: number;
+  origin?: "shared";
+  groupId?: string;
+  approvedBy?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -316,6 +320,7 @@ function mergeProjectContextContent(
 }
 
 export class Learning extends DurableObject {
+  private sharedGroups?: SharedLearnGroups;
   private memoryCount: number | null = null;
 
   constructor(ctx: DurableObjectState, env: unknown) {
@@ -371,6 +376,17 @@ export class Learning extends DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname.startsWith("/groups/")) {
+      this.sharedGroups ??= new SharedLearnGroups(this.ctx.storage.sql);
+      return this.sharedGroups.handle(url.pathname, await request.json<any>().catch(() => null));
+    }
+    if (url.pathname === "/read-one" && request.method === "POST") {
+      const body = await request.json<any>().catch(() => null);
+      const id = cleanText(body?.id, 160);
+      if (!/^mem_[a-f0-9]{64}$/.test(id)) return Response.json({ error: "not_found" }, { status: 404 });
+      const row = this.ctx.storage.sql.exec<any>(`SELECT * FROM ${TABLE} WHERE id=? LIMIT 1`, id).toArray()[0];
+      return row ? Response.json({ item: rowToRecord(row) }) : Response.json({ error: "not_found" }, { status: 404 });
+    }
     if (url.pathname === "/preflight-check" && request.method === "POST") {
       const input = await request.json<any>().catch(() => null);
       const activityId = String(input?.activityId || "");

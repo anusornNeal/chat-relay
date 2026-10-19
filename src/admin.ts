@@ -132,6 +132,19 @@ function learningStub(env: AdminEnv, userId: string) {
   return env.LEARNING.get(env.LEARNING.idFromName(userId));
 }
 
+function sharedGroupStub(env: AdminEnv) {
+  return env.LEARNING.get(env.LEARNING.idFromName("shared-learn-groups:v1"));
+}
+async function sharedGroupCall(env: AdminEnv, path: string, actorId: string, data: Record<string, unknown> = {}) {
+  return sharedGroupStub(env).fetch(new Request("https://learning.internal" + path, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...data, actorId }),
+  }));
+}
+function groupResponse(response: Response) {
+  return new Response(response.body, { status: response.status,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" } });
+}
+
 async function learningCall(env: AdminEnv, userId: string, path: string, body: unknown) {
   return learningStub(env, userId).fetch(new Request("https://learning.internal" + path, {
     method: "POST",
@@ -458,13 +471,15 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   const adminAuthorized = operatorAuthorized || sessionUser?.admin === true;
   const selfUserId = sessionUser?.id ? String(sessionUser.id) : "";
   const selfService = request.method === "GET" && ["/admin/api/overview", "/admin/api/summary", "/admin/api/learn"].includes(path);
+  const groupRead = request.method === "GET" && path.startsWith("/admin/api/learn/groups");
+  const groupMutation = ["POST", "DELETE"].includes(request.method) && path.startsWith("/admin/api/learn/groups");
   const learnSelfMutation = request.method === "POST" && [
     "/admin/api/learn/put",
     "/admin/api/learn/delete",
     "/admin/api/learn/feedback",
     "/admin/api/learn/projects/merge",
   ].includes(path);
-  if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService && !learnSelfMutation) {
+  if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService && !learnSelfMutation && !groupRead && !groupMutation) {
     return error(403, "admin_required");
   }
 
@@ -496,6 +511,66 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     headers.append("set-cookie", adminCookie("", 0));
     headers.append("set-cookie", clearLegacyAdminCookie());
     return Response.json({ ok: true }, { headers });
+  }
+
+  // Shared groups are separate from personal Learn; all actors are derived from the
+  // authenticated browser session, never request-provided user IDs.
+  if (path.startsWith("/admin/api/learn/groups")) {
+    if (!selfUserId) return error(403, "browser_user_required");
+    const suffix = path.slice("/admin/api/learn/groups".length);
+    const pieces = suffix.split("/").filter(Boolean);
+    const groupId = pieces[0];
+    if (pieces.length > 3 || (groupId && !/^grp_[a-f0-9-]{36}$/.test(groupId))) {
+      return error(404, "not_found");
+    }
+    let action = "";
+    const args: Record<string, unknown> = { groupId };
+    if (!pieces.length && request.method === "GET") action = "list";
+    else if (!pieces.length && request.method === "POST") { action = "create"; args.name = body?.name; args.projectKey = body?.projectKey; }
+    else if (pieces.length === 1 && request.method === "GET") action = "detail";
+    else if (pieces[1] === "aliases" && pieces.length === 2 && request.method === "POST") {
+      action = "alias"; args.alias = body?.alias;
+    }
+    else if (pieces[1] === "aliases" && pieces[2] === "remove" &&
+      pieces.length === 3 && request.method === "POST") {
+      action = "alias-remove"; args.alias = body?.alias;
+    }
+    else if (pieces[1] === "members" && pieces.length === 2 && request.method === "POST") {
+      action = "invite";
+      args.userId = body?.userId;
+      args.role = body?.role;
+      // Check group ownership BEFORE validating invitee existence to avoid enumeration.
+      const detail = await sharedGroupCall(env, "/groups/detail", selfUserId, { groupId });
+      if (!detail.ok) return groupResponse(detail);
+      const record = await detail.json<any>();
+      if (record.group?.role !== "owner") return error(403, "forbidden");
+      const target = await registryCall(env, "/users/lookup", { userId: body?.userId });
+      if (!target.ok) return error(400, "invitee_unavailable");
+    }
+    else if (pieces[1] === "members" && pieces.length === 3 && request.method === "DELETE") {
+      action = "remove"; args.userId = pieces[2];
+    }
+    else if (pieces[1] === "proposals" && pieces.length === 2 && request.method === "POST") {
+      action = "propose";
+      const memory = await learningCall(env, selfUserId, "/read-one", { id: body?.memoryId });
+      if (!memory.ok) return error(404, "personal_memory_not_found");
+      const selected = await memory.json<any>();
+      if (selected.item?.scope !== "project") return error(400, "only_project_memory_shareable");
+      args.memory = selected.item;
+    }
+    else if (pieces[1] === "review" && pieces.length === 2 && request.method === "POST") {
+      action = "review";
+      args.proposalId = body?.proposalId;
+      args.decision = body?.decision;
+      args.replace = body?.replace === true;
+    }
+    if (!action) return error(404, "not_found");
+    const result = await sharedGroupCall(env, "/groups/" + action, selfUserId, args);
+    if (result.ok && !["list", "detail"].includes(action)) {
+      await recordAudit(env, actor, "learn.group." + action, { type: "learn_group", id: groupId || "new" },
+        "success", { memberId: action === "invite" || action === "remove" ? args.userId : undefined });
+    }
+    return groupResponse(result);
   }
 
   if (path === "/admin/api/learn" && request.method === "GET") {
