@@ -410,7 +410,7 @@ html:has(.learn-folder-shell),body:has(.learn-folder-shell){width:100%;height:10
 .learn-folder-sort button{height:26px;border:0;border-radius:6px;background:transparent;padding:0 10px;font-size:11px;color:#68727f;cursor:pointer}
 .learn-folder-sort button.active{background:#eef2f6;color:#202a36;font-weight:650}
 .learn-folder-list-toolbar>span{font-size:10px;color:#929aa5}
-.learn-folder-workspace{min-height:0;border:1px solid var(--line);border-radius:10px;display:grid;grid-template-columns:minmax(0,1fr) minmax(390px,34%);grid-template-rows:minmax(0,1fr);overflow:hidden}
+.learn-folder-workspace{min-height:0;border:1px solid var(--line);border-radius:10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:minmax(0,1fr);overflow:hidden}
 .learn-folder-list{border-right:1px solid var(--line);background:#fff;min-width:0;min-height:0;display:grid;grid-template-rows:36px minmax(0,1fr);overflow:hidden}
 .learn-folder-list-head{height:36px;display:grid;grid-template-columns:minmax(0,1fr) 100px 90px;align-items:center;padding:0 14px;border-bottom:1px solid var(--line);font-size:9px;text-transform:uppercase;letter-spacing:.09em;color:#9aa2ad;font-weight:700;background:#fbfcfd}
 .learn-folder-list-scroll{min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-gutter:stable}
@@ -454,7 +454,7 @@ html:has(.learn-folder-shell),body:has(.learn-folder-shell){width:100%;height:10
 .learn-detail-remove .icon{width:12px;height:12px}
 @media(max-width:1180px){
   .learn-folder-shell{grid-template-columns:220px minmax(0,1fr)}
-  .learn-folder-workspace{grid-template-columns:minmax(0,1fr) 380px}
+  .learn-folder-workspace{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media(max-width:900px){
   .learn-folder-shell{grid-template-columns:1fr}
