@@ -5,7 +5,7 @@ Shared Learn lets multiple Chat Relay accounts collaborate on **approved project
 ## Use in Dashboard
 
 1. Open **My Learn → Shared Learn → Create group**. Enter a name and canonical project key, such as `Buddy2` / `buddy2`. The creator becomes **Owner**.
-2. Owner opens **Members** and invites an existing Chat Relay account ID with a role.
+2. Owner opens **Members**, selects an existing account by **email** (fallback display name if no email), and assigns its role. The ID stays an internal value only; the directory excludes disabled, deleted, and existing members.
 3. If teammates use different repository folder names, Owner opens **Project aliases** and adds the alternate keys (e.g. `buddy-android`). Alias changes are explicit and group-scoped; no guesses from unrelated paths.
 4. A Member or Editor opens **My Learn**, selects a project-scoped memory and clicks **Share to group**. The system makes a **proposal copy** of that account's own record. Nothing is auto-shared; Global and Agent memories cannot be shared this way.
 5. Owner/Editor reviews under **Shared Learn → Pending** and selects Approve or Reject. If a different approved rule has the same kind/key, a separate replacement confirmation is required. Only approved memories are read by other members.
@@ -13,7 +13,7 @@ Shared Learn lets multiple Chat Relay accounts collaborate on **approved project
 
 ## Add Learn directly
 
-In a Shared Learn group, Owner, Editor, and Member can select **Add Learn** (also shown when the Approved list is empty). Enter a unique key, select a type, and write Markdown content (up to 4,000 characters). The new entry goes to **Pending** for review and does **not** require a personal memory first. Viewer cannot add new entries.
+In a Shared Learn group, Owner, Editor, and Member can select **Add Learn** (also shown when the Approved list is empty). Choose **Create new Learn** (key/type/Markdown up to 4,000 characters) or **Select from Private Learn** (your own matching project memories only; explicitly fetched when opening that mode). Either choice creates a **Pending** proposal, never a published rule. Viewer cannot add new entries.
 
 Only an approved proposal is used as shared project context. To reuse a personal rule instead, keep using **My Learn > Share to group**. Both paths preserve the same review gate and group permissions.
 
@@ -41,6 +41,12 @@ Non-members receive a 404 even when they know a group ID. Revoked members cannot
 - `POST /admin/api/learn/groups/:id/review` — Owner/Editor reviews `{ proposalId, decision: "approve"|"reject", replace?: boolean }`.
 
 - `POST /admin/api/learn/groups/:id/learn` - Owner/Editor/Member submits `{ key, kind, content }` as a new Pending group proposal; does not create personal memory or approve it.
+
+## Chat and Learn routing
+
+Chat clients can use `learn_group_list`, `learn_group_get`, `learn_group_propose` and `learn_group_review` with the authenticated Chat Relay account. `learn_group_propose` accepts either one personal `sourceMemoryId` (project scope only) **or** one new `key`, `kind`, `content` Markdown record. Neither route approves automatically. Approvals/rejections should be explicitly requested and visible in Group Pending/History.
+
+For ordinary project work, the chat invokes `learn_prepare` once with a resolvable project key. Its result includes **approved** matching Shared Learn from accessible Groups (including configured project aliases), ranked alongside personal context with shared provenance. Pending proposals are never included, and routine Relay tool calls incur no group read.
 
 ## Resource boundaries
 

@@ -244,7 +244,26 @@ const oauthTools = await mcpRpc(token.data.access_token, 2, "tools/list");
 if (!oauthTools.result?.tools?.some((item) => item.name === "whoami")) {
   throw new Error("OAuth bearer could not access MCP");
 }
-console.log("OAuth bearer MCP access ok");
+const groupTools = new Set(oauthTools.result.tools.map((entry) => entry.name));
+for (const name of ["learn_group_list", "learn_group_get", "learn_group_propose", "learn_group_review"]) {
+  if (!groupTools.has(name)) throw new Error("Missing Chat-accessible Shared Learn tool: " + name);
+}
+const mySharedGroups = await mcpRpc(token.data.access_token, 12, "tools/call", {
+  name: "learn_group_list", arguments: {},
+});
+if (!Array.isArray(JSON.parse(mySharedGroups.result?.content?.[0]?.text || "{}").items)) {
+  throw new Error("Chat could not list accessible Shared Learn groups");
+}
+const forbiddenGroup = await mcpRpc(token.data.access_token, 13, "tools/call", {
+  name: "learn_group_propose", arguments: {
+    groupId: "grp_00000000-0000-0000-0000-000000000000",
+    key: "no-access", kind: "workflow", content: "No unauthorized sharing",
+  },
+});
+if (JSON.parse(forbiddenGroup.result?.content?.[0]?.text || "{}").error !== "not_found") {
+  throw new Error("Chat Shared Learn proposal did not enforce group membership");
+}
+console.log("OAuth bearer MCP access, group tool routing and denied cross-account proposal ok");
 
 const audienceCheck = await fetch(`${base}/status`, {
   headers: { authorization: `Bearer ${token.data.access_token}` },

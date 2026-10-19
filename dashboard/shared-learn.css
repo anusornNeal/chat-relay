@@ -15,6 +15,10 @@
 .learn-shared-dialog::backdrop{background:#121a27a0}
 .learn-shared-form{display:flex;flex-direction:column;gap:14px;padding:23px}
 .learn-shared-form h3{margin:0 0 4px;font-size:18px}
+.learn-shared-source-fields{display:flex;flex-direction:column;gap:14px}
+.learn-shared-source-fields[hidden]{display:none}
+.learn-shared-source-fields>label{display:flex;flex-direction:column;gap:7px;font-size:11px;font-weight:600}
+.learn-shared-source-fields input,.learn-shared-source-fields select{border:1px solid #d8e0e8;border-radius:7px;padding:10px;background:#fff;color:#263546;font:inherit;width:100%;min-width:0}
 .learn-shared-form>label{display:flex;flex-direction:column;gap:7px;font-size:11px;font-weight:600}
 .learn-shared-form textarea{border:1px solid #d8e0e8;border-radius:7px;padding:10px;background:#fff;color:#263546;font:inherit;min-width:0;width:100%;resize:vertical;min-height:155px;line-height:1.6}
 .learn-shared-form input,.learn-shared-form select{border:1px solid #d8e0e8;border-radius:7px;padding:10px;background:#fff;color:#263546;font:inherit;min-width:0;width:100%}

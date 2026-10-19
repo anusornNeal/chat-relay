@@ -536,19 +536,35 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       action = "alias-remove"; args.alias = body?.alias;
     }
     else if (pieces[1] === "candidates" && pieces.length === 2 && request.method === "GET") {
-      // The full Users API stays admin-only. Group owners may discover only
-      // active users eligible for this group; never return credentials or emails.
+      // The full Users API stays admin-only. Owners can choose an existing
+      // active account by email; never expose credentials or full user records.
       const detailResponse = await sharedGroupCall(env, "/groups/detail", selfUserId, { groupId });
       if (!detailResponse.ok) return groupResponse(detailResponse);
       const groupData = await detailResponse.json<any>();
       if (groupData.group?.role !== "owner") return error(403, "forbidden");
       const existingIds = new Set((groupData.members ?? []).map((member: any) => member.userId));
       const registry = await registryState(env);
-      const candidates = (registry.users ?? [])
+      const activeUsers = registry.users ?? [];
+      const accountById = new Map(activeUsers.map((entry: any) => [entry.id, entry]));
+      const candidates = activeUsers
         .filter((user: any) => user.enabled === true && !user.deletedAt && !existingIds.has(user.id))
-        .map((user: any) => ({ id: String(user.id), name: String(user.name || user.id) }))
-        .sort((a: any, b: any) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-      return Response.json({ items: candidates.slice(0, 200), hasMore: candidates.length > 200 }, {
+        .map((user: any) => {
+          const email = [user.email, user.login].find((value) =>
+            typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()));
+          return { id: String(user.id), email: email ? email.trim() : null,
+            name: String(user.name || "Account") };
+        })
+        .sort((a: any, b: any) =>
+          (a.email || a.name).localeCompare(b.email || b.name) || a.id.localeCompare(b.id));
+      const memberDirectory = (groupData.members ?? []).map((member: any) => {
+        const account = accountById.get(member.userId) as any;
+        const email = [account?.email, account?.login].find((value) =>
+          typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()));
+        return { userId: member.userId, email: email ? email.trim() : null,
+          name: String(account?.name || "Account") };
+      });
+      return Response.json({ items: candidates.slice(0, 200), members: memberDirectory,
+        hasMore: candidates.length > 200 }, {
         headers: { "cache-control": "private, no-store" },
       });
     }

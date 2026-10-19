@@ -91,6 +91,12 @@ assert.equal(empty.getSelectedGroupId(), null);
 assert.match(markup, /No groups yet/);
 assert.match(markup, /Create group/);
 
+const sharedUI = readFileSync(new URL("../dashboard/shared-learn.js", import.meta.url), "utf8");
+assert.match(sharedUI, /Select from Private Learn/, "Add Learn includes own private project memories");
+assert.match(sharedUI, /values.sourceMode === "private"/, "Private selection routes to pending proposal");
+assert.match(sharedUI, /\/admin\/api\/learn\?limit=100/, "Private Learn is loaded on demand");
+assert.match(sharedUI, /esc\(user.email \|\| user.name/, "Member picker shows email, not opaque user ID");
+assert.doesNotMatch(sharedUI, /esc\(user.name\) \+ ' \('/, "Member picker cannot expose raw user ids");
 const app = readFileSync(new URL("../dashboard/app.js", import.meta.url), "utf8");
 const css = readFileSync(new URL("../dashboard/styles.css", import.meta.url), "utf8");
 assert.match(app, /data-learn-shared-toggle/);

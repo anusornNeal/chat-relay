@@ -81,6 +81,36 @@ async function learningCall(env: Env, user: AuthUser, path: string, body: unknow
   return { ok: response.ok, body: await response.text(), statusCode: response.status };
 }
 
+async function sharedGroupCall(env: Env, user: AuthUser, path: string, body: Record<string, unknown> = {}) {
+  const response = await sharedGroupsStub(env).fetch(new Request("https://learning.internal/groups/" + path, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...body, actorId: user.id }),
+  }));
+  return { ok: response.ok, body: await response.text(), statusCode: response.status };
+}
+
+async function proposeGroupMemory(env: Env, user: AuthUser, args: {
+  groupId: string; sourceMemoryId?: string; key?: string; kind?: string; content?: string;
+}) {
+  const hasPrivateSource = Boolean(args.sourceMemoryId);
+  const hasDirectSource = args.key !== undefined || args.kind !== undefined || args.content !== undefined;
+  if (hasPrivateSource === hasDirectSource) return {
+    ok: false, statusCode: 400, body: JSON.stringify({ error: "choose_exactly_one_source" }),
+  };
+  if (hasPrivateSource) {
+    const privateRead = await learningCall(env, user, "/read-one", { id: args.sourceMemoryId });
+    if (!privateRead.ok) return { ok: false, statusCode: 404,
+      body: JSON.stringify({ error: "private_memory_not_found" }) };
+    const ownMemory = (JSON.parse(privateRead.body) as { item?: LearnRecord }).item;
+    if (ownMemory?.scope !== "project") return { ok: false, statusCode: 400,
+      body: JSON.stringify({ error: "only_project_memory_shareable" }) };
+    return sharedGroupCall(env, user, "propose", { groupId: args.groupId, memory: ownMemory });
+  }
+  return sharedGroupCall(env, user, "propose-direct", {
+    groupId: args.groupId, key: args.key, kind: args.kind, content: args.content,
+  });
+}
+
 type LearnPrepareArgs = {
   query: string;
   toolHint?: string;
@@ -1179,7 +1209,7 @@ const terminalSessionIdSchema = z.union([
 ]);
 
 const READ_ONLY_TOOLS = new Set([
-  "whoami", "list_agents", "learn_prepare", "learn_get", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
+  "whoami", "list_agents", "learn_prepare", "learn_get", "learn_group_list", "learn_group_get", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
   "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
   "start_search", "get_more_search_results", "list_processes", "screenshot", "clipboard_read", "list_windows",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
@@ -1279,6 +1309,54 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
 
   registerTool("learn_get", { description: "Read raw learned memories for targeted inspection or deduplication. Prefer learn_prepare once for task-level context; do not call learn_get automatically before ordinary MCP tools.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
+
+  // Shared project Learn is opt-in and approval-gated. These tools never
+  // change another account's private Learn, and only run on explicit calls.
+  const groupIdSchema = z.string().regex(/^grp_[a-f0-9-]{36}$/);
+  registerTool("learn_group_list", {
+    description: "List Shared Learn project groups accessible to this account. Use before proposing team knowledge or when identifying a group. Only approved shared rules are included in learn_prepare for an explicitly resolved matching project.",
+    inputSchema: {},
+    annotations: annotationsForTool("learn_group_list"), ...oauthToolSecurity(),
+  } as any, async () => instrumentTool(env, user, "learn_group_list", {}, async () => {
+    const call = await sharedGroupCall(env, user, "list");
+    return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+  }));
+
+  registerTool("learn_group_get", {
+    description: "Inspect an authorized Shared Learn group, its approved project knowledge and pending proposals (visible according to your group role). Never inspect other accounts' private Learn.",
+    inputSchema: { groupId: groupIdSchema },
+    annotations: annotationsForTool("learn_group_get"), ...oauthToolSecurity(),
+  } as any, async (args) => instrumentTool(env, user, "learn_group_get", args, async () => {
+    const call = await sharedGroupCall(env, user, "detail", args);
+    return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+  }));
+
+  registerTool("learn_group_propose", {
+    description: "Propose one reusable rule into Shared Learn for group review. Choose EITHER sourceMemoryId from YOUR OWN project-scope Private Learn (call learn_get to find it) OR key+kind+content for a new Markdown rule. It remains Pending until approved; never automatically expose private or one-off data. Call this when user asks Chat to add Learn to a group.",
+    inputSchema: {
+      groupId: groupIdSchema,
+      sourceMemoryId: z.string().regex(/^mem_[a-f0-9]{64}$/).optional(),
+      key: z.string().min(1).max(160).optional(),
+      kind: learnKindSchema.optional(),
+      content: z.string().min(1).max(4000).optional(),
+    },
+    annotations: annotationsForTool("learn_group_propose", { destructiveHint: false }), ...oauthToolSecurity(),
+  } as any, async (args) => instrumentTool(env, user, "learn_group_propose", args, async () => {
+    const call = await proposeGroupMemory(env, user, args);
+    return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+  }));
+
+  registerTool("learn_group_review", {
+    description: "Approve or reject an existing Pending Shared Learn proposal only at an explicit user's request. Approval publishes the rule to all group members; group ACL is enforced server-side. Inspect with learn_group_get first. replace=true replaces an explicitly conflicting existing approved rule and requires user approval.",
+    inputSchema: {
+      groupId: groupIdSchema, proposalId: z.string().regex(/^prp_[a-f0-9-]{36}$/),
+      decision: z.enum(["approve", "reject"]), replace: z.boolean().optional(),
+    },
+    annotations: annotationsForTool("learn_group_review", { destructiveHint: true }), ...oauthToolSecurity(),
+  } as any, async (args) => instrumentTool(env, user, "learn_group_review", args, async () => {
+    const call = await sharedGroupCall(env, user, "review", args);
+    return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+  }));
 
   if (!requestedTool || requestedTool === "learn_merge_projects") registerTool(
     "learn_merge_projects",

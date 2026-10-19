@@ -98,11 +98,36 @@ const directApproved = await browser("/admin/api/learn/groups/" + groupCreation.
 if (!directApproved.response.ok || !directApproved.data.memories.some((item) => item.key === "direct-rule")) {
   throw new Error("Approved direct Learn missing from group memory: " + directApproved.text);
 }
+const ownPrivate = await browser("/admin/api/learn/put", {
+  method: "POST", cookie: nonAdminCookie, csrf: nonAdminLogin.data.csrfToken, origin: base,
+  body: { key: "own-private-share", kind: "workflow", scope: "project",
+    scopeKey: "picker-" + suffix, content: "Private project convention" },
+});
+if (!ownPrivate.response.ok || !ownPrivate.data.item?.id) {
+  throw new Error("unable to create personal project Learn for Shared import test");
+}
+const privateProposal = await browser("/admin/api/learn/groups/" + groupCreation.data.group.id + "/proposals", {
+  method: "POST", cookie: nonAdminCookie, csrf: nonAdminLogin.data.csrfToken, origin: base,
+  body: { memoryId: ownPrivate.data.item.id },
+});
+if (privateProposal.response.status !== 201 || privateProposal.data.status !== "pending") {
+  throw new Error("private Learn copy into group failed: " + privateProposal.text);
+}
+const afterPrivate = await browser("/admin/api/learn/groups/" + groupCreation.data.group.id, {
+  cookie: nonAdminCookie,
+});
+if (afterPrivate.data.memories.some((item) => item.key === "own-private-share") ||
+    !afterPrivate.data.proposals.some((item) => item.id === privateProposal.data.proposalId)) {
+  throw new Error("private Learn was exposed without approval");
+}
 const pickerPath = "/admin/api/learn/groups/" + groupCreation.data.group.id + "/candidates";
 const invitees = await browser(pickerPath, { cookie: nonAdminCookie });
 if (!invitees.response.ok || !invitees.data.items.some((item) => item.id === "owner" && item.name) ||
     invitees.data.items.some((item) => item.id === user.data.user.id) ||
-    invitees.data.items.some((item) => "email" in item || "login" in item || "tokenHash" in item)) {
+    !invitees.data.members?.some((item) => item.userId === user.data.user.id && item.name) ||
+    invitees.data.items.some((item) =>
+      !("email" in item) || (item.email !== null && !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(item.email)) ||
+      "login" in item || "tokenHash" in item)) {
   throw new Error("group user dropdown candidates are missing or expose private user data: " + invitees.text);
 }
 const anonymousInvitees = await browser(pickerPath);

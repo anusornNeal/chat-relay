@@ -150,7 +150,11 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
   function addLearn() {
     if (!selectedGroupId || !canPropose()) return;
     dialog("Add Learn · " + detail.group.name,
-      '<p class="learn-shared-muted">New knowledge is submitted for review and will not be shared until approved.</p>' +
+      '<p class="learn-shared-muted">Choose a new rule or copy one of your own project memories. Both require approval.</p>' +
+      '<label>Source<select name="sourceMode" id="sharedLearnSourceMode">' +
+      '<option value="new">Create new Learn</option>' +
+      '<option value="private">Select from Private Learn</option></select></label>' +
+      '<div class="learn-shared-source-fields" data-learn-direct-fields>' +
       '<label>Key<input name="key" required maxlength="160" placeholder="android-commit-conventions"></label>' +
       '<label>Type<select name="kind" required>' +
       '<option value="workflow">Workflow</option><option value="correction">Correction</option>' +
@@ -158,9 +162,17 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
       '<option value="preference">Preference</option><option value="tool_pattern">Tool pattern</option>' +
       '</select></label>' +
       '<label>Memory (Markdown)<textarea name="content" required maxlength="4000" rows="8" ' +
-      'placeholder="## Rule\n- Describe the convention and when to apply it"></textarea></label>',
+      'placeholder="## Rule - Describe when this convention applies"></textarea></label></div>' +
+      '<div class="learn-shared-source-fields" data-learn-private-fields hidden>' +
+      '<label>My project memory<select name="memoryId" required disabled>' +
+      '<option value="">Choose a project memory...</option></select></label>' +
+      '<p class="learn-shared-muted">Only project memories from your Private Learn matching this group are eligible.</p></div>',
       async values => {
-        const result = await write(groupUrl(selectedGroupId) + "/learn", values);
+        const result = values.sourceMode === "private"
+          ? await write(groupUrl(selectedGroupId) + "/proposals", { memoryId: values.memoryId })
+          : await write(groupUrl(selectedGroupId) + "/learn", {
+            key: values.key, kind: values.kind, content: values.content,
+          });
         tab = "pending";
         selectedItemId = result.proposalId;
         await show();
@@ -168,11 +180,51 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
       });
     const submit = document.querySelector("dialog.learn-shared-dialog:last-of-type [data-submit]");
     if (submit) submit.textContent = "Submit for review";
+    const popup = document.querySelector("dialog.learn-shared-dialog:last-of-type");
+    const source = popup.querySelector('[name="sourceMode"]');
+    const directSection = popup.querySelector("[data-learn-direct-fields]");
+    const privateSection = popup.querySelector("[data-learn-private-fields]");
+    const privateSelect = popup.querySelector('[name="memoryId"]');
+    let loadedPrivate = false;
+    source.onchange = async () => {
+      const isPrivate = source.value === "private";
+      directSection.hidden = isPrivate;
+      privateSection.hidden = !isPrivate;
+      directSection.querySelectorAll("input,select,textarea").forEach(input => {
+        input.disabled = isPrivate;
+      });
+      privateSelect.disabled = !isPrivate;
+      if (!isPrivate || loadedPrivate) return;
+      privateSelect.disabled = true;
+      privateSelect.innerHTML = '<option value="">Loading private memories...</option>';
+      try {
+        // Explicit on-demand personal read; no group or personal DO polling.
+        const profile = await api("/admin/api/learn?limit=100");
+        if (!popup.isConnected) return;
+        const acceptedKeys = new Set([detail.group.projectKey, ...(detail.group.aliases || [])]);
+        const matching = (profile.items || []).filter(item =>
+          item.scope === "project" && acceptedKeys.has(item.scopeKey));
+        privateSelect.innerHTML = '<option value="">' +
+          (matching.length ? 'Choose a project memory...' : 'No matching private project memories') +
+          '</option>' + matching.map(item => '<option value="' + esc(item.id) + '">' +
+          esc(item.key) + ' · ' + esc(item.kind) + '</option>').join("");
+        loadedPrivate = true;
+        privateSelect.disabled = matching.length === 0;
+      } catch (cause) {
+        if (!popup.isConnected) return;
+        privateSelect.innerHTML = '<option value="">Unable to load private memories</option>';
+        privateSelect.disabled = true;
+        const error = popup.querySelector(".learn-shared-dialog-error");
+        error.textContent = "Could not load your Private Learn. Switch to Create new or retry.";
+        error.hidden = false;
+      }
+    };
   }
   function manageMembers() {
     if (!detail) return;
     const members=detail.members||[];
-    const rows=members.map(m=>'<div class="learn-shared-member"><span>' + esc(m.userId) +
+    const rows=members.map(m=>'<div class="learn-shared-member"><span><span data-member-display="' +
+      esc(m.userId) + '">' + (isOwner() ? 'Loading account...' : esc(m.userId)) + '</span>' +
       ' <small>' + esc(roleLabel(m.role)) + '</small></span>' +
       (isOwner() && m.role !== "owner" ?
         '<button type="button" class="button small danger" data-remove-member="' + esc(m.userId) + '">Remove</button>' : '') +
@@ -199,10 +251,15 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
       void api(groupUrl(selectedGroupId) + "/candidates").then((result) => {
         if (!d.isConnected) return;
         const users = Array.isArray(result.items) ? result.items : [];
+        for (const entry of result.members || []) {
+          const label = [...d.querySelectorAll("[data-member-display]")].find(node =>
+            node.dataset.memberDisplay === entry.userId);
+          if (label) label.textContent = entry.email || entry.name || "Account";
+        }
         userSelect.innerHTML = '<option value="">' +
           (users.length ? 'Choose a user...' : 'No available users') + '</option>' +
           users.map((user) => '<option value="' + esc(user.id) + '">' +
-            esc(user.name) + ' (' + esc(user.id) + ')</option>').join('');
+            esc(user.email || user.name || "Account") + '</option>').join('');
         userSelect.disabled = users.length === 0;
         submit.disabled = users.length === 0;
         if (result.hasMore) {
