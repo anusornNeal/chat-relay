@@ -893,7 +893,7 @@ function learnTreeScopedRows(items, scope) {
     return '<div class="learn-tree-project">' +
       '<button class="learn-tree-row learn-tree-child learn-tree-project-row' + (selected ? " selected" : "") + '" type="button" data-learn-tree-toggle="scoped" data-learn-tree-scope="' + esc(scope) + '" data-learn-tree-key="' + esc(scopeKey) + '" data-learn-tree-kind="all">' +
         '<span class="learn-tree-chevron' + (expanded ? " open" : "") + '"></span>' + icon(expanded ? "folderOpen" : "folder") +
-        '<span>' + esc(scopeKey) + '</span><em>' + esc(groupedItems.length) + '</em></button>' +
+        '<span title="' + esc(scopeKey) + '">' + esc(scopeKey) + '</span><em>' + esc(groupedItems.length) + '</em></button>' +
       (expanded ? '<div class="learn-tree-nested">' + learnTreeKindRows(items, scope, scopeKey) + '</div>' : "") +
     '</div>';
   }).join("");
