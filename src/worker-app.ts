@@ -54,6 +54,24 @@ function auditStub(env: Env) {
   return env.AUDIT.get(env.AUDIT.idFromName("global"));
 }
 
+function sharedGroupsStub(env: Env) {
+  return env.LEARNING.get(env.LEARNING.idFromName("shared-learn-groups:v1"));
+}
+async function readApprovedGroupMemories(env: Env, userId: string, projectKey: string) {
+  try {
+    const response = await sharedGroupsStub(env).fetch(new Request("https://learning.internal/groups/prepare", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ actorId: userId, projectKey }),
+    }));
+    if (!response.ok) return [];
+    const data = await response.json<{ items?: LearnRecord[] }>();
+    return Array.isArray(data.items) ? data.items.slice(0, 32) : [];
+  } catch {
+    // Shared service outages never erase or block a user's private Learn context.
+    return [];
+  }
+}
+
 function learningStub(env: Env, user: AuthUser) {
   return env.LEARNING.get(env.LEARNING.idFromName(user.id));
 }
@@ -147,6 +165,10 @@ async function prepareLearnContext(
     records.push(...agentRead.items);
   }
 
+  if (projectKey) {
+    const approvedShared = await readApprovedGroupMemories(env, user.id, projectKey);
+    records.push(...approvedShared);
+  }
   const deduped = [...new Map(records.map((record) => [record.id, record])).values()];
   const relevance = buildLearnRelevanceContext(
     args.toolHint || "learn_prepare",

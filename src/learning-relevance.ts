@@ -8,7 +8,7 @@ export type LearnScopeSelector = {
 
 export type LearnedContextItem = Pick<
   LearnRecord,
-  "id" | "key" | "kind" | "scope" | "scopeKey" | "content" | "confidence" | "updatedAt"
+  "id" | "key" | "kind" | "scope" | "scopeKey" | "content" | "confidence" | "updatedAt" | "origin" | "groupId" | "approvedBy"
 >;
 
 export type LearnedContextEnvelope = {
@@ -17,6 +17,7 @@ export type LearnedContextEnvelope = {
   instructionPolicy: "non-authoritative";
   activated: LearnScopeSelector[];
   items: LearnedContextItem[];
+  conflicts?: Array<{ key: string; kind: string; groupId: string; personalId: string }>;
 };
 
 const DEFAULT_TOP_K = 16;
@@ -141,6 +142,7 @@ export function buildLearnRelevanceContext(
 
 function recordScore(record: LearnRecord, ctx: LearnRelevanceContext) {
   let score = Math.max(0, Math.min(100, Number(record.confidence) || 0));
+  if (record.origin === "shared") score += 55;
   score += Math.min(24, Math.max(-24, (record.positiveFeedback || 0) * 5 - (record.negativeFeedback || 0) * 7));
 
   if (record.scope === "agent") {
@@ -260,6 +262,7 @@ export function buildRelevantLearnEnvelope(
       content,
       confidence: record.confidence,
       updatedAt: record.updatedAt,
+      ...(record.origin === "shared" ? { origin: "shared" as const, groupId: record.groupId, approvedBy: record.approvedBy } : {}),
     });
   }
 
@@ -270,6 +273,13 @@ export function buildRelevantLearnEnvelope(
         instructionPolicy: "non-authoritative",
         activated,
         items,
+        conflicts: items.filter(item => item.origin === "shared").flatMap(shared =>
+          records.filter(personal => !personal.origin && personal.kind === shared.kind &&
+            personal.key === shared.key && personal.content !== shared.content)
+            .slice(0, 1).map(personal => ({
+              key: shared.key, kind: shared.kind, groupId: shared.groupId || "", personalId: personal.id,
+            }))
+        ).slice(0, 8),
       }
     : null;
 }
