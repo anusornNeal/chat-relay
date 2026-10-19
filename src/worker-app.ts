@@ -17,6 +17,7 @@ import { canonicalLearnProjectKey } from "./project-identity";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
 import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT } from "./learning-policy";
 import { LearnPreflightGuard, attachLearnPrepareAdvisory } from "./learn-preflight-guard.mjs";
+import { LearnGateCache, preflightIdentity, preflightScope, preflightPreparationScopes, isPreflightExempt, preflightRequired } from "./learn-preflight-gate.mjs";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
 
@@ -304,12 +305,14 @@ function failureMetadata(call: { ok: boolean; errorSource?: string; errorCode?: 
 type ToolActivityContext = {
   toolCallId: string;
   activityId?: string;
+  reliableIdentity?: boolean;
   startedAt: string;
   executionCtx?: ExecutionContext;
 };
 
 const toolActivityContexts = new WeakMap<object, ToolActivityContext>();
 const learnPreflightGuard = new LearnPreflightGuard();
+const learnGateCache = new LearnGateCache();
 
 const recentLearnAgentByUser = new Map<string, string>();
 const RECENT_LEARN_AGENT_MAX = 512;
@@ -566,27 +569,20 @@ async function activityIdForSource(source: string | undefined): Promise<string |
 }
 
 async function activityContextForRequest(request: Request): Promise<ToolActivityContext> {
-  let conversationId: string | undefined;
+  let meta: Record<string, unknown> | undefined;
   if (request.method === "POST" && request.headers.get("content-type")?.includes("application/json")) {
     try {
       const body = await request.clone().json() as { method?: string; params?: { _meta?: Record<string, unknown> } };
-      const candidate = body.method === "tools/call" ? body.params?._meta?.["openai/session"] : undefined;
-      if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 512) conversationId = candidate;
-    } catch {
-      // Leave identity unset; the MCP handler validates JSON.
-    }
+      if (body.method === "tools/call") meta = body.params?._meta;
+    } catch {}
   }
-  const activitySource = conversationId ? "openai/session:" + conversationId : [
-    "mcp-session-id",
-    "x-openai-conversation-id",
-    "x-openai-chat-id",
-    "x-chatgpt-conversation-id",
-  ].map((name) => request.headers.get(name)?.trim()).find(Boolean);
-
+  const identity = preflightIdentity(meta, request.headers);
+  const activitySource = identity.source;
   const activityId = await activityIdForSource(activitySource);
   return {
     toolCallId: "tc_" + crypto.randomUUID().replace(/-/g, ""),
     ...(activityId ? { activityId } : {}),
+    reliableIdentity: identity.reliable,
     startedAt: new Date().toISOString(),
   };
 }
@@ -682,10 +678,42 @@ async function instrumentTool<T>(
     : undefined;
   let outcome: InstrumentToolOutcome<T> | undefined;
   try {
+    if (activityId && activity?.reliableIdentity && !isPreflightExempt(tool)) {
+      const scope = preflightScope(args);
+      const cached = learnGateCache.get(user.id, activityId, scope);
+      if (!cached?.prepared && !cached?.bypass) {
+        let prepared = false;
+        try {
+          const response = await learningCall(env, user, "/preflight-check", { activityId, scope });
+          if (response.ok) prepared = Boolean(JSON.parse(response.body).prepared);
+          else learnGateCache.bypass(user.id, activityId, scope);
+        } catch {
+          // Fail open on storage outages, not on regular unprepared state.
+          learnGateCache.bypass(user.id, activityId, scope);
+        }
+        if (prepared) learnGateCache.markPrepared(user.id, activityId, [scope]);
+        else if (!learnGateCache.get(user.id, activityId, scope)?.bypass
+          && learnGateCache.blockedOrFallback(user.id, activityId, scope)) {
+          return toolResult({ ok: false, body: JSON.stringify(preflightRequired(tool, scope)) }) as T;
+        }
+      }
+    }
     outcome = await run();
 
     if (tool === "learn_prepare" && outcome.ok && activityId) {
       learnPreflightGuard.markPrepared(user.id, activityId);
+      const prepared = outcome.value as any;
+      let projectKey: string | null = null;
+      try {
+        const body = JSON.parse(prepared.content?.find((item: any) => item.type === "text")?.text || "{}");
+        projectKey = body.routingContext?.projectKey || null;
+      } catch {}
+      const scopes = preflightPreparationScopes(args, projectKey);
+      learnGateCache.markPrepared(user.id, activityId, scopes);
+      if (activity?.reliableIdentity) {
+        // A single durable write on preparation. No write on ordinary tool calls.
+        try { await learningCall(env, user, "/preflight-mark", { activityId, scopes }); } catch {}
+      }
     }
 
     if (outcome.agentId && (outcome.ok || outcome.errorSource === "agent")) {

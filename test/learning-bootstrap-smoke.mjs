@@ -165,7 +165,9 @@ const agentRecords = [
   assert.doesNotMatch(worker, /prepareAgentLearnContext/, "agent calls must not auto-read Learn");
   assert.doesNotMatch(worker, /attachLearnedContext/, "ordinary tool results must not receive implicit Learn payloads");
   assert.doesNotMatch(worker, /learnSessionId/, "MCP hot path must not hash a separate Learn session id");
-  assert.doesNotMatch(instrumentBlock, /learningCall|prepareLearnContext|buildLearnRelevanceContext/, "instrumentTool must remain free of Learn reads/ranking");
+  assert.doesNotMatch(instrumentBlock, /prepareLearnContext|buildLearnRelevanceContext/, "ordinary tools must not rank or inject Learn memories");
+  assert.match(instrumentBlock, /"\/preflight-check"/, "cold gate must verify persistent state");
+  assert.match(instrumentBlock, /"\/preflight-mark"/, "successful prepare must persist a checkpoint");
   assert.match(instrumentBlock, /learnPreflightGuard\.markPrepared\(user\.id, activityId\)/, "successful learn_prepare must mark the activity prepared");
   assert.match(instrumentBlock, /learnPreflightGuard\.claimReminder\(user\.id, activityId\)/, "ordinary tools must use the one-time reminder claim");
   assert.match(instrumentBlock, /!LEARN_ACTIVITY_TOOLS\.has/, "Learn tools must not recursively trigger the reminder");

@@ -335,12 +335,39 @@ export class Learning extends DurableObject {
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_kind ON ${TABLE}(kind, updated_at)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_identity ON ${TABLE}(kind, scope, scope_key, memory_key)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_retrieval ON ${TABLE}(scope, scope_key, kind, confidence DESC, positive_feedback DESC, negative_feedback ASC, updated_at DESC)`);
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS learning_preflight_v1 (activity_id TEXT NOT NULL, scope TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (activity_id,scope)) WITHOUT ROWID");
     this.migrateProjectKeys();
 
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/preflight-check" && request.method === "POST") {
+      const input = await request.json<any>().catch(() => null);
+      const activityId = String(input?.activityId || "");
+      const scope = String(input?.scope || "");
+      if (!/^act_[a-f0-9]{20}$/.test(activityId) || !/^(global|project:[^\s]{1,200})$/.test(scope)) return Response.json({ error: "invalid_preflight" }, { status: 400 });
+      const row = this.ctx.storage.sql.exec<{ expires_at: number }>(
+        "SELECT expires_at FROM learning_preflight_v1 WHERE activity_id=? AND scope=?", activityId, scope
+      ).toArray()[0];
+      return Response.json({ prepared: Boolean(row && row.expires_at > Date.now()) });
+    }
+    if (url.pathname === "/preflight-mark" && request.method === "POST") {
+      const input = await request.json<any>().catch(() => null);
+      const activityId = String(input?.activityId || "");
+      const scopes: unknown[] = Array.isArray(input?.scopes) ? input.scopes : [];
+      if (!/^act_[a-f0-9]{20}$/.test(activityId) || !scopes.length || scopes.length > 4 ||
+          scopes.some((scope) => typeof scope !== "string" || !/^(global|project:[^\s]{1,200})$/.test(scope))) {
+        return Response.json({ error: "invalid_preflight" }, { status: 400 });
+      }
+      const expiresAt = Date.now() + 4 * 60 * 60 * 1000;
+      this.ctx.storage.sql.exec("DELETE FROM learning_preflight_v1 WHERE (activity_id, scope) IN (SELECT activity_id, scope FROM learning_preflight_v1 WHERE expires_at <= ? LIMIT 32)", Date.now());
+      for (const scope of scopes) this.ctx.storage.sql.exec(
+        "INSERT INTO learning_preflight_v1 (activity_id, scope, expires_at) VALUES (?,?,?) ON CONFLICT(activity_id,scope) DO UPDATE SET expires_at=excluded.expires_at",
+        activityId, scope, expiresAt
+      );
+      return Response.json({ ok: true });
+    }
     if (url.pathname === "/get" && request.method === "POST") return this.get(request);
     if (url.pathname === "/profile" && request.method === "POST") return this.profile(request);
     if (url.pathname === "/put" && request.method === "POST") return this.put(request);
