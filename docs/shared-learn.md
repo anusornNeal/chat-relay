@@ -11,6 +11,12 @@ Shared Learn lets multiple Chat Relay accounts collaborate on **approved project
 5. Owner/Editor reviews under **Shared Learn → Pending** and selects Approve or Reject. If a different approved rule has the same kind/key, a separate replacement confirmation is required. Only approved memories are read by other members.
 6. An authenticated member calling `learn_prepare` for the matching project (or its explicit alias) receives bounded, approved group rules alongside their personal context. Group rules have project precedence within advisory Learn, not permission to override the user's current request, auth, grants or safety.
 
+## Add Learn directly
+
+In a Shared Learn group, Owner, Editor, and Member can select **Add Learn** (also shown when the Approved list is empty). Enter a unique key, select a type, and write Markdown content (up to 4,000 characters). The new entry goes to **Pending** for review and does **not** require a personal memory first. Viewer cannot add new entries.
+
+Only an approved proposal is used as shared project context. To reuse a personal rule instead, keep using **My Learn > Share to group**. Both paths preserve the same review gate and group permissions.
+
 ## Roles
 
 | Role | Read approved | Propose | Review others | Manage membership/aliases |
@@ -33,6 +39,8 @@ Non-members receive a 404 even when they know a group ID. Revoked members cannot
 - `POST /admin/api/learn/groups/:id/aliases/remove` — Owner removes `{ alias }`.
 - `POST /admin/api/learn/groups/:id/proposals` — current account proposes its own `{ memoryId }` project memory.
 - `POST /admin/api/learn/groups/:id/review` — Owner/Editor reviews `{ proposalId, decision: "approve"|"reject", replace?: boolean }`.
+
+- `POST /admin/api/learn/groups/:id/learn` - Owner/Editor/Member submits `{ key, kind, content }` as a new Pending group proposal; does not create personal memory or approve it.
 
 ## Resource boundaries
 

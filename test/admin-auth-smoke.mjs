@@ -71,6 +71,33 @@ const groupCreation = await browser("/admin/api/learn/groups", {
   origin: base, body: { name: "Picker " + suffix, projectKey: "picker-" + suffix },
 });
 if (groupCreation.response.status !== 201) throw new Error("non-admin could not create Learn group: " + groupCreation.text);
+const directLearnPath = "/admin/api/learn/groups/" + groupCreation.data.group.id + "/learn";
+const missingLearnCsrf = await browser(directLearnPath, {
+  method: "POST", cookie: nonAdminCookie,
+  body: { key: "direct-rule", kind: "workflow", content: "## Working rule" },
+});
+if (missingLearnCsrf.response.status !== 403) throw new Error("Add Learn accepted missing CSRF");
+const directLearn = await browser(directLearnPath, {
+  method: "POST", cookie: nonAdminCookie, csrf: nonAdminLogin.data.csrfToken, origin: base,
+  body: { key: "direct-rule", kind: "workflow", content: "## Working rule" },
+});
+if (directLearn.response.status !== 201 || directLearn.data.status !== "pending") {
+  throw new Error("Direct Add Learn failed: " + directLearn.text);
+}
+const directPending = await browser("/admin/api/learn/groups/" + groupCreation.data.group.id, { cookie: nonAdminCookie });
+if (!directPending.response.ok || directPending.data.memories.length ||
+    !directPending.data.proposals.some((item) => item.id === directLearn.data.proposalId && item.status === "pending")) {
+  throw new Error("Direct Learn was not held for approval: " + directPending.text);
+}
+const directApproval = await browser("/admin/api/learn/groups/" + groupCreation.data.group.id + "/review", {
+  method: "POST", cookie: nonAdminCookie, csrf: nonAdminLogin.data.csrfToken, origin: base,
+  body: { proposalId: directLearn.data.proposalId, decision: "approve" },
+});
+if (!directApproval.response.ok) throw new Error("Direct Learn approval failed: " + directApproval.text);
+const directApproved = await browser("/admin/api/learn/groups/" + groupCreation.data.group.id, { cookie: nonAdminCookie });
+if (!directApproved.response.ok || !directApproved.data.memories.some((item) => item.key === "direct-rule")) {
+  throw new Error("Approved direct Learn missing from group memory: " + directApproved.text);
+}
 const pickerPath = "/admin/api/learn/groups/" + groupCreation.data.group.id + "/candidates";
 const invitees = await browser(pickerPath, { cookie: nonAdminCookie });
 if (!invitees.response.ok || !invitees.data.items.some((item) => item.id === "owner" && item.name) ||

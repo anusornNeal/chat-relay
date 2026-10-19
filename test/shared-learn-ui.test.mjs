@@ -55,6 +55,30 @@ assert.doesNotMatch(markup, /data-shared-review=/, "Viewer must not see review a
 await ui.shareMemory({ scope: "global", key: "private" });
 assert.match(notice, /Only project memories/);
 
+assert.doesNotMatch(markup, /id="sharedAddLearn"/, "Viewers cannot propose shared Learn");
+const ownerUI = createSharedLearnUI({
+  api: async (path) => path === "/admin/api/learn/groups"
+    ? { items: [{ ...group, role: "owner" }] }
+    : { group: { ...group, role: "owner" }, members: [], memories: [], proposals: [] },
+  renderContent(value) { markup = value; },
+  setHeader() {}, setNotice() {}, escape: escapeHtml, showPersonal() {},
+  getSidebar: () => "<aside></aside>", bindSidebar() {}, onSharedMode() {}, getSearch: () => "",
+});
+await ownerUI.show(group.id);
+assert.match(markup, /id="sharedAddLearn"/, "Owner sees the primary Add Learn action");
+assert.match(markup, /id="sharedEmptyAddLearn"/, "Empty group has Add Learn entry point");
+const memberUI = createSharedLearnUI({
+  api: async (path) => path === "/admin/api/learn/groups"
+    ? { items: [{ ...group, role: "member" }] }
+    : { group: { ...group, role: "member" }, members: [], memories: [], proposals: [] },
+  renderContent(value) { markup = value; },
+  setHeader() {}, setNotice() {}, escape: escapeHtml, showPersonal() {},
+  getSidebar: () => "<aside></aside>", bindSidebar() {}, onSharedMode() {}, getSearch: () => "",
+});
+await memberUI.show(group.id);
+assert.match(markup, /id="sharedAddLearn"/, "Member can propose group Learn");
+assert.doesNotMatch(markup, /data-shared-review=/, "Member cannot approve group Learn");
+
 const empty = createSharedLearnUI({
   api: async () => ({ items: [] }),
   renderContent(value) { markup = value; },

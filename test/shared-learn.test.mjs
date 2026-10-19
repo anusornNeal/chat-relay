@@ -25,11 +25,27 @@ assert.equal((await call("invite",owner,{groupId,userId:viewer,role:"viewer"})).
 assert.equal((await call("invite",member,{groupId,userId:"x",role:"editor"})).status,403);
 const memory=(content,key="android-convention")=>({id:"mem_"+("a".repeat(64)),scope:"project",scopeKey:"buddy2",kind:"correction",key,content,confidence:93});
 assert.equal((await call("propose",viewer,{groupId,memory:memory("no")})).status,403);
+// Add Learn from Shared Learn creates a pending proposal without a personal record.
+assert.equal((await call("propose-direct",outsider,{groupId,key:"new-convention",kind:"workflow",content:"Rule"})).status,404);
+assert.equal((await call("propose-direct",viewer,{groupId,key:"new-convention",kind:"workflow",content:"Rule"})).status,403);
+assert.equal((await call("propose-direct",member,{groupId,key:"new-convention",kind:"invalid",content:"Rule"})).status,400);
+assert.equal((await call("propose-direct",member,{groupId,key:"new-convention",kind:"workflow",content:"  "})).status,400);
+assert.equal((await call("propose-direct",member,{groupId,key:"new-convention",kind:"workflow",content:"x".repeat(4001)})).status,400);
+const direct=await call("propose-direct",member,{groupId,key:"new-convention",kind:"workflow",content:"## Rule\n- Use project design system"});
+assert.equal(direct.status,201);
+assert.equal((await call("propose-direct",owner,{groupId,key:"new-convention",kind:"workflow",content:"Duplicate"})).status,409);
+assert.equal((await call("prepare",owner,{projectKey:"buddy2"})).items.every(item=>item.key!=="android-convention"),true);
+const waiting=await call("detail",owner,{groupId});
+assert.equal(waiting.proposals.find(p=>p.id===direct.proposalId).status,"pending");
+assert.equal((await call("review",member,{groupId,proposalId:direct.proposalId,decision:"approve"})).status,403);
+assert.equal((await call("review",owner,{groupId,proposalId:direct.proposalId,decision:"approve"})).status,200);
+assert.equal((await call("prepare",member,{projectKey:"buddy2"})).items.some(m=>m.key==="new-convention"),true);
+
 assert.equal((await call("propose",member,{groupId,memory:{...memory("bad"),scope:"global"}})).status,400);
 const proposal=await call("propose",member,{groupId,memory:memory("keep #comment empty")});
 assert.equal(proposal.status,201);
 assert.equal((await call("propose",member,{groupId,memory:memory("keep #comment empty")})).status,409);
-assert.equal((await call("prepare",owner,{projectKey:"buddy2"})).items.length,0);
+assert.equal((await call("prepare",owner,{projectKey:"buddy2"})).items.every(item=>item.key!=="android-convention"),true);
 assert.equal((await call("review",member,{groupId,proposalId:proposal.proposalId,decision:"approve"})).status,403);
 assert.equal((await call("review",owner,{groupId,proposalId:proposal.proposalId,decision:"approve"})).status,200);
 assert.equal((await call("review",owner,{groupId,proposalId:proposal.proposalId,decision:"approve"})).status,409);

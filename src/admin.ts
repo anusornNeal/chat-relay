@@ -567,6 +567,12 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     else if (pieces[1] === "members" && pieces.length === 3 && request.method === "DELETE") {
       action = "remove"; args.userId = pieces[2];
     }
+    else if (pieces[1] === "learn" && pieces.length === 2 && request.method === "POST") {
+      action = "propose-direct";
+      args.key = body?.key;
+      args.kind = body?.kind;
+      args.content = body?.content;
+    }
     else if (pieces[1] === "proposals" && pieces.length === 2 && request.method === "POST") {
       action = "propose";
       const memory = await learningCall(env, selfUserId, "/read-one", { id: body?.memoryId });

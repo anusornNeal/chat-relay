@@ -149,6 +149,29 @@ export class SharedLearnGroups {
       this.sql.exec("DELETE FROM learn_group_members_v1 WHERE group_id=? AND user_id=?",groupId,userId);
       return out({ok:true});
     }
+    if(path==="/groups/propose-direct"){
+      if(role==="viewer")return out({error:"forbidden"},403);
+      // New group knowledge is a proposal only. The author never writes the
+      // approved table, and no personal Learn record is created.
+      const key=txt(input?.key,160),kind=txt(input?.kind,40);
+      const content=txt(input?.content,4000);
+      if(!key||key.length>160||!kinds.has(kind)||!content||content.length>4000)
+        return out({error:"invalid_memory"},400);
+      const pending=this.sql.exec<Proposal>(
+        "SELECT * FROM learn_group_proposals_v1 WHERE group_id=? AND kind=? AND memory_key=? AND status='pending' LIMIT 1",
+        groupId,kind,key,
+      ).toArray()[0];
+      if(pending)return out({error:"already_pending"},409);
+      const count=this.sql.exec<{n:number}>(
+        "SELECT COUNT(*) AS n FROM learn_group_proposals_v1 WHERE group_id=? AND status='pending'",groupId,
+      ).toArray()[0]?.n||0;
+      if(count>=100)return out({error:"proposal_limit"},409);
+      const proposalId=makeId("prp_");
+      this.sql.exec(`INSERT INTO learn_group_proposals_v1(id,group_id,source_memory_id,source_user_id,memory_key,kind,content,
+        confidence,status,reviewed_by,created_at,reviewed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        proposalId,groupId,makeId("direct_"),actorId,key,kind,content,100,"pending",null,stamp(),null);
+      return out({ok:true,proposalId,status:"pending"},201);
+    }
     if(path==="/groups/propose"){
       if(role==="viewer")return out({error:"forbidden"},403);
       const m=input?.memory as LearnRecord|undefined;

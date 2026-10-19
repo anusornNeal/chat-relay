@@ -7,6 +7,7 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
   const write = (url, body, method="POST") => api(url, {method,body:JSON.stringify(body)});
   const roleLabel = (role) => ({owner:"Owner",editor:"Editor",member:"Member",viewer:"Viewer"})[role] || role;
   const canReview = () => ["owner","editor"].includes(detail?.group?.role);
+  const canPropose = () => ["owner","editor","member"].includes(detail?.group?.role);
   const isOwner = () => detail?.group?.role === "owner";
 
   async function listGroups() {
@@ -40,8 +41,10 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
       '<span class="learn-folder-confidence">' + esc(m.status || m.revision || '') + '</span></button>').join('')
       : '<div class="learn-detail-empty"><strong>' + (tab === "pending" ? "No proposals waiting" : tab === "history" ?
         "No review history" : "No approved memories") + '</strong><span>' +
-        (tab === "approved" ? "Share a project memory from My Learn, then approve it here." : "Nothing to review.") +
-        '</span></div>';
+        (tab === "approved" ? "Use Add Learn to propose a rule, or share one from My Learn." : "Nothing to review.") +
+        '</span>' +
+        (tab === "approved" && canPropose() ? '<button class="button small" id="sharedEmptyAddLearn">Add Learn</button>' : '') +
+        '</div>';
     const info = selected ? '<div class="learn-detail-scroll"><div class="learn-detail-top"><span class="learn-type-pill">' +
       esc(selected.kind) + '</span><span class="learn-shared-muted">' + esc(selected.status || "Approved") + '</span></div>' +
       '<h3>' + esc(selected.key) + '</h3><div class="learn-detail-rule"></div>' +
@@ -66,6 +69,7 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
       '<h2>' + esc(group?.name || "Shared Learn") + '</h2><p>' + esc(group?.projectKey || "Choose a group to begin") +
       (group ? " · " + esc(roleLabel(group.role)) : "") + '</p></div>' +
       '<div class="learn-folder-heading-actions">' +
+      (group && canPropose() ? '<button class="button small primary" type="button" id="sharedAddLearn">+ Add Learn</button>' : '') +
       (group ? '<button class="button small" id="sharedMembers">Members (' + (detail?.members?.length || 0) + ')</button>' +
         '<button class="button small" id="sharedAliases">Project aliases</button>' : '') +
       '</div></div>' +
@@ -78,6 +82,8 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
     bindSidebar();
     document.getElementById("sharedMembers")?.addEventListener("click", manageMembers);
     document.getElementById("sharedAliases")?.addEventListener("click", manageAliases);
+    document.getElementById("sharedAddLearn")?.addEventListener("click", addLearn);
+    document.getElementById("sharedEmptyAddLearn")?.addEventListener("click", addLearn);
     document.querySelectorAll("[data-shared-tab]").forEach(el => el.onclick = () => {tab=el.dataset.sharedTab;selectedItemId=null;render();});
     document.querySelectorAll("[data-shared-memory]").forEach(el => el.onclick = () => {selectedItemId=el.dataset.sharedMemory;render();});
     document.querySelectorAll("[data-shared-review]").forEach(el => el.onclick = async () => {
@@ -140,6 +146,28 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
         selectedGroupId=result.group.id;tab="approved";selectedItemId=null;
         await show();setNotice("Shared group created.");
       });
+  }
+  function addLearn() {
+    if (!selectedGroupId || !canPropose()) return;
+    dialog("Add Learn · " + detail.group.name,
+      '<p class="learn-shared-muted">New knowledge is submitted for review and will not be shared until approved.</p>' +
+      '<label>Key<input name="key" required maxlength="160" placeholder="android-commit-conventions"></label>' +
+      '<label>Type<select name="kind" required>' +
+      '<option value="workflow">Workflow</option><option value="correction">Correction</option>' +
+      '<option value="coding_style">Coding style</option><option value="project_context">Project context</option>' +
+      '<option value="preference">Preference</option><option value="tool_pattern">Tool pattern</option>' +
+      '</select></label>' +
+      '<label>Memory (Markdown)<textarea name="content" required maxlength="4000" rows="8" ' +
+      'placeholder="## Rule\n- Describe the convention and when to apply it"></textarea></label>',
+      async values => {
+        const result = await write(groupUrl(selectedGroupId) + "/learn", values);
+        tab = "pending";
+        selectedItemId = result.proposalId;
+        await show();
+        setNotice("Learn submitted for review. Group members will see it after approval.");
+      });
+    const submit = document.querySelector("dialog.learn-shared-dialog:last-of-type [data-submit]");
+    if (submit) submit.textContent = "Submit for review";
   }
   function manageMembers() {
     if (!detail) return;
