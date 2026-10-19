@@ -1,0 +1,40 @@
+
+/* Shared Learn uses the same monitoring-first shell and 50/50 list/detail split. */
+.learn-shared-shell .learn-folder-tree{display:flex;flex-direction:column;gap:10px}
+.learn-shared-group-list{display:flex;flex-direction:column;gap:3px;min-height:0;overflow:auto}
+.learn-shared-group{appearance:none;border:1px solid transparent;border-radius:8px;background:transparent;padding:10px 9px;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:4px;color:#354457}
+.learn-shared-group:hover{background:#f4f7fa}
+.learn-shared-group.selected{background:#edf3fa;border-color:#d5e1ef}
+.learn-shared-group strong{font-size:12px;overflow-wrap:anywhere}
+.learn-shared-group small{font-size:10px;color:#82909f}
+.learn-shared-create{margin-top:auto;width:100%}
+.learn-shared-muted{font-size:11px;color:#82909f;line-height:1.5;overflow-wrap:anywhere}
+.learn-shared-toolbar{justify-content:flex-start;gap:6px}
+.learn-shared-tab{border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 11px;color:#738092;cursor:pointer;font-size:11px}
+.learn-shared-tab.active{background:#eaf1f8;color:#294962;border-color:#cedded;font-weight:650}
+.learn-shared-tab:focus-visible,.learn-shared-group:focus-visible{outline:2px solid #497fae;outline-offset:2px}
+.learn-shared-shell .learn-folder-row{grid-template-columns:27px minmax(0,1fr) 105px}
+.learn-shared-shell .learn-folder-row .learn-folder-confidence{font-size:10px;text-transform:capitalize}
+.learn-shared-list-head{grid-template-columns:minmax(0,1fr) 145px}
+.learn-shared-review-actions{display:flex;gap:8px;align-items:center}
+.learn-shared-meta{font-size:11px;line-height:1.6;color:#657280;margin:5px 0;overflow-wrap:anywhere}
+.learn-shared-error{max-width:560px;padding:24px;display:flex;flex-direction:column;align-items:flex-start;gap:8px}
+.learn-shared-dialog{border:1px solid #e0e4e9;border-radius:12px;box-shadow:0 20px 60px #18232f30;background:#fff;color:#283443;width:min(470px,calc(100vw - 28px));max-height:85vh;overflow:auto;padding:0}
+.learn-shared-dialog::backdrop{background:#121a27a0}
+.learn-shared-form{display:flex;flex-direction:column;gap:14px;padding:23px}
+.learn-shared-form h3{margin:0 0 4px;font-size:18px}
+.learn-shared-form>label{display:flex;flex-direction:column;gap:7px;font-size:11px;font-weight:600}
+.learn-shared-form input,.learn-shared-form select{border:1px solid #d8e0e8;border-radius:7px;padding:10px;background:#fff;color:#263546;font:inherit;min-width:0;width:100%}
+.learn-shared-form label strong{font-size:12px;overflow-wrap:anywhere}
+.learn-shared-dialog-actions{display:flex;gap:7px;justify-content:flex-end}
+.learn-shared-dialog-error{color:#ab3636;font-size:12px}
+.learn-shared-members{display:flex;flex-direction:column;gap:7px;max-height:250px;overflow:auto}
+.learn-shared-member{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #e9edf1;font-size:11px;overflow-wrap:anywhere}
+.learn-shared-member small{color:#82909f}
+.learn-shared-shell .learn-detail-pane{overflow:hidden}
+.learn-shared-shell .learn-folder-workspace{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:900px){
+  .learn-shared-shell .learn-folder-workspace{grid-template-columns:1fr}
+  .learn-shared-shell .learn-folder-tree{max-height:260px}
+  .learn-shared-shell .learn-folder-heading-actions{justify-content:flex-start}
+}

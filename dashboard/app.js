@@ -1,4 +1,5 @@
 import { renderLearnMarkdown } from "./learn-markdown.js";
+import { createSharedLearnUI } from "./shared-learn.js";
 
 let csrf = sessionStorage.getItem("chat_relay_csrf") || "";
 let currentUser = null;
@@ -734,6 +735,11 @@ async function loadUsage({ patch = false } = {}) {
 }
 
 
+let sharedLearnActive = false;
+const sharedLearnUI = createSharedLearnUI({
+  api, renderContent, setHeader, setNotice, escape: esc,
+  showPersonal: () => { sharedLearnActive = false; void loadLearn(); },
+});
 let learnProfileSnapshot = null;
 let learnKindFilter = "all";
 let learnScopeFilter = "all";
@@ -1018,7 +1024,7 @@ function renderLearnProfile({ patch = false } = {}) {
         '<label class="learn-detail-radio useful' + (positiveChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="positive" data-learn-feedback="positive" data-memory-id="' + esc(selected.id) + '"' + positiveChecked + '>' + icon("thumbUp") + '<span>Useful</span></label>' +
         '<label class="learn-detail-radio not-useful' + (negativeChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="negative" data-learn-feedback="negative" data-memory-id="' + esc(selected.id) + '"' + negativeChecked + '>' + icon("thumbDown") + '<span>Not useful</span></label>' +
       '</div></div></div>' +
-      '<div class="learn-detail-footer"><button class="button danger learn-detail-remove" type="button" data-learn-delete="' + esc(selected.id) + '">' + icon("trash") + 'Remove memory</button></div>';
+      '<div class="learn-detail-footer">' + (selected.scope === "project" ? '<button class="button small" id="sharePersonalMemory">Share to group</button>' : '') + '<button class="button danger learn-detail-remove" type="button" data-learn-delete="' + esc(selected.id) + '">' + icon("trash") + 'Remove memory</button></div>';
   }
 
   const scopeTitle = learnScopeFilter === "all"
@@ -1038,7 +1044,7 @@ function renderLearnProfile({ patch = false } = {}) {
       '</aside>' +
       '<div class="learn-folder-main">' +
         '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div>' +
-          '<div class="learn-folder-heading-actions"><button id="learnMergeProjects" class="button small" type="button">Merge projects</button><span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
+          '<div class="learn-folder-heading-actions"><button id="openSharedLearn" class="button small" type="button">Shared Learn</button><button id="learnMergeProjects" class="button small" type="button">Merge projects</button><span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
         '<div class="learn-folder-list-toolbar"><div class="learn-folder-sort">' +
           '<button class="' + (learnSortMode === "name" ? "active" : "") + '" type="button" data-learn-sort="name">Name</button>' +
           '<button class="' + (learnSortMode === "updated" ? "active" : "") + '" type="button" data-learn-sort="updated">Updated</button>' +
@@ -1055,6 +1061,14 @@ function renderLearnProfile({ patch = false } = {}) {
 
   const mergeButton = $("learnMergeProjects");
   if (mergeButton) mergeButton.onclick = openLearnProjectMerge;
+  const openSharedButton = $("openSharedLearn");
+  if (openSharedButton) openSharedButton.onclick = () => {
+    sharedLearnActive = true;
+    void sharedLearnUI.show();
+  };
+  const shareButton = $("sharePersonalMemory");
+  if (shareButton && selected) shareButton.onclick = () => { void sharedLearnUI.shareMemory(selected); };
+
   const exportButton = $("learnExport");
   if (exportButton) exportButton.onclick = exportLearnProfile;
 
@@ -1125,6 +1139,7 @@ function renderLearnProfile({ patch = false } = {}) {
 
 
 async function loadLearn({ patch = false } = {}) {
+  if (sharedLearnActive) return sharedLearnUI.show();
   setHeader("My Learn", "Your adaptive preferences and reusable working patterns");
   const data = await api("/admin/api/learn?limit=100");
   learnProfileSnapshot = {
