@@ -87,7 +87,7 @@ async function readLearnPrepareScopes(
   env: Env,
   user: AuthUser,
   scopes: LearnScopeSelector[],
-): Promise<{ ok: true; items: LearnRecord[] } | { ok: false; statusCode: number }> {
+): Promise<{ ok: true; items: LearnRecord[]; projectKey?: string } | { ok: false; statusCode: number }> {
   const call = await learningCall(env, user, "/get", {
     scopes,
     limit: 64,
@@ -96,8 +96,8 @@ async function readLearnPrepareScopes(
   });
   if (!call.ok) return { ok: false, statusCode: call.statusCode };
   try {
-    const data = JSON.parse(call.body) as { items?: LearnRecord[] };
-    return { ok: true, items: Array.isArray(data.items) ? data.items.slice(0, 100) : [] };
+    const data = JSON.parse(call.body) as { items?: LearnRecord[]; resolvedProjectKey?: string };
+    return { ok: true, items: Array.isArray(data.items) ? data.items.slice(0, 100) : [], projectKey: data.resolvedProjectKey };
   } catch {
     return { ok: false, statusCode: 502 };
   }
@@ -118,15 +118,19 @@ async function prepareLearnContext(
   const activeScopes: LearnScopeSelector[] = [globalScope];
   let route = routingContext(args, records);
   const explicitProjectKey = normalizeLearnPrepareProjectKey(args.projectKey);
-  const projectKey = explicitProjectKey ?? canonicalLearnProjectKey(route.projectKey);
-
-  if (projectKey) {
-    const projectScope: LearnScopeSelector = { scope: "project", scopeKey: projectKey };
-    const projectRead = await readLearnPrepareScopes(env, user, [projectScope]);
+  const requestedProjectKey = explicitProjectKey ?? canonicalLearnProjectKey(route.projectKey);
+  let projectKey = requestedProjectKey;
+  if (requestedProjectKey) {
+    // The existing project read resolves aliases and returns the canonical key:
+    // no extra Learning DO subrequest during learn_prepare.
+    const projectRead = await readLearnPrepareScopes(env, user, [
+      { scope: "project", scopeKey: requestedProjectKey },
+    ]);
     if (!projectRead.ok) {
       return { ok: false, statusCode: projectRead.statusCode, body: JSON.stringify({ error: "learning_unavailable" }) };
     }
-    activeScopes.push(projectScope);
+    projectKey = projectRead.projectKey ?? requestedProjectKey;
+    activeScopes.push({ scope: "project", scopeKey: projectKey });
     records.push(...projectRead.items);
   }
 
@@ -171,7 +175,7 @@ async function prepareLearnContext(
       preparedContext,
       routingContext: {
         projectKey,
-        projectSource: projectKey ? (explicitProjectKey ? "explicit" : "project-root") : null,
+        projectSource: projectKey ? (requestedProjectKey !== projectKey ? "alias" : explicitProjectKey ? "explicit" : "project-root") : null,
         agentId,
         agentSource: agentId ? (explicitAgentId ? "explicit" : preferredAgent?.source ?? "preferred") : null,
       },

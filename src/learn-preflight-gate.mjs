@@ -46,6 +46,7 @@ export function preflightScope(args) {
 export function preflightPreparationScopes(args, resolvedProjectKey) {
   const scopes = new Set([PREFLIGHT_SCOPE_GLOBAL]);
   if (resolvedProjectKey) scopes.add(preflightScope({ projectKey: resolvedProjectKey }));
+  if (args?.projectKey) scopes.add(preflightScope({ projectKey: args.projectKey }));
   const workspace = preflightScope({ cwd: args?.cwd, path: args?.path });
   if (workspace !== PREFLIGHT_SCOPE_GLOBAL) scopes.add(workspace);
   return [...scopes];

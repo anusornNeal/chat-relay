@@ -897,6 +897,59 @@ function learnTreeScopedRows(items, scope) {
   }).join("");
 }
 
+function openLearnProjectMerge() {
+  const items = learnProfileSnapshot?.items || [];
+  const aliases = learnProfileSnapshot?.aliases || [];
+  const projects = [...new Set(items.filter((item) => item.scope === "project").map((item) => item.scopeKey))].sort();
+  const dialog = document.createElement("dialog");
+  dialog.className = "learn-project-merge-dialog";
+  dialog.innerHTML =
+    '<form method="dialog" class="learn-project-merge-form">' +
+      '<h3>Merge projects</h3>' +
+      '<p>Link two workspace names to one project. Memories and feedback are retained. Future Learn reads and writes use the destination project.</p>' +
+      '<label>Project to merge (alias)<input name="from" list="mergeProjectList" required maxlength="200" placeholder="e.g. buddy-android"></label>' +
+      '<label>Keep project (canonical)<input name="to" list="mergeProjectList" required maxlength="200" placeholder="e.g. buddy2"></label>' +
+      '<datalist id="mergeProjectList">' + projects.map((key) => '<option value="' + esc(key) + '"></option>').join("") + '</datalist>' +
+      (aliases.length ? '<div class="learn-project-aliases">Existing aliases: ' +
+        aliases.map((item) => esc(item.alias) + ' → ' + esc(item.projectKey)).join(", ") + '</div>' : "") +
+      '<p class="learn-project-merge-error" role="alert" hidden></p>' +
+      '<div class="learn-project-merge-buttons"><button class="button small" value="cancel" type="button" data-cancel>Cancel</button>' +
+      '<button class="button small primary" type="submit" value="merge">Merge projects</button></div>' +
+    '</form>';
+  const form = dialog.querySelector("form");
+  dialog.querySelector("[data-cancel]").onclick = () => dialog.close();
+  dialog.addEventListener("close", () => dialog.remove());
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const from = form.elements.from.value.trim();
+    const to = form.elements.to.value.trim();
+    const error = dialog.querySelector(".learn-project-merge-error");
+    if (!from || !to || from === to) {
+      error.textContent = "Choose two different project names.";
+      error.hidden = false;
+      return;
+    }
+    if (!confirm("Merge '" + from + "' into '" + to + "'? This also saves a permanent alias for future Learn requests.")) return;
+    const submit = form.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    try {
+      await api("/admin/api/learn/projects/merge", { method: "POST", body: JSON.stringify({ from, to }) });
+      dialog.close();
+      learnScopeFilter = "project";
+      learnScopeKeyFilter = to;
+      learnSelectedMemoryId = null;
+      await loadLearn();
+    } catch (cause) {
+      error.textContent = cause?.message || "Unable to merge projects.";
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+    }
+  };
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
 function renderLearnProfile({ patch = false } = {}) {
   const data = learnProfileSnapshot || {};
   const items = Array.isArray(data.items) ? data.items : [];
@@ -983,7 +1036,7 @@ function renderLearnProfile({ patch = false } = {}) {
       '</aside>' +
       '<div class="learn-folder-main">' +
         '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div>' +
-          '<div class="learn-folder-heading-actions"><span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
+          '<div class="learn-folder-heading-actions"><button id="learnMergeProjects" class="button small" type="button">Merge projects</button><span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
         '<div class="learn-folder-list-toolbar"><div class="learn-folder-sort">' +
           '<button class="' + (learnSortMode === "name" ? "active" : "") + '" type="button" data-learn-sort="name">Name</button>' +
           '<button class="' + (learnSortMode === "updated" ? "active" : "") + '" type="button" data-learn-sort="updated">Updated</button>' +
@@ -998,6 +1051,8 @@ function renderLearnProfile({ patch = false } = {}) {
     patch,
   );
 
+  const mergeButton = $("learnMergeProjects");
+  if (mergeButton) mergeButton.onclick = openLearnProjectMerge;
   const exportButton = $("learnExport");
   if (exportButton) exportButton.onclick = exportLearnProfile;
 

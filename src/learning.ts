@@ -45,6 +45,9 @@ export type LearnChange = {
 };
 
 const TABLE = "learning_memory_v1";
+const PROJECT_ALIAS_TABLE = "learning_project_alias_v1";
+const MAX_PROJECT_ALIASES = 64;
+const MAX_PROJECT_MERGE_ROWS = 64; // Bound synchronous SQL writes on Cloudflare Free.
 const KIND_VALUES: LearnKind[] = [
   "preference",
   "response_style",
@@ -336,6 +339,9 @@ export class Learning extends DurableObject {
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_identity ON ${TABLE}(kind, scope, scope_key, memory_key)`);
     this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS learning_memory_v1_retrieval ON ${TABLE}(scope, scope_key, kind, confidence DESC, positive_feedback DESC, negative_feedback ASC, updated_at DESC)`);
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS learning_preflight_v1 (activity_id TEXT NOT NULL, scope TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (activity_id,scope)) WITHOUT ROWID");
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS ${PROJECT_ALIAS_TABLE} (
+      alias_key TEXT PRIMARY KEY, project_key TEXT NOT NULL
+    ) WITHOUT ROWID`);
     this.migrateProjectKeys();
 
   }
@@ -368,6 +374,8 @@ export class Learning extends DurableObject {
       );
       return Response.json({ ok: true });
     }
+    if (url.pathname === "/project-resolve" && request.method === "POST") return this.resolveProject(request);
+    if (url.pathname === "/project-merge" && request.method === "POST") return this.mergeProject(request);
     if (url.pathname === "/get" && request.method === "POST") return this.get(request);
     if (url.pathname === "/profile" && request.method === "POST") return this.profile(request);
     if (url.pathname === "/put" && request.method === "POST") return this.put(request);
@@ -390,6 +398,109 @@ export class Learning extends DurableObject {
         this.ctx.storage.sql.exec(`UPDATE ${TABLE} SET scope_key = ? WHERE id = ?`, canonical, row.id);
       }
     }
+  }
+
+  // An account owns its own Learning DO, so aliases never cross user boundaries.
+  // Resolve only at Learn read/prepare/write, never on ordinary Relay tool calls.
+  private resolveProjectKey(value: unknown): string | null {
+    const key = canonicalLearnProjectKey(value);
+    if (!key) return null;
+    const row = this.ctx.storage.sql.exec<{ project_key: string }>(
+      `SELECT project_key FROM ${PROJECT_ALIAS_TABLE} WHERE alias_key=? LIMIT 1`, key,
+    ).toArray()[0];
+    if (row) return row.project_key;
+    // A registered folder alias applies even with different parent directories.
+    // Unregistered folder names never cause automatic merges.
+    const path = key.replace(/\\/g, "/");
+    if (/^(?:[a-z]:\/|\/)/i.test(path)) {
+      const leaf = path.split("/").filter(Boolean).at(-1)?.toLowerCase();
+      if (leaf && leaf !== key) {
+        const local = this.ctx.storage.sql.exec<{ project_key: string }>(
+          `SELECT project_key FROM ${PROJECT_ALIAS_TABLE} WHERE alias_key=? LIMIT 1`, leaf,
+        ).toArray()[0];
+        if (local) return local.project_key;
+      }
+    }
+    return key; // Mappings are flattened at creation time.
+  }
+
+  private async resolveProject(request: Request): Promise<Response> {
+    const body = await request.json<any>().catch(() => null);
+    const original = canonicalLearnProjectKey(body?.projectKey);
+    if (!original) return Response.json({ error: "invalid_project" }, { status: 400 });
+    const projectKey = this.resolveProjectKey(original);
+    return Response.json({ projectKey, alias: original === projectKey ? null : original });
+  }
+
+  private async mergeProject(request: Request): Promise<Response> {
+    const body = await request.json<any>().catch(() => null);
+    const from = canonicalLearnProjectKey(body?.from);
+    const to = canonicalLearnProjectKey(body?.to);
+    if (!from || !to || from === to) return Response.json({ error: "invalid_project_merge" }, { status: 400 });
+    const target = this.resolveProjectKey(to);
+    if (!target || from === target) return Response.json({ error: "invalid_project_merge" }, { status: 400 });
+    const previous = this.ctx.storage.sql.exec<{ project_key: string }>(
+      `SELECT project_key FROM ${PROJECT_ALIAS_TABLE} WHERE alias_key=? LIMIT 1`, from,
+    ).toArray()[0];
+    if (previous && previous.project_key !== target) {
+      return Response.json({ error: "alias_conflict", projectKey: previous.project_key }, { status: 409 });
+    }
+    const source = this.ctx.storage.sql.exec<any>(
+      `SELECT * FROM ${TABLE} WHERE scope = 'project' AND scope_key = ? ORDER BY id LIMIT ?`, from, MAX_PROJECT_MERGE_ROWS + 1,
+    ).toArray();
+    if (source.length > MAX_PROJECT_MERGE_ROWS) return Response.json({ error: "merge_too_large", limit: MAX_PROJECT_MERGE_ROWS }, { status: 409 });
+    const destination = this.ctx.storage.sql.exec<any>(
+      `SELECT * FROM ${TABLE} WHERE scope = 'project' AND scope_key = ? ORDER BY id LIMIT ?`, target, MAX_MEMORIES + 1,
+    ).toArray();
+    if (destination.length > MAX_MEMORIES) return Response.json({ error: "merge_too_large" }, { status: 409 });
+    const currentAliases = this.ctx.storage.sql.exec<{ alias_key: string; project_key: string }>(
+      `SELECT alias_key, project_key FROM ${PROJECT_ALIAS_TABLE} LIMIT ?`, MAX_PROJECT_ALIASES + 1,
+    ).toArray();
+    if (currentAliases.length >= MAX_PROJECT_ALIASES && !previous) {
+      return Response.json({ error: "alias_limit" }, { status: 409 });
+    }
+
+    let moved = 0;
+    let deduplicated = 0;
+    let renamed = 0;
+    const collisions = new Map(destination.map((row: any) => [row.kind + "\0" + row.memory_key, row]));
+    const doMerge = () => {
+      for (const row of source) {
+        let key = String(row.memory_key);
+        const collision = collisions.get(row.kind + "\0" + key) as any;
+        if (collision && collision.content === row.content) {
+          const confidence = Math.max(Number(row.confidence), Number(collision.confidence));
+          const positives = Math.max(Number(row.positive_feedback), Number(collision.positive_feedback));
+          const negatives = Math.max(Number(row.negative_feedback), Number(collision.negative_feedback));
+          const createdAt = [row.created_at, collision.created_at].sort()[0];
+          const updatedAt = [row.updated_at, collision.updated_at].sort().at(-1);
+          this.ctx.storage.sql.exec(
+            `UPDATE ${TABLE} SET confidence=?, positive_feedback=?, negative_feedback=?, created_at=?, updated_at=? WHERE id=?`,
+            confidence, positives, negatives, createdAt, updatedAt, collision.id,
+          );
+          this.ctx.storage.sql.exec(`DELETE FROM ${TABLE} WHERE id=?`, row.id);
+          deduplicated++;
+          continue;
+        }
+        if (collision) {
+          const suffix = "-merged-" + String(row.id).slice(-12);
+          key = key.slice(0, 160 - suffix.length) + suffix;
+          renamed++;
+        }
+        this.ctx.storage.sql.exec(`UPDATE ${TABLE} SET scope_key=?, memory_key=? WHERE id=?`, target, key, row.id);
+        collisions.set(row.kind + "\0" + key, { ...row, memory_key: key });
+        moved++;
+      }
+      // Flatten aliases that pointed to this source before saving the source mapping.
+      this.ctx.storage.sql.exec(`UPDATE ${PROJECT_ALIAS_TABLE} SET project_key=? WHERE project_key=?`, target, from);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO ${PROJECT_ALIAS_TABLE} (alias_key, project_key) VALUES (?,?)
+          ON CONFLICT(alias_key) DO UPDATE SET project_key=excluded.project_key`, from, target,
+      );
+    };
+    this.ctx.storage.transactionSync(doMerge);
+    if (this.memoryCount !== null) this.memoryCount -= deduplicated;
+    return Response.json({ ok: true, from, to: target, moved, deduplicated, renamed, aliases: [from] });
   }
 
   private async ensureMemoryCapacity() {
@@ -592,7 +703,7 @@ export class Learning extends DurableObject {
       if (scope === "global") {
         scopeSelectors.push({ scope, scopeKey: null });
       } else {
-        const scopeKey = scope === "project" ? canonicalLearnProjectKey(entry?.scopeKey) : cleanText(entry?.scopeKey, 200);
+        const scopeKey = scope === "project" ? this.resolveProjectKey(entry?.scopeKey) : cleanText(entry?.scopeKey, 200);
         if (scopeKey) scopeSelectors.push({ scope, scopeKey });
       }
     }
@@ -655,7 +766,8 @@ export class Learning extends DurableObject {
           a.id.localeCompare(b.id)
         )
         .slice(0, limit);
-      return Response.json({ items, limit, strategy: "balanced-kind", perKind, routingReserve });
+      const resolvedProjectKey = scopeSelectors.find((item) => item.scope === "project")?.scopeKey ?? null;
+      return Response.json({ items, limit, strategy: "balanced-kind", perKind, routingReserve, resolvedProjectKey });
     }
 
     const clauses: string[] = [];
@@ -691,8 +803,11 @@ export class Learning extends DurableObject {
       byScope[item.scope] += 1;
       byKind[item.kind] = (byKind[item.kind] || 0) + 1;
     }
+    const aliases = this.ctx.storage.sql.exec<{ alias_key: string; project_key: string }>(
+      `SELECT alias_key, project_key FROM ${PROJECT_ALIAS_TABLE} ORDER BY alias_key LIMIT ?`, MAX_PROJECT_ALIASES,
+    ).toArray().map((row) => ({ alias: row.alias_key, projectKey: row.project_key }));
     return Response.json({
-      items,
+      items, aliases,
       summary: { total: items.length, byScope, byKind },
       limits: { memories: MAX_MEMORIES, returned: limit },
     });
@@ -710,7 +825,7 @@ export class Learning extends DurableObject {
     }
     const key = cleanText(rawKey, 160);
     const content = cleanText(rawContent, 4000);
-    const scopeKey = scope === "global" ? null : scope === "project" ? canonicalLearnProjectKey(rawScopeKey) : cleanText(rawScopeKey, 200);
+    const scopeKey = scope === "global" ? null : scope === "project" ? this.resolveProjectKey(rawScopeKey) : cleanText(rawScopeKey, 200);
     if (!kind || !scope || !key || !content || (scope !== "global" && !scopeKey)) {
       return Response.json({ error: "invalid_memory" }, { status: 400 });
     }

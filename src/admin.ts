@@ -462,6 +462,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
     "/admin/api/learn/put",
     "/admin/api/learn/delete",
     "/admin/api/learn/feedback",
+    "/admin/api/learn/projects/merge",
   ].includes(path);
   if (!adminAuthorized && path.startsWith("/admin/api/") && !selfService && !learnSelfMutation) {
     return error(403, "admin_required");
@@ -535,6 +536,15 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
   if (path === "/admin/api/learn/feedback" && request.method === "POST") {
     if (!selfUserId) return error(403, "browser_user_required");
     const response = await learningCall(env, selfUserId, "/feedback", { id: body?.id, value: body?.value });
+    return new Response(response.body, {
+      status: response.status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" },
+    });
+  }
+
+  if (path === "/admin/api/learn/projects/merge" && request.method === "POST") {
+    if (!selfUserId) return error(403, "browser_user_required");
+    const response = await learningCall(env, selfUserId, "/project-merge", { from: body?.from, to: body?.to });
     return new Response(response.body, {
       status: response.status,
       headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" },

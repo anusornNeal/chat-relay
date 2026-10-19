@@ -47,6 +47,8 @@ class FakeSql {
     const q = sql.replace(/\s+/g, " ").trim();
 
     if (q.startsWith("CREATE TABLE")) return new Cursor();
+    if (q.startsWith("SELECT project_key FROM learning_project_alias_v1")) return new Cursor();
+    if (q.startsWith("SELECT alias_key, project_key FROM learning_project_alias_v1")) return new Cursor();
     if (q.startsWith("CREATE INDEX")) return new Cursor();
 
     if (q.startsWith("PRAGMA table_info")) {
