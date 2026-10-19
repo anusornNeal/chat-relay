@@ -739,6 +739,10 @@ let sharedLearnActive = false;
 const sharedLearnUI = createSharedLearnUI({
   api, renderContent, setHeader, setNotice, escape: esc,
   showPersonal: () => { sharedLearnActive = false; void loadLearn(); },
+  getSidebar: () => renderLearnLibrarySidebar(),
+  bindSidebar: () => bindLearnLibrarySidebar(),
+  onSharedMode: () => { sharedLearnActive = true; },
+  getSearch: () => learnSearchQuery,
 });
 let learnProfileSnapshot = null;
 let learnKindFilter = "all";
@@ -747,7 +751,8 @@ let learnScopeKeyFilter = "";
 let learnSelectedMemoryId = null;
 let learnSearchQuery = "";
 let learnSortMode = "name";
-const learnTreeExpanded = { global: true, project: true, agent: true };
+const learnTreeExpanded = { global: true, project: true, agent: true, shared: true };
+let learnLibraryScrollTop = 0;
 const learnScopedTreeExpanded = new Set();
 
 const LEARN_KIND_ORDER = [
@@ -958,18 +963,16 @@ function openLearnProjectMerge() {
   dialog.showModal();
 }
 
-function renderLearnProfile({ patch = false } = {}) {
+function rememberLearnLibraryScroll() {
+  const list = document.getElementById("learnLibraryScroll");
+  if (list) learnLibraryScrollTop = list.scrollTop;
+}
+function renderLearnLibrarySidebar() {
+  rememberLearnLibraryScroll();
   const data = learnProfileSnapshot || {};
   const items = Array.isArray(data.items) ? data.items : [];
   const summary = data.summary || learnSummary(items);
   const byScope = summary.byScope || {};
-  const visibleItems = learnVisibleItems(items);
-
-  if (!visibleItems.some((item) => item.id === learnSelectedMemoryId)) {
-    learnSelectedMemoryId = visibleItems[0]?.id || null;
-  }
-  const selected = visibleItems.find((item) => item.id === learnSelectedMemoryId) || null;
-
   const allActive = learnScopeFilter === "all" && learnKindFilter === "all";
   const globalActive = learnScopeFilter === "global" && !learnScopeKeyFilter && learnKindFilter === "all";
   const projectsActive = learnScopeFilter === "project" && !learnScopeKeyFilter && learnKindFilter === "all";
@@ -987,6 +990,99 @@ function renderLearnProfile({ patch = false } = {}) {
     '<button class="learn-tree-row' + (agentsActive ? " selected" : "") + '" type="button" data-learn-tree-toggle="root" data-learn-tree-scope="agent" data-learn-tree-key="" data-learn-tree-kind="all">' +
       '<span class="learn-tree-chevron' + (learnTreeExpanded.agent && Number(byScope.agent || 0) > 0 ? " open" : "") + '"></span>' + icon("cpu") + '<strong>Agents</strong><em>' + esc(byScope.agent || 0) + '</em></button>' +
     (learnTreeExpanded.agent && Number(byScope.agent || 0) > 0 ? '<div class="learn-tree-nested">' + learnTreeScopedRows(items, "agent") + '</div>' : "");
+  const groups = sharedLearnUI.getGroups();
+  const selectedGroupId = sharedLearnActive ? sharedLearnUI.getSelectedGroupId() : null;
+  const sharedRows = groups.map((group) =>
+    '<button class="learn-tree-row learn-tree-child learn-shared-tree-group' +
+      (selectedGroupId === group.id ? ' selected' : '') +
+      '" type="button" data-learn-shared-group="' + esc(group.id) +
+      '" title="' + esc(group.name) + '">' +
+      '<span></span>' + icon("folder") + '<span>' + esc(group.name) + '</span></button>'
+  ).join("");
+  const sharedHtml =
+    '<div class="learn-tree-divider"></div>' +
+    '<button type="button" class="learn-tree-row learn-shared-tree-root' +
+      (sharedLearnActive && !selectedGroupId ? ' selected' : '') +
+      '" data-learn-shared-toggle aria-expanded="' + (learnTreeExpanded.shared ? 'true' : 'false') + '">' +
+      '<span class="learn-tree-chevron' + (learnTreeExpanded.shared ? ' open' : '') + '"></span>' +
+      icon("users") + '<strong>Shared Learn</strong><em>' + esc(groups.length) + '</em></button>' +
+    (learnTreeExpanded.shared ? '<div class="learn-tree-nested learn-shared-tree-children">' +
+      (sharedRows || '<div class="learn-shared-tree-empty">No groups yet</div>') +
+      '<button type="button" class="learn-tree-row learn-tree-child learn-shared-tree-create" data-learn-shared-create>' +
+        '<span></span>' + icon("plus") + '<span>Create group</span></button></div>' : '');
+  return '<aside class="learn-folder-tree">' +
+    '<label class="learn-folder-search">' + icon("search") +
+      '<input id="learnSearch" type="search" placeholder="Search memories" value="' + esc(learnSearchQuery) + '"><kbd>/</kbd></label>' +
+    '<div class="learn-folder-library-scroll" id="learnLibraryScroll">' +
+      '<div class="learn-tree-section">Library</div>' + treeHtml + sharedHtml +
+    '</div></aside>';
+}
+function bindLearnLibrarySidebar() {
+  const scroll = document.getElementById("learnLibraryScroll");
+  if (scroll) {
+    scroll.scrollTop = learnLibraryScrollTop;
+    scroll.onscroll = () => { learnLibraryScrollTop = scroll.scrollTop; };
+  }
+  const searchInput = document.getElementById("learnSearch");
+  if (searchInput) searchInput.oninput = () => {
+    learnSearchQuery = searchInput.value;
+    if (sharedLearnActive) sharedLearnUI.rerender();
+    else renderLearnProfile({ patch: true });
+    requestAnimationFrame(() => {
+      const next = document.getElementById("learnSearch");
+      if (next) {
+        next.focus();
+        const pos = next.value.length;
+        next.setSelectionRange?.(pos, pos);
+      }
+    });
+  };
+  document.querySelectorAll("[data-learn-tree-scope]").forEach((button) => {
+    button.onclick = () => {
+      const scope = button.dataset.learnTreeScope || "all";
+      const scopeKey = button.dataset.learnTreeKey || "";
+      const toggle = button.dataset.learnTreeToggle || "";
+      if (toggle === "root" && Object.prototype.hasOwnProperty.call(learnTreeExpanded, scope)) {
+        learnTreeExpanded[scope] = !learnTreeExpanded[scope];
+      } else if (toggle === "scoped" && scopeKey) {
+        const treeKey = scope + "::" + scopeKey;
+        if (learnScopedTreeExpanded.has(treeKey)) learnScopedTreeExpanded.delete(treeKey);
+        else learnScopedTreeExpanded.add(treeKey);
+      }
+      learnScopeFilter = scope;
+      learnScopeKeyFilter = scopeKey;
+      learnKindFilter = button.dataset.learnTreeKind || "all";
+      if (sharedLearnActive) {
+        sharedLearnActive = false;
+        renderLearnProfile();
+      } else {
+        learnSelectedMemoryId = null;
+        renderLearnProfile({ patch: true });
+      }
+    };
+  });
+  const sharedRoot = document.querySelector("[data-learn-shared-toggle]");
+  if (sharedRoot) sharedRoot.onclick = () => {
+    learnTreeExpanded.shared = !learnTreeExpanded.shared;
+    if (sharedLearnActive) sharedLearnUI.rerender();
+    else renderLearnProfile({ patch: true });
+  };
+  document.querySelectorAll("[data-learn-shared-group]").forEach(button => {
+    button.onclick = () => { learnTreeExpanded.shared = true; void sharedLearnUI.show(button.dataset.learnSharedGroup); };
+  });
+  const create = document.querySelector("[data-learn-shared-create]");
+  if (create) create.onclick = () => sharedLearnUI.createGroup();
+}
+
+function renderLearnProfile({ patch = false } = {}) {
+  const data = learnProfileSnapshot || {};
+  const items = Array.isArray(data.items) ? data.items : [];
+  const visibleItems = learnVisibleItems(items);
+
+  if (!visibleItems.some((item) => item.id === learnSelectedMemoryId)) {
+    learnSelectedMemoryId = visibleItems[0]?.id || null;
+  }
+  const selected = visibleItems.find((item) => item.id === learnSelectedMemoryId) || null;
 
   const rowsHtml = visibleItems.length ? visibleItems.map((item) => {
     const active = selected?.id === item.id ? " active" : "";
@@ -1038,13 +1134,10 @@ function renderLearnProfile({ patch = false } = {}) {
 
   renderContent(
     '<section class="learn-folder-shell">' +
-      '<aside class="learn-folder-tree">' +
-        '<label class="learn-folder-search">' + icon("search") + '<input id="learnSearch" type="search" placeholder="Search memories" value="' + esc(learnSearchQuery) + '"><kbd>/</kbd></label>' +
-        '<div class="learn-tree-section">Library</div>' + treeHtml +
-      '</aside>' +
+      renderLearnLibrarySidebar() +
       '<div class="learn-folder-main">' +
         '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div>' +
-          '<div class="learn-folder-heading-actions"><button id="openSharedLearn" class="button small" type="button">Shared Learn</button><button id="learnMergeProjects" class="button small" type="button">Merge projects</button><span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
+          '<div class="learn-folder-heading-actions">' + (learnScopeFilter === "project" && !learnScopeKeyFilter ? '<button id="learnMergeProjects" class="button small" type="button">Merge projects</button>' : '') + '<span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
         '<div class="learn-folder-list-toolbar"><div class="learn-folder-sort">' +
           '<button class="' + (learnSortMode === "name" ? "active" : "") + '" type="button" data-learn-sort="name">Name</button>' +
           '<button class="' + (learnSortMode === "updated" ? "active" : "") + '" type="button" data-learn-sort="updated">Updated</button>' +
@@ -1061,52 +1154,13 @@ function renderLearnProfile({ patch = false } = {}) {
 
   const mergeButton = $("learnMergeProjects");
   if (mergeButton) mergeButton.onclick = openLearnProjectMerge;
-  const openSharedButton = $("openSharedLearn");
-  if (openSharedButton) openSharedButton.onclick = () => {
-    sharedLearnActive = true;
-    void sharedLearnUI.show();
-  };
   const shareButton = $("sharePersonalMemory");
   if (shareButton && selected) shareButton.onclick = () => { void sharedLearnUI.shareMemory(selected); };
 
   const exportButton = $("learnExport");
   if (exportButton) exportButton.onclick = exportLearnProfile;
 
-  const searchInput = $("learnSearch");
-  if (searchInput) {
-    searchInput.oninput = () => {
-      learnSearchQuery = searchInput.value;
-      renderLearnProfile({ patch: true });
-      requestAnimationFrame(() => {
-        const next = $("learnSearch");
-        if (next) {
-          next.focus();
-          const pos = next.value.length;
-          next.setSelectionRange?.(pos, pos);
-        }
-      });
-    };
-  }
-
-  document.querySelectorAll("[data-learn-tree-scope]").forEach((button) => {
-    button.onclick = () => {
-      const scope = button.dataset.learnTreeScope || "all";
-      const scopeKey = button.dataset.learnTreeKey || "";
-      const toggle = button.dataset.learnTreeToggle || "";
-      if (toggle === "root" && Object.prototype.hasOwnProperty.call(learnTreeExpanded, scope)) {
-        learnTreeExpanded[scope] = !learnTreeExpanded[scope];
-      } else if (toggle === "scoped" && scopeKey) {
-        const treeKey = scope + "::" + scopeKey;
-        if (learnScopedTreeExpanded.has(treeKey)) learnScopedTreeExpanded.delete(treeKey);
-        else learnScopedTreeExpanded.add(treeKey);
-      }
-      learnScopeFilter = scope;
-      learnScopeKeyFilter = scopeKey;
-      learnKindFilter = button.dataset.learnTreeKind || "all";
-      learnSelectedMemoryId = null;
-      renderLearnProfile({ patch: true });
-    };
-  });
+  bindLearnLibrarySidebar();
 
   document.querySelectorAll("[data-learn-sort]").forEach((button) => {
     button.onclick = () => {
@@ -1141,7 +1195,10 @@ function renderLearnProfile({ patch = false } = {}) {
 async function loadLearn({ patch = false } = {}) {
   if (sharedLearnActive) return sharedLearnUI.show();
   setHeader("My Learn", "Your adaptive preferences and reusable working patterns");
-  const data = await api("/admin/api/learn?limit=100");
+  const [data] = await Promise.all([
+    api("/admin/api/learn?limit=100"),
+    sharedLearnUI.listGroups().catch(() => []), // Keep private Learn available if group API fails.
+  ]);
   learnProfileSnapshot = {
     ...data,
     summary: data.summary || learnSummary(Array.isArray(data.items) ? data.items : []),

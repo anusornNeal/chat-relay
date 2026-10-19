@@ -1,8 +1,7 @@
 import { renderLearnMarkdown } from "./learn-markdown.js";
 
-export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escape,showPersonal}) {
+export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escape,showPersonal,getSidebar,bindSidebar,onSharedMode,getSearch}) {
   let groups = [], selectedGroupId = null, detail = null, tab = "approved", selectedItemId = null;
-  const icon = (name) => ({group:"◉",folder:"▣",plus:"+",back:"←"})[name] || "";
   const esc = escape;
   const groupUrl = (id) => "/admin/api/learn/groups/" + encodeURIComponent(id);
   const write = (url, body, method="POST") => api(url, {method,body:JSON.stringify(body)});
@@ -10,14 +9,23 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
   const canReview = () => ["owner","editor"].includes(detail?.group?.role);
   const isOwner = () => detail?.group?.role === "owner";
 
-  async function refresh() {
+  async function listGroups() {
     const result = await api("/admin/api/learn/groups");
-    groups = result.items || [];
+    groups = Array.isArray(result.items) ? result.items : [];
+    return groups;
+  }
+  async function refresh() {
+    await listGroups();
     if (!groups.some((group) => group.id === selectedGroupId)) selectedGroupId = groups[0]?.id || null;
     detail = selectedGroupId ? await api(groupUrl(selectedGroupId)) : null;
   }
-  const getRows = () => tab === "approved" ? (detail?.memories || [])
-    : (detail?.proposals || []).filter((x) => tab === "pending" ? x.status === "pending" : x.status !== "pending");
+  const getRows = () => {
+    const rows = tab === "approved" ? (detail?.memories || [])
+      : (detail?.proposals || []).filter((x) => tab === "pending" ? x.status === "pending" : x.status !== "pending");
+    const query = (getSearch?.() || "").trim().toLowerCase();
+    return query ? rows.filter((item) => [item.key, item.kind, item.content]
+      .some((value) => String(value || "").toLowerCase().includes(query))) : rows;
+  };
   const tabButton = (value,label) => '<button class="learn-shared-tab' + (tab === value ? ' active' : '') +
     '" type="button" data-shared-tab="' + value + '">' + esc(label) + '</button>';
   function render() {
@@ -25,11 +33,6 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
     const rows = getRows();
     if (!rows.some(r => r.id === selectedItemId)) selectedItemId = rows[0]?.id || null;
     const selected = rows.find(r => r.id === selectedItemId);
-    const sidebar = groups.length ? groups.map(g =>
-      '<button type="button" class="learn-shared-group' + (selectedGroupId === g.id ? ' selected' : '') +
-      '" data-shared-group="' + esc(g.id) + '"><strong>' + esc(g.name) + '</strong><small>' + esc(g.projectKey) +
-      ' · ' + esc(roleLabel(g.role)) + '</small></button>').join("")
-      : '<p class="learn-shared-muted">No shared groups yet. Create one to collaborate.</p>';
     const list = rows.length ? rows.map(m =>
       '<button type="button" class="learn-folder-row' + (m.id === selectedItemId ? ' active' : '') +
       '" data-shared-memory="' + esc(m.id) + '"><span class="learn-folder-file">▤</span><span class="learn-folder-copy">' +
@@ -54,16 +57,15 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
         '<button class="button small" data-shared-review="approve">Approve</button>' +
         '<button class="button small danger" data-shared-review="reject">Reject</button></div>' : '')
       : '<div class="learn-detail-empty"><strong>Select a memory</strong><span>Choose a row to inspect details.</span></div>';
-    setHeader("Shared Learn","Approved knowledge shared across project accounts");
+    onSharedMode();
+    setHeader("My Learn", "Your adaptive preferences and shared project knowledge");
     renderContent('<section class="learn-folder-shell learn-shared-shell">' +
-      '<aside class="learn-folder-tree"><div class="learn-tree-section">Shared project groups</div>' +
-      '<div class="learn-shared-group-list">' + sidebar + '</div>' +
-      '<button type="button" class="button small learn-shared-create" id="sharedCreate">+ Create group</button></aside>' +
+      getSidebar() +
       '<div class="learn-folder-main">' +
       '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>Shared</strong></div>' +
       '<h2>' + esc(group?.name || "Shared Learn") + '</h2><p>' + esc(group?.projectKey || "Choose a group to begin") +
       (group ? " · " + esc(roleLabel(group.role)) : "") + '</p></div>' +
-      '<div class="learn-folder-heading-actions"><button class="button small" id="sharedBack">My Learn</button>' +
+      '<div class="learn-folder-heading-actions">' +
       (group ? '<button class="button small" id="sharedMembers">Members (' + (detail?.members?.length || 0) + ')</button>' +
         '<button class="button small" id="sharedAliases">Project aliases</button>' : '') +
       '</div></div>' +
@@ -73,16 +75,9 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
       '<div class="learn-folder-workspace"><div class="learn-folder-list"><div class="learn-folder-list-head learn-shared-list-head">' +
       '<span>Name</span><span>Version / Status</span></div><div class="learn-folder-list-scroll">' + list +
       '</div></div><aside class="learn-detail-pane">' + info + '</aside></div></div></section>');
-    document.getElementById("sharedBack").onclick = showPersonal;
-    document.getElementById("sharedCreate").onclick = createGroup;
+    bindSidebar();
     document.getElementById("sharedMembers")?.addEventListener("click", manageMembers);
     document.getElementById("sharedAliases")?.addEventListener("click", manageAliases);
-    document.querySelectorAll("[data-shared-group]").forEach(el => el.onclick = async () => {
-      selectedGroupId = el.dataset.sharedGroup;
-      selectedItemId = null;
-      try { detail = await api(groupUrl(selectedGroupId));render(); }
-      catch(e) {setNotice(e.message,true);}
-    });
     document.querySelectorAll("[data-shared-tab]").forEach(el => el.onclick = () => {tab=el.dataset.sharedTab;selectedItemId=null;render();});
     document.querySelectorAll("[data-shared-memory]").forEach(el => el.onclick = () => {selectedItemId=el.dataset.sharedMemory;render();});
     document.querySelectorAll("[data-shared-review]").forEach(el => el.onclick = async () => {
@@ -102,14 +97,19 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
       } catch(e){setNotice(e.message,true);}
     });
   }
-  async function show() {
+  async function show(groupId) {
+    if (groupId) selectedGroupId = groupId;
+    onSharedMode();
     try {await refresh();render();}
-    catch(e){setHeader("Shared Learn","Shared project knowledge");
-      renderContent('<section class="panel learn-shared-error"><h2>Cannot load Shared Learn</h2><p>' +
+    catch(e) {
+      setHeader("My Learn", "Your adaptive preferences and shared project knowledge");
+      renderContent('<section class="learn-folder-shell learn-shared-shell">' + getSidebar() +
+        '<div class="learn-folder-main"><div class="learn-shared-error"><h2>Cannot load Shared Learn</h2><p>' +
         esc(e.message) + '</p><button id="sharedRetry" class="button">Retry</button>' +
-        '<button id="sharedBack" class="button">My Learn</button></section>');
-      document.getElementById("sharedRetry").onclick=show;
-      document.getElementById("sharedBack").onclick=showPersonal;
+        '<button id="sharedBack" class="button">My Learn</button></div></div></section>');
+      bindSidebar();
+      document.getElementById("sharedRetry").onclick = () => show();
+      document.getElementById("sharedBack").onclick = showPersonal;
     }
   }
   function dialog(title,fields,onSubmit) {
@@ -216,5 +216,9 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
         });
     } catch(e){setNotice(e.message,true);}
   }
-  return {show,shareMemory};
+  return {show,shareMemory,createGroup,listGroups,
+    getGroups: () => groups,
+    getSelectedGroupId: () => selectedGroupId,
+    rerender: render,
+  };
 }

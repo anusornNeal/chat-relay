@@ -1,13 +1,5 @@
 
 /* Shared Learn uses the same monitoring-first shell and 50/50 list/detail split. */
-.learn-shared-shell .learn-folder-tree{display:flex;flex-direction:column;gap:10px}
-.learn-shared-group-list{display:flex;flex-direction:column;gap:3px;min-height:0;overflow:auto}
-.learn-shared-group{appearance:none;border:1px solid transparent;border-radius:8px;background:transparent;padding:10px 9px;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:4px;color:#354457}
-.learn-shared-group:hover{background:#f4f7fa}
-.learn-shared-group.selected{background:#edf3fa;border-color:#d5e1ef}
-.learn-shared-group strong{font-size:12px;overflow-wrap:anywhere}
-.learn-shared-group small{font-size:10px;color:#82909f}
-.learn-shared-create{margin-top:auto;width:100%}
 .learn-shared-muted{font-size:11px;color:#82909f;line-height:1.5;overflow-wrap:anywhere}
 .learn-shared-toolbar{justify-content:flex-start;gap:6px}
 .learn-shared-tab{border:1px solid transparent;background:transparent;border-radius:7px;padding:7px 11px;color:#738092;cursor:pointer;font-size:11px}
