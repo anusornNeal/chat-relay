@@ -31,11 +31,6 @@ const SAMPLES = [
     durationMs: 162, requestBytes: 264, responseBytes: 1200,
   },
   {
-    action: "terminal.exec", cwd: "C:\\Projects\\flowly",
-    command: "Get-Command rg -ErrorAction SilentlyContinue",
-    durationMs: 18, requestBytes: 741, responseBytes: 994,
-  },
-  {
     action: "terminal.batch.start", cwd: "C:\\Projects\\flowly",
     jobs: [
       { command: "npm run test:tui" },
@@ -118,6 +113,15 @@ export function seedDemo(tui, { now = Date.now() } = {}) {
       ok: ok !== false, durationMs, responseBytes, ...(error ? { error } : {}),
     });
   }
+  // Show the same Learn activity indicator used by the real local agent.
+  tui.handleMessage({
+    type: "chat-relay-ui", event: "learn",
+    activity: {
+      eventId: "demo-learn-1", tool: "learn_prepare", projectKey: "chat-relay",
+      scopeSummary: "project", durationMs: 24, ok: true,
+      at: new Date(now).toISOString(),
+    },
+  });
   return tui;
 }
 

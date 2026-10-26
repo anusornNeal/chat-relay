@@ -22,6 +22,8 @@ test("offline snapshot includes demo warning and varied project-aware activity",
   assert.match(content, /Multiple projects · Filesystem/);
   assert.match(content, /buddy-android · Filesystem/);
   assert.match(content, /Review terminal batch results/);
+  assert.match(content, /🧠 Load relevant Learn context/);
+  assert.match(content, /chat-relay · Learn/);
   assert.match(content, /Error: Test failed/);
   assert.match(content, /running/);
   assert.match(content, /9 operations/);
@@ -60,6 +62,7 @@ test("sample events flow through the actual RemoteTui state machine", () => {
   assert.equal(tui.transactions.filter((item) => item.ok === false).length, 1);
   assert.equal(tui.transactions.find((item) => item.operation === "Review terminal batch results")?.project, "flowly");
   assert.equal(tui.transactions.find((item) => item.project === "Multiple projects")?.category, "Filesystem");
+  assert.equal(tui.transactions.find((item) => item.action === "learn_prepare")?.category, "Learn");
   tui.render();
   assert.match(frames.at(-1), /SkillAdminOverview\.tsx/);
   assert.doesNotMatch(frames.at(-1), /↑\s*\d|↓\s*\d/);

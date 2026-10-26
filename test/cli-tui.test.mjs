@@ -626,3 +626,38 @@ test("Thai combining marks occupy no extra terminal cells", () => {
   assert.equal(terminalCellWidth("ก่า"), 2);
   assert.equal(terminalCellWidth("ภาษาไทย"), 7);
 });
+
+test("Learn activity displays the brain emoji with humanized text in wide and narrow TUI", () => {
+  for (const columns of [44, 120]) {
+    const frames = [];
+    const output = { isTTY: false, columns, rows: 30, write(value) { frames.push(String(value)); } };
+    const tui = new RemoteTui({
+      config: { agentName: "DESKTOP-TEST" }, output, input: { isTTY: false }, env: { NO_COLOR: "1" },
+    });
+    tui.handleMessage({
+      type: "chat-relay-ui", event: "learn",
+      activity: {
+        eventId: "learn-call", tool: "learn_get", projectKey: "chat-relay",
+        scopeSummary: "project", durationMs: 24, ok: true,
+      },
+    });
+    tui.handleMessage({
+      type: "chat-relay-ui", event: "learn",
+      change: { eventId: "learn-legacy", type: "updated", projectKey: "chat-relay" },
+    });
+    tui.handleMessage({
+      type: "chat-relay-ui", event: "tool:start", requestId: "already-prefixed",
+      action: "learn_prepare", category: "Learn", project: "chat-relay",
+      operation: "🧠 Load relevant Learn context",
+    });
+    tui.render();
+    const frame = frames.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
+    assert.match(frame, /🧠 Read Learn/, columns + "-column Learn call emoji");
+    assert.match(frame, /🧠 Update Learn/, columns + "-column legacy Learn emoji");
+    assert.match(frame, /🧠 Load relevant Lea/, columns + "-column prefixed Learn emoji");
+    assert.doesNotMatch(frame, /🧠 🧠/, "must not repeat the emoji");
+    assert.ok(frame.split("\n").every((line) => terminalCellWidth(line) <= columns - 1));
+    if (columns === 120) assert.match(frame, /chat-relay · Learn/);
+    tui.stop();
+  }
+});

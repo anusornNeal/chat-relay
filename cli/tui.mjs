@@ -337,7 +337,8 @@ function activityTitle(item) {
   if (!item.operation && /^Run (?:Write-Output|Get-Command|Get-Content|Set-Variable|Start-Process)\b/i.test(value)) {
     return "Execute terminal command";
   }
-  return value;
+  // Preserve the familiar Learn marker even when an operation is humanized.
+  return activityCategory(item) === "Learn" && !value.startsWith("🧠") ? "🧠 " + value : value;
 }
 
 function activityRows(item, width, { color = false, twoLines = false } = {}) {
