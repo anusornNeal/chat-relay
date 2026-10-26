@@ -16,7 +16,6 @@ const LABEL_WIDTH = 12;
 const GAP = 3;
 const MIN_FRAME_WIDTH = 60;
 const MAX_FRAME_WIDTH = 179;
-const FRAME_FIXED_ROWS = 12;
 const FRAME_BOTTOM_MARGIN = 1;
 
 function clamp(value, min, max) {
@@ -298,6 +297,68 @@ export function shouldUseColor(stdout = process.stdout, env = process.env) {
   return true;
 }
 
+function cellPad(value, width) {
+  const clipped = truncateCells(value, Math.max(0, width));
+  return clipped + " ".repeat(Math.max(0, width - terminalCellWidth(clipped)));
+}
+
+function compactActivityRows(item, width, color = false) {
+  const limit = Math.max(1, width);
+  const isRunning = item.status === "running";
+  const symbol = isRunning ? "◌" : item.ok === false ? "×" : "✓";
+  const tint = isRunning ? STYLE.yellow : item.ok === false ? STYLE.red : STYLE.green;
+  const time = clock(item.at);
+  const duration = formatDuration(item.durationMs, item.status);
+  const text = String(item.summary || item.action || "Tool call").replace(/\s+/g, " ").trim();
+  const traffic = [
+    Number.isFinite(Number(item.requestBytes)) ? "↑" + formatBytes(item.requestBytes) : null,
+    Number.isFinite(Number(item.responseBytes)) ? "↓" + formatBytes(item.responseBytes) : null,
+  ].filter(Boolean).join(" ");
+  // Small viewports keep the operation visible instead of forcing telemetry columns.
+  if (limit < 43) {
+    const prefix = limit < 25 ? symbol + " " : time.slice(0, 5) + " " + symbol + " ";
+    const row = cellPad(prefix + text, limit);
+    return [color ? paint(symbol, tint) + row.slice(1) : row];
+  }
+  const durationWidth = Math.min(9, Math.max(5, terminalCellWidth(duration)));
+  const prefix = time + "  " + symbol + "  ";
+  const suffix = " " + cellPad(duration, durationWidth);
+  const trafficText = limit >= 106 && traffic ? "  " + traffic : "";
+  const bodyWidth = Math.max(1, limit - terminalCellWidth(prefix) - terminalCellWidth(suffix) - terminalCellWidth(trafficText));
+  const readable = truncateCells(text, bodyWidth);
+  const row = prefix + cellPad(readable, bodyWidth) + trafficText + suffix;
+  const first = color
+    ? paint(time, STYLE.gray) + "  " + paint(symbol, tint) + "  " + cellPad(readable, bodyWidth) + paint(trafficText + suffix, STYLE.gray)
+    : row;
+  return [first];
+}
+
+function compactSummary(state, width, rows, color) {
+  const online = String(state.status || "").toLowerCase() === "connected" && relayIsOnline(state.relayHealth);
+  const stateText = online ? "● ONLINE" : statusText(state.status).replace("WebSocket open", "CONNECTED");
+  const c = (text, style = STYLE.gray) => color ? paint(text, style) : text;
+  const capabilities = [
+    state.terminal ? "✓ Terminal" : "× Terminal",
+    state.desktop ? "✓ Desktop" : "× Desktop",
+    "Learn " + compactLearnStatus(state.learn),
+  ].join("   ");
+  const basic = [
+    "Agent  " + String(state.agent || "-"),
+    "Uptime " + formatUptime(state.uptimeMs) + "   Reconnects " + (state.reconnects ?? 0),
+    "Root   " + String(state.root || "-"),
+    capabilities,
+  ];
+  if (rows === 1) return [c(truncateCells(state.agent + " · " + stateText, width), online ? STYLE.green : STYLE.yellow)];
+  if (rows === 2) return [c(truncateCells(basic[0] + " · " + basic[1], width), STYLE.bold), c(truncateCells(capabilities, width))];
+  if (rows === 3) return [c(truncateCells(basic[0] + "   " + basic[1], width), STYLE.bold), c(truncateCells(basic[2], width)), c(truncateCells(capabilities, width))];
+  return [
+    c(truncateCells(basic[0] + "   " + basic[1], width), STYLE.bold),
+    c(truncateCells("Account " + state.account + "   Relay " + state.relay, width)),
+    c(truncateCells(basic[2], width)),
+    c(truncateCells(capabilities, width), STYLE.green),
+  ];
+}
+
 export class RemoteTui {
   constructor({
     config,
@@ -391,15 +452,15 @@ export class RemoteTui {
     const terminalWidth = Number(this.output.columns) || 110;
     const width = clamp(terminalWidth - 1, Math.min(MIN_FRAME_WIDTH, Math.max(1, terminalWidth - 1)), MAX_FRAME_WIDTH);
     const height = Math.max(1, Number(this.output.rows) || 30);
-    const compact = height < 14;
-    const headerRows = compact ? Math.max(1, Math.min(2, height - 3)) : 5;
-    const fixedRows = compact ? 2 + headerRows : FRAME_FIXED_ROWS;
+    const compact = height < 12 || width < 48;
+    const headerRows = height < 9 ? 1 : compact ? 2 : width < 86 ? 3 : 4;
+    const fixedRows = 1 + headerRows + 2 + (height >= 14 ? 1 : 0);
     const availableRows = Math.max(1, height - fixedRows - FRAME_BOTTOM_MARGIN);
     return { width, height, availableRows, compact, headerRows };
   }
 
   transactionRows(width) {
-    return this.transactions.flatMap((item) => formatTransactionRows(item, width, { color: this.colorEnabled }));
+    return this.transactions.flatMap((item) => compactActivityRows(item, width, this.colorEnabled));
   }
 
   maxScrollOffset() {
@@ -455,7 +516,7 @@ export class RemoteTui {
   appendTransaction(item) {
     if (this.scrollOffset > 0) {
       const { width } = this.viewportMetrics();
-      this.scrollOffset += formatTransactionRows(item, width, { color: false }).length;
+      this.scrollOffset += compactActivityRows(item, width, false).length;
       this.unseenTransactions += 1;
     }
     this.transactions.push(item);
@@ -583,52 +644,32 @@ export class RemoteTui {
 
   render() {
     if (this.closed) return;
-    const { width, height, availableRows, compact, headerRows } = this.viewportMetrics();
-    const separator = "─".repeat(width);
-    const headerState = {
-      ...this.state,
-      uptimeMs: Date.now() - this.startedAt,
-    };
-    let headerLines;
-    if (width < MIN_FRAME_WIDTH) {
-      const compactHeader = [
-        truncateCells(`👤 ${headerState.account || "-"} · 💻 ${headerState.agent || "-"}`, width),
-        truncateCells(`🔗 ${combinedStatusText(headerState.status, headerState.relayHealth)} · 🧠 Learn ${compactLearnStatus(headerState.learn)} · 📁 ${headerState.root || "-"}`, width),
-      ];
-      headerLines = compactHeader.map((line) => this.colorEnabled ? paint(line, STYLE.gray) : line);
-    } else {
-      headerLines = formatTwoColumnHeader(headerState, width, { color: this.colorEnabled }).split("\n");
-    }
-    if (compact) headerLines = headerLines.slice(0, headerRows);
-
-    const allRows = this.transactionRows(width);
-    const maxOffset = Math.max(0, allRows.length - availableRows);
-    this.scrollOffset = clamp(this.scrollOffset, 0, maxOffset);
-    const end = Math.max(0, allRows.length - this.scrollOffset);
+    const { width, height, availableRows, headerRows } = this.viewportMetrics();
+    const state = { ...this.state, uptimeMs: Date.now() - this.startedAt };
+    const online = state.status === "connected" && relayIsOnline(state.relayHealth);
+    const health = online ? "● ONLINE" : state.status === "connected" ? "○ OFFLINE" : statusText(state.status);
+    const healthWidth = terminalCellWidth(health);
+    const label = truncateCells("Chat Relay  v" + this.version, Math.max(1, width - healthWidth - 2));
+    const topGap = " ".repeat(Math.max(1, width - terminalCellWidth(label) - healthWidth));
+    const top = (this.colorEnabled ? paint(label, STYLE.bold, STYLE.cyan) : label) + topGap
+      + (this.colorEnabled ? paint(health, online ? STYLE.green : state.status === "connected" ? STYLE.red : STYLE.yellow) : health);
+    const summary = compactSummary(state, width, headerRows, this.colorEnabled);
+    const divider = this.colorEnabled ? paint("─".repeat(width), STYLE.gray) : "─".repeat(width);
+    const mode = this.scrollOffset === 0 ? "● LIVE" : this.unseenTransactions ? "+" + this.unseenTransactions + " NEW" : "HISTORY";
+    const sectionLeft = "Activity  " + mode;
+    const help = "↑↓ scroll · End live";
+    const section = truncateCells(sectionLeft + (width > terminalCellWidth(sectionLeft) + terminalCellWidth(help) + 3
+      ? " ".repeat(width - terminalCellWidth(sectionLeft) - terminalCellWidth(help)) + help : ""), width);
+    const sectionLine = this.colorEnabled ? paint(section, STYLE.cyan) : section;
+    const activity = this.transactionRows(width);
+    this.scrollOffset = clamp(this.scrollOffset, 0, Math.max(0, activity.length - availableRows));
+    const end = Math.max(0, activity.length - this.scrollOffset);
     const start = Math.max(0, end - availableRows);
-    const rows = allRows.slice(start, end);
-    while (rows.length < Math.min(availableRows, 4)) rows.unshift("");
-
-    const titleText = truncateCells(`🚀 Chat Relay  v${this.version}`, width);
-    const title = this.colorEnabled ? paint(titleText, STYLE.bold, STYLE.cyan) : titleText;
-    const divider = this.colorEnabled ? paint(separator, STYLE.gray) : separator;
-    const mode = this.scrollOffset === 0
-      ? "🟢 LIVE"
-      : this.unseenTransactions > 0
-        ? `📬 +${this.unseenTransactions} new`
-        : "📜 HISTORY";
-    const sectionText = truncateCells(
-      `📜 Transactions  ${mode}  ·  wheel/↑↓ scroll  ·  End = live`,
-      width,
-    );
-    const section = this.colorEnabled ? paint(sectionText, STYLE.bold, STYLE.cyan) : sectionText;
-
-    const screenLines = compact
-      ? [title, ...headerLines, section, ...rows]
-      : [title, divider, "", ...headerLines, "", divider, section, "", ...rows];
-    const maxLines = Math.max(1, height - FRAME_BOTTOM_MARGIN);
-    const screen = screenLines.slice(0, maxLines).join("\n");
-
+    const events = activity.slice(start, end);
+    const body = events.length ? events : [this.colorEnabled ? paint("  No recent activity", STYLE.gray) : "  No recent activity"];
+    while (body.length < availableRows) body.unshift("");
+    const lines = [top, ...summary, divider, sectionLine, ...(height >= 14 ? [divider] : []), ...body];
+    const screen = lines.slice(0, Math.max(1, height - FRAME_BOTTOM_MARGIN)).join("\n");
     this.output.write(ESC + "2J" + ESC + "H" + screen);
   }
 }

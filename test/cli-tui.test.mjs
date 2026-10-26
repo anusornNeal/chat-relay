@@ -433,8 +433,8 @@ test("TUI compact layout respects tiny terminal rows and cell width", () => {
   const lines = frame.split("\n");
   assert.ok(lines.length <= output.rows - 1);
   assert.ok(lines.every((line) => terminalCellWidth(line) <= output.columns - 1));
-  assert.match(frame, /🚀 Chat Relay/);
-  assert.match(frame, /📜/);
+  assert.match(frame, /Chat Relay/);
+  assert.match(frame, /Activity/);
   tui.stop();
 });
 
@@ -487,4 +487,46 @@ test("TUI restores an initially non-flowing stdin without pausing a pre-existing
   flowingTui.start();
   flowingTui.stop();
   assert.equal(initiallyFlowing.pauseCalls, 0);
+});
+
+test("compact monitor adapts to viewport and preserves cell bounds", () => {
+  const strip = (value) => value.replace(/\x1b\[[0-9;]*m/g, "");
+  for (const [columns, rows] of [[28, 7], [44, 12], [72, 18], [80, 24], [120, 30]]) {
+    for (const noColor of [false, true]) {
+      const frames = [];
+      const output = { isTTY: true, columns, rows, write(value) { frames.push(String(value)); return true; } };
+      const tui = new RemoteTui({
+        config: {
+          user: { name: "Anusorn" }, agentName: "DESKTOP-5IQPSSC",
+          allowedRoots: "C:\\Users\\tatar\\Projects",
+          relayUrl: "https://chat-relay.example.workers.dev",
+          terminalEnabled: true, desktopEnabled: true,
+        },
+        version: "1.3.2", output, input: { isTTY: false },
+        env: noColor ? { NO_COLOR: "1" } : {},
+      });
+      tui.start();
+      tui.setRelayHealth({ code: 200, features: { learn: true } });
+      tui.handleMessage({ type: "chat-relay-ui", event: "connection", state: "connected" });
+      for (let i = 0; i < 25; i++) {
+        tui.handleMessage({
+          type: "chat-relay-ui", event: "tool:start",
+          at: "2026-10-26T03:00:00Z", requestId: "req-" + i,
+          action: "terminal.exec",
+          summary: "Run git status and long Thai ภาษาไทย emoji ✅ command number " + i,
+          requestBytes: 512,
+        });
+      }
+      tui.render();
+      const screen = frames.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
+      const plain = strip(screen);
+      const lines = plain.split("\n");
+      assert.ok(lines.length <= rows - 1, columns + "x" + rows + " rows");
+      assert.ok(lines.every((line) => terminalCellWidth(line) <= columns - 1), columns + "x" + rows + " cells");
+      assert.match(plain, /Activity/);
+      assert.match(plain, /ONLINE/);
+      if (noColor) assert.doesNotMatch(screen, /\x1b\[[0-9;]*m/);
+      tui.stop();
+    }
+  }
 });
