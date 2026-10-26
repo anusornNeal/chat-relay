@@ -16,7 +16,7 @@ import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
 import { canonicalLearnProjectKey } from "./project-identity";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
-import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT } from "./learning-policy";
+import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT, LEARN_USAGE_REPORT_INSTRUCTION } from "./learning-policy";
 import { LearnPreflightGuard, attachLearnPrepareAdvisory, attachLearnReflectionAdvisory, isLearningCheckpointTool } from "./learn-preflight-guard.mjs";
 import { LearnGateCache, preflightIdentity, preflightScope, preflightPreparationScopes, isPreflightExempt, preflightRequired } from "./learn-preflight-gate.mjs";
 import type { AuthUser, Env } from "./env";
@@ -244,7 +244,7 @@ async function prepareLearnContext(
         agentId,
         agentSource: agentId ? (explicitAgentId ? "explicit" : preferredAgent?.source ?? "preferred") : null,
       },
-      guidance: "Reuse this prepared context for the current task. Do not call learn_prepare before every tool. When the task ends, report actual Learn application once with learn_usage_report and this usageReceiptId; do not mark Retrieved as Applied or fabricate verification evidence.",
+      guidance: "Reuse this prepared context for the current task. Do not call learn_prepare before every tool. " + (usageReceiptId ? LEARN_USAGE_REPORT_INSTRUCTION : "No private Learn usage receipt was issued. Do not call learn_usage_report for this preparation."),
     }),
   };
 }
@@ -1275,7 +1275,7 @@ function oauthToolSecurity() {
 
 const SCREENSHOT_UI_URI = "ui://chat-relay/screenshot-v3.html";
 
-function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
+export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
   const server = new McpServer({ name: "chat-relay", version: SERVICE_VERSION });
 
   // OpenAI supplies a tool-name hint for tools/call. Only register that tool
@@ -1335,7 +1335,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
   );
 
   registerTool("learn_usage_report", {
-    description: "At the end of a task, report which private Learn memories from a specific learn_prepare receipt were genuinely applied. Call once per receipt. Empty appliedMemoryIds marks reviewed-but-unused, not failure. Only include verified evidence for applied memories when you have a real test/result/commit or explicit user confirmation; evidence is self-reported, not independently audited. Missing reports are unrated and never treated as failures.",
+    description: LEARN_USAGE_REPORT_INSTRUCTION + " Inputs: receiptId from learn_prepare, appliedMemoryIds containing only actually used prepared private IDs, and optional verified [{memoryId, evidenceRef}] for genuinely checked use. A submitted receipt is idempotent; an empty appliedMemoryIds still evaluates prepared private memories. Verified is evidence-referenced self-report, not an independent audit; missing reports are not negative outcomes.",
     inputSchema: {
       receiptId: z.string().uuid(),
       appliedMemoryIds: z.array(z.string().regex(/^mem_[a-f0-9]{64}$/)).max(32),

@@ -138,6 +138,8 @@ const sorted = sortVisible([
   { key: 'high', usage: { status: 'rated', score: 90 } },
   { key: 'mid', usage: { status: 'rated', score: 45 } },
 ], 'all', '', 'all', '', 'usage');
-assert.deepEqual(sorted.map((item) => item.key), ['high', 'mid', 'low', 'unrated', 'new']);f.db.close();
+assert.deepEqual(sorted.map((item) => item.key), ['high', 'mid', 'low', 'unrated', 'new']);
+
+f.db.close();
 another.db.close();
 console.log("PASS Learn usage receipts, score, isolation, idempotence and UI contract");

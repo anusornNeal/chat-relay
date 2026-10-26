@@ -579,6 +579,11 @@ if (!hintedCatalog.result?.tools?.some((item) => item.name === "ping_agent") ||
     !hintedCatalog.result?.tools?.some((item) => item.name === "list_agents")) {
   throw new Error("MCP tools/list catalog was pruned");
 }
+const learnUsageReportTool = hintedCatalog.result?.tools?.find((tool) => tool.name === "learn_usage_report");
+if (!learnUsageReportTool?.inputSchema?.properties?.receiptId ||
+    !learnUsageReportTool?.inputSchema?.properties?.appliedMemoryIds) {
+  throw new Error("MCP catalog is missing Learn usage reporting or its required schema");
+}
 console.log("MCP hinted tool registration and full discovery compatibility ok");
 
 const legacyTools = await mcpRpc(callerToken, 5, "tools/list", {}, true);

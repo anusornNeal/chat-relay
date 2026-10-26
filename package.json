@@ -62,7 +62,7 @@
         "test:tool-guidance": "node --test test/tool-error-guidance.test.mjs",
         "verify:review": "node scripts/verify-review-artifacts.mjs",
         "test:learn": "node test/learning-smoke.mjs && node test/project-alias-sqlite.test.mjs && node test/project-merge-mcp.test.mjs && node --test test/shared-learn.test.mjs test/shared-learn-ui.test.mjs && npm run test:learn-usage",
-        "test:learn-usage": "node test/learn-usage.test.mjs && node test/learn-usage-integration.test.mjs",
+        "test:learn-usage": "node test/learn-usage.test.mjs && node test/learn-usage-integration.test.mjs && node test/learn-usage-mcp.test.mjs",
         "test:learn-bootstrap": "node test/learning-bootstrap-smoke.mjs && node test/learning-thai-fixtures.mjs",
         "test:worker-hotpath": "node --experimental-strip-types --test test/relay-result.test.mjs"
     },

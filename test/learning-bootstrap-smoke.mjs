@@ -42,6 +42,7 @@ const {
   LEARN_BASELINE_POLICY,
   LEARN_BASELINE_CONTEXT,
   LEARN_WRITING_FORMAT,
+  LEARN_USAGE_REPORT_INSTRUCTION,
 } = mod;
 
 assert.equal(canonicalLearnProjectKey("flowly"), "flowly");
@@ -179,7 +180,8 @@ const agentRecords = [
 
   assert.match(worker, /"learn_prepare"/);
   assert.match(worker, /mode: "explicit-one-shot"/);
-  assert.match(worker, /Reuse this prepared context for the current task/);
+  assert.match(worker, /guidance: "Reuse this prepared context for the current task/);
+  assert.match(worker, /usageReceiptId \? LEARN_USAGE_REPORT_INSTRUCTION/, "prepared receipts must carry the task-completion rule");
   assert.match(worker, /Do not call learn_prepare before every tool/);
   assert.match(worker, /readLearnPrepareScopes\(env, user, \[globalScope\]\)/);
   assert.match(worker, /preferredAgentForContext\(records, projectKey\)/, "explicit project keys must still use project-scoped preferred-agent routing");
@@ -191,7 +193,7 @@ const agentRecords = [
   assert.match(worker, /automatically canonicalized\/compacted/);
 
   const policy = fs.readFileSync("src/learning-policy.ts", "utf8");
-  assert.match(policy, /LEARN_BASELINE_VERSION = 7/);
+  assert.match(policy, /LEARN_BASELINE_VERSION = 8/);
   assert.match(policy, /Call learn_prepare once/);
   assert.match(policy, /Ordinary Relay tools do not read or write Learn automatically/);
   assert.match(policy, /direct user correction or explicit enduring preference/);
@@ -200,9 +202,14 @@ const agentRecords = [
   assert.match(policy, /Do not learn one-off situational details/);
   assert.match(policy, /Keep project_context project-level and canonical/);
   assert.match(policy, /compacted into bounded canonical buckets/);
-  assert.equal(LEARN_BASELINE_VERSION, 7);
-  assert.equal(LEARN_BASELINE_POLICY.version, 7);
+  assert.equal(LEARN_BASELINE_VERSION, 8);
+  assert.equal(LEARN_BASELINE_POLICY.version, 8);
   assert.ok(LEARN_BASELINE_POLICY.rules.includes(LEARN_WRITING_FORMAT));
+  assert.ok(LEARN_BASELINE_POLICY.rules.includes(LEARN_USAGE_REPORT_INSTRUCTION));
+  assert.ok(LEARN_BASELINE_CONTEXT.includes(LEARN_USAGE_REPORT_INSTRUCTION));
+  assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /learn_usage_report exactly once/);
+  assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /Evaluates every prepared private memory/);
+  assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /If the receipt or reporting tool is unavailable/);
   assert.ok(LEARN_BASELINE_CONTEXT.includes(LEARN_WRITING_FORMAT), "tool descriptions must expose writing guidelines to all accounts");
   assert.match(LEARN_WRITING_FORMAT, /kebab-case key/);
   assert.match(LEARN_WRITING_FORMAT, /scannable Markdown/);

@@ -24,6 +24,34 @@ task with `learn_usage_report({receiptId, appliedMemoryIds, verified})`.
 Use only selected memory IDs from that preparation. Do not report raw logs or
 private credentials. A task may leave receipt unused if it was interrupted.
 
+## Task-completion reporting and troubleshooting
+
+1. Call `learn_prepare` once for a context-sensitive task, keeping the returned
+   `usageReceiptId` and the exact private memory IDs from `preparedContext`.
+2. Immediately before the final answer for a completed task, when a receipt
+   exists and the tool is available, call `learn_usage_report` **once**.
+   Use `appliedMemoryIds: []` if none of the prepared memories materially
+   influenced the task. Attach `verified: [{ memoryId, evidenceRef }]` only
+   for an applied memory with a real checkable test, result, commit, or explicit
+   user confirmation of that use. A normal retrieval is not an application.
+3. After a successful report all prepared private memories gain **Evaluated**,
+   only specified IDs gain **Applied**, and only evidence-backed applied IDs
+   gain **Verified**. A retry of the same receipt cannot count again.
+
+If the receipt is null, the work was interrupted, or the caller cannot see
+`learn_usage_report`, **do not guess, backfill, or use a different tool to
+simulate a report**. The memory remains `Unrated`. In the Dashboard,
+`Retrieved > 0` with `Evaluated = 0` means no completed report has been
+received, not that the memory was unused. Receipts expire after 24 hours.
+
+**Plugin tool sync:** The Worker registers both Learn tools, but clients can
+keep a stale MCP tool catalog until the connector is synced. After an
+authorized Worker deployment, refresh/sync the connector once and check that
+`tools/list` contains `learn_usage_report` with required `receiptId` and
+`appliedMemoryIds` fields. A successful local `npm run test:learn-usage`
+covers the MCP catalog and the complete prepare -> report -> profile counters
+path; it does not prove the user-facing ChatGPT tool catalog is refreshed.
+
 ## Score
 
 For evaluated memories:
