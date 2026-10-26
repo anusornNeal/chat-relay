@@ -10,6 +10,7 @@ const bundled = await build({
       'export * from "./src/project-identity";',
       'export * from "./src/learning-relevance";',
       'export * from "./src/learning-policy";',
+      'export * from "./src/learn-phase";',
     ].join("\n"),
     resolveDir: process.cwd(),
   },
@@ -38,6 +39,7 @@ const {
   buildLearnRelevanceContext,
   selectRelevantLearnRecords,
   buildRelevantLearnEnvelope,
+  resolveLearnPhase,
   LEARN_BASELINE_VERSION,
   LEARN_BASELINE_POLICY,
   LEARN_BASELINE_CONTEXT,
@@ -128,7 +130,41 @@ const agentRecords = [
   const longCanonical = memory("canonical-project", "project-context:architecture", "project_context", "project", "chat-relay", "x".repeat(2200), 100);
   const canonicalEnvelope = buildRelevantLearnEnvelope([longCanonical], [{ scope: "project", scopeKey: "chat-relay" }], ctx);
   assert.equal(canonicalEnvelope?.items[0].content.length, 2200);
-  console.log("PASS explicit one-shot relevance ranking and compaction");
+  console.log("PASS bounded relevance ranking and compaction");
+
+  {
+    // One chat starts reading a card and later switches to coding.
+    const scopes = [{ scope: "global" }, { scope: "project", scopeKey: "chat-relay" }];
+    const phaseRecords = [
+      memory("read-workflow", "ticket-reading", "workflow", "project", "chat-relay", "Read acceptance criteria"),
+      memory("read-context", "project-summary", "project_context", "project", "chat-relay", "Project architecture"),
+      memory("read-style", "concise-response", "response_style", "global", null, "Summarize clearly"),
+      memory("code-global", "maintainable-coding", "coding_style", "global", null, "SOLID Clean Architecture ".repeat(300)),
+    ];
+    const readCtx = buildLearnRelevanceContext("terminal_exec", { phase: "read" }, "chat-relay", null, "อ่านการ์ดก่อน");
+    const reading = buildRelevantLearnEnvelope(phaseRecords, scopes, readCtx, 8);
+    assert.equal(readCtx.phase, "read");
+    assert.ok(reading?.items.some((item) => item.kind === "workflow"));
+    assert.ok(reading?.items.every((item) => item.kind !== "coding_style"));
+
+    const loaded = new Set(reading.items.map((item) => item.id));
+    const codingCtx = buildLearnRelevanceContext("learn_prepare", { phase: "implement" }, "chat-relay", null, "ลงมือ implement และแก้โค้ด");
+    const coding = buildRelevantLearnEnvelope(phaseRecords.filter((record) => !loaded.has(record.id)), scopes, codingCtx, 1);
+    assert.equal(codingCtx.phase, "implement");
+    assert.equal(coding?.items[0].id, "code-global", "coding style must be reserved even at limit=1");
+    assert.equal(coding?.items[0].content.length, 3600);
+    for (const item of coding.items) loaded.add(item.id);
+    assert.equal(buildRelevantLearnEnvelope(phaseRecords.filter((record) => !loaded.has(record.id)), scopes, codingCtx), null);
+
+    assert.equal(resolveLearnPhase(undefined, "read Jira ticket"), "read");
+    assert.equal(resolveLearnPhase(undefined, "Implement the feature"), "implement");
+    assert.equal(resolveLearnPhase(undefined, "รีวิวโค้ดส่วนนี้"), "review");
+    assert.equal(resolveLearnPhase(undefined, "อ่านโค้ดเดิม"), "review");
+    assert.equal(resolveLearnPhase(undefined, "ทดสอบระบบ"), "test");
+    assert.equal(resolveLearnPhase(undefined, "วางแผนงาน"), "plan");
+    assert.equal(resolveLearnPhase("read", "Implement now"), "read");
+    console.log("PASS lazy read -> implement -> repeat, Thai and English phases");
+  }
 }
 
 {
@@ -179,10 +215,13 @@ const agentRecords = [
   assert.match(instrumentBlock, /!LEARN_ACTIVITY_TOOLS\.has/, "Learn tools must not recursively trigger the reminder");
 
   assert.match(worker, /"learn_prepare"/);
-  assert.match(worker, /mode: "explicit-one-shot"/);
-  assert.match(worker, /guidance: "Reuse this prepared context for the current task/);
+  assert.match(worker, /mode: args\.phase \|\| loadedIds\.size/);
+  assert.match(worker, /"explicit-one-shot"/);
+  assert.match(worker, /loadedMemoryIds: z\.array/);
+  assert.match(worker, /remainingRecords = deduped\.filter/);
+  assert.match(worker, /guidance: "Reuse all prior prepared context/);
   assert.match(worker, /usageReceiptId \? LEARN_USAGE_REPORT_INSTRUCTION/, "prepared receipts must carry the task-completion rule");
-  assert.match(worker, /Do not call learn_prepare before every tool/);
+  assert.match(worker, /Do not repeat for the same phase or before every tool/);
   assert.match(worker, /readLearnPrepareScopes\(env, user, \[globalScope\]\)/);
   assert.match(worker, /preferredAgentForContext\(records, projectKey\)/, "explicit project keys must still use project-scoped preferred-agent routing");
   assert.match(worker, /buildLearnRelevanceContext\([\s\S]*args\.query/);
@@ -193,8 +232,8 @@ const agentRecords = [
   assert.match(worker, /automatically canonicalized\/compacted/);
 
   const policy = fs.readFileSync("src/learning-policy.ts", "utf8");
-  assert.match(policy, /LEARN_BASELINE_VERSION = 8/);
-  assert.match(policy, /Call learn_prepare once/);
+  assert.match(policy, /LEARN_BASELINE_VERSION = 9/);
+  assert.match(policy, /call learn_prepare again/);
   assert.match(policy, /Ordinary Relay tools do not read or write Learn automatically/);
   assert.match(policy, /direct user correction or explicit enduring preference/);
   assert.match(policy, /do not wait for the user to explicitly say learn/);
@@ -202,11 +241,12 @@ const agentRecords = [
   assert.match(policy, /Do not learn one-off situational details/);
   assert.match(policy, /Keep project_context project-level and canonical/);
   assert.match(policy, /compacted into bounded canonical buckets/);
-  assert.equal(LEARN_BASELINE_VERSION, 8);
-  assert.equal(LEARN_BASELINE_POLICY.version, 8);
+  assert.equal(LEARN_BASELINE_VERSION, 9);
+  assert.equal(LEARN_BASELINE_POLICY.version, 9);
   assert.ok(LEARN_BASELINE_POLICY.rules.includes(LEARN_WRITING_FORMAT));
   assert.ok(LEARN_BASELINE_POLICY.rules.includes(LEARN_USAGE_REPORT_INSTRUCTION));
   assert.ok(LEARN_BASELINE_CONTEXT.includes(LEARN_USAGE_REPORT_INSTRUCTION));
+  assert.doesNotMatch(LEARN_BASELINE_CONTEXT, /Call learn_prepare once/, "baseline must not tell chat to skip new phases");
   assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /learn_usage_report exactly once/);
   assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /Evaluates every prepared private memory/);
   assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /If the receipt or reporting tool is unavailable/);
@@ -217,7 +257,7 @@ const agentRecords = [
   assert.match(LEARN_WRITING_FORMAT, /Preserve the existing.*source-key.*project_context/);
   assert.ok(LEARN_BASELINE_POLICY.rules.some((rule) => rule.includes("Verify learned paths")));
   assert.ok(LEARN_BASELINE_POLICY.rules.some((rule) => rule.includes("Never store tokens")));
-  console.log("PASS explicit Learn MCP architecture contract");
+  console.log("PASS lazy phase-aware Learn MCP architecture contract");
 }
 
 console.log("learning prepare/routing tests passed");

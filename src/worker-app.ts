@@ -16,6 +16,7 @@ import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
 import { canonicalLearnProjectKey } from "./project-identity";
 import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
+import type { LearnPhase } from "./learn-phase";
 import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT, LEARN_USAGE_REPORT_INSTRUCTION } from "./learning-policy";
 import { LearnPreflightGuard, attachLearnPrepareAdvisory, attachLearnReflectionAdvisory, isLearningCheckpointTool } from "./learn-preflight-guard.mjs";
 import { LearnGateCache, preflightIdentity, preflightScope, preflightPreparationScopes, isPreflightExempt, preflightRequired } from "./learn-preflight-gate.mjs";
@@ -114,6 +115,8 @@ async function proposeGroupMemory(env: Env, user: AuthUser, args: {
 
 type LearnPrepareArgs = {
   query: string;
+  phase?: LearnPhase;
+  loadedMemoryIds?: string[];
   toolHint?: string;
   projectKey?: string;
   agentId?: string;
@@ -208,11 +211,13 @@ async function prepareLearnContext(
     agentId,
     args.query,
   );
+  const loadedIds = new Set(args.loadedMemoryIds ?? []);
+  const remainingRecords = deduped.filter((record) => !loadedIds.has(record.id));
   const preparedContext = buildRelevantLearnEnvelope(
-    deduped,
+    remainingRecords,
     activeScopes,
     relevance,
-    args.limit ?? 16,
+    args.limit ?? (relevance.phase === "general" ? 16 : 10),
   ) ?? {
     version: 1 as const,
     authority: "advisory" as const,
@@ -235,7 +240,9 @@ async function prepareLearnContext(
   return {
     ok: true,
     body: JSON.stringify({
-      mode: "explicit-one-shot",
+      mode: args.phase || loadedIds.size ? "lazy-phase" : "explicit-one-shot",
+      phase: relevance.phase,
+      retrieval: loadedIds.size ? "incremental" : "initial",
       preparedContext,
       usageReceiptId,
       routingContext: {
@@ -244,7 +251,7 @@ async function prepareLearnContext(
         agentId,
         agentSource: agentId ? (explicitAgentId ? "explicit" : preferredAgent?.source ?? "preferred") : null,
       },
-      guidance: "Reuse this prepared context for the current task. Do not call learn_prepare before every tool. " + (usageReceiptId ? LEARN_USAGE_REPORT_INSTRUCTION : "No private Learn usage receipt was issued. Do not call learn_usage_report for this preparation."),
+      guidance: "Reuse all prior prepared context. If the task phase materially changes (e.g. read card to implement, review, or test), call learn_prepare again with the new goal, phase and loadedMemoryIds from prior envelopes. Do not repeat for the same phase or before every tool. " + (usageReceiptId ? LEARN_USAGE_REPORT_INSTRUCTION : "No private Learn usage receipt was issued. Do not call learn_usage_report for this preparation."),
     }),
   };
 }
@@ -1310,9 +1317,11 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
   registerTool(
     "learn_prepare",
     {
-      description: LEARN_BASELINE_CONTEXT + " Prepare relevant learned context once when prior user/project/agent context may materially affect decisions, including on fresh accounts. Reads memory context and records bounded retrieval usage; reuse the result for the task, not before every tool.",
+      description: LEARN_BASELINE_CONTEXT + " Lazy phase-aware Learn: call at initial context-sensitive work, then again ONLY when the intent materially changes (for example reading a card to implementing code). Specify phase if known; supply loadedMemoryIds from earlier preparedContext.items to return only new memories. Keep previous context and report each usage receipt once; never call on every tool. Fresh accounts work too.",
       inputSchema: {
         query: z.string().min(1).max(1200),
+        phase: z.enum(["general", "read", "plan", "implement", "review", "test"]).optional(),
+        loadedMemoryIds: z.array(z.string().min(1).max(128)).max(64).optional(),
         toolHint: z.string().min(1).max(80).optional(),
         projectKey: z.string().min(1).max(200).optional(),
         agentId: agentIdSchema,
@@ -1351,7 +1360,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
     return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
   }));
 
-  registerTool("learn_get", { description: "Read raw learned memories for targeted inspection or deduplication. Prefer learn_prepare once for task-level context; do not call learn_get automatically before ordinary MCP tools.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
+  registerTool("learn_get", { description: "Read raw learned memories for targeted inspection or deduplication. Prefer lazy learn_prepare when task phase changes; do not call learn_get automatically before ordinary MCP tools.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));
 
   // Shared project Learn is opt-in and approval-gated. These tools never

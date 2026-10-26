@@ -2,7 +2,7 @@ const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 1024;
 export const LEARN_PREPARE_ADVISORY = Object.freeze({
   code: "learn_prepare_recommended",
-  message: "Relay Learn works on fresh, empty accounts. Before context-sensitive work, consider learn_prepare ONCE if previous user/project/agent context may help (an empty account may return no memories). When the user corrects a reusable mistake or defines a lasting preference/workflow, proactively use learn_put to save their FIRST memory without being asked. Skip one-off details and secrets; never call Learn on every tool.",
+  message: "Relay Learn works on fresh, empty accounts. Before context-sensitive work, call learn_prepare when prior context can help; if the same chat later changes phase (read ticket to implement/review/test), prepare again with loadedMemoryIds so missing kinds such as coding_style can load. Never prepare for each ordinary tool. When the user corrects a reusable mistake or defines a lasting preference/workflow, proactively use learn_put to save their FIRST memory without being asked. Skip one-off details and secrets; never call Learn on every tool.",
 });
 function boundedPositiveInt(value, fallback, min, max) {
   const numeric = Number(value);

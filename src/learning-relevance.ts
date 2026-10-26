@@ -1,6 +1,7 @@
 import type { LearnKind, LearnRecord, LearnScope } from "./learning";
 import { extractRoutingSignals } from "./context-routing";
 import { usageRoutingAdjustment } from "./learn-usage";
+import { resolveLearnPhase, type LearnPhase } from "./learn-phase";
 
 export type LearnScopeSelector = {
   scope: LearnScope;
@@ -25,6 +26,7 @@ const DEFAULT_TOP_K = 16;
 const MAX_CONTENT_CHARS = 12_000;
 const MAX_ITEM_CONTENT_CHARS = 1_200;
 const MAX_CANONICAL_PROJECT_CONTEXT_CHARS = 2_400;
+const MAX_CODING_STYLE_CONTENT_CHARS = 3_600;
 
 const DEFAULT_KIND_PRIORITY: LearnKind[] = [
   "work_style",
@@ -78,6 +80,24 @@ function kindPriorityForTool(tool: string): LearnKind[] {
   return DEFAULT_KIND_PRIORITY;
 }
 
+function kindPriorityForPhase(phase: LearnPhase, tool: string): LearnKind[] {
+  switch (phase) {
+    case "read":
+      return ["workflow", "project_context", "tool_pattern", "agent_context", "problem_solving",
+        "preference", "work_style", "response_style", "correction", "coding_style"];
+    case "plan":
+      return ["workflow", "project_context", "coding_style", "problem_solving", "work_style",
+        "correction", "tool_pattern", "agent_context", "preference", "response_style"];
+    case "implement":
+    case "review":
+    case "test":
+      return ["coding_style", "workflow", "problem_solving", "project_context", "correction",
+        "tool_pattern", "agent_context", "work_style", "preference", "response_style"];
+    default:
+      return kindPriorityForTool(tool);
+  }
+}
+
 function tokenize(value: unknown, maxTokens = 40): string[] {
   const raw = String(value ?? "").toLowerCase();
   const tokens = raw
@@ -122,6 +142,7 @@ function jaccard(a: Set<string>, b: Set<string>) {
 }
 
 export type LearnRelevanceContext = {
+  phase: LearnPhase;
   tool: string;
   terms: string[];
   preferredKinds: LearnKind[];
@@ -136,6 +157,7 @@ export function buildLearnRelevanceContext(
   agentId?: string | null,
   query?: unknown,
 ): LearnRelevanceContext {
+  const phase = resolveLearnPhase((args as { phase?: LearnPhase } | null)?.phase, query, tool);
   const terms = new Set<string>(tokenize(tool, 12));
   for (const token of tokenize(query, 40)) terms.add(token);
   for (const signal of extractRoutingSignals(args, 12)) {
@@ -146,7 +168,8 @@ export function buildLearnRelevanceContext(
   return {
     tool,
     terms: [...terms].slice(0, 48),
-    preferredKinds: kindPriorityForTool(tool),
+    preferredKinds: kindPriorityForPhase(phase, tool),
+    phase,
     projectKey: projectKey || null,
     agentId: agentId || null,
   };
@@ -203,6 +226,8 @@ export function selectRelevantLearnRecords(
   // Capture time once so identical timestamps have stable ordering.
   const nowMs = Date.now();
   const ranked: RankedRecord[] = records
+    // Card reading does not pre-load coding rules that become relevant in implementation.
+    .filter((record) => ctx.phase !== "read" || record.kind !== "coding_style")
     .map((record) => ({ record, score: recordScore(record, ctx, nowMs), contentTokens: contentTokenSet(record) }))
     .sort((a, b) =>
       b.score - a.score ||
@@ -238,8 +263,15 @@ export function selectRelevantLearnRecords(
     if (key !== candidate.record.kind + "|") canonical.add(key);
   };
 
+  // Reserve a slot for coding standards when the same chat moves into code work.
+  if (ctx.phase === "implement" || ctx.phase === "review" || ctx.phase === "test") {
+    const codingStandard = ranked.find((candidate) => candidate.record.kind === "coding_style");
+    if (codingStandard && canAdd(codingStandard, true)) add(codingStandard);
+  }
+
   for (const candidate of ranked) {
     if (selected.length >= boundedLimit) break;
+    if (selected.some((item) => item.record.id === candidate.record.id)) continue;
     if (canAdd(candidate, true)) add(candidate);
   }
   for (const candidate of ranked) {
@@ -266,7 +298,9 @@ export function buildRelevantLearnEnvelope(
     if (chars >= MAX_CONTENT_CHARS) break;
     const itemLimit = record.kind === "project_context" && record.key.startsWith("project-context:")
       ? MAX_CANONICAL_PROJECT_CONTEXT_CHARS
-      : MAX_ITEM_CONTENT_CHARS;
+      : record.kind === "coding_style" && ["implement", "review", "test"].includes(ctx.phase)
+        ? MAX_CODING_STYLE_CONTENT_CHARS
+        : MAX_ITEM_CONTENT_CHARS;
     const content = String(record.content || "").slice(0, Math.min(itemLimit, MAX_CONTENT_CHARS - chars));
     if (!content) continue;
     chars += content.length;
