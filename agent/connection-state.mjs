@@ -29,7 +29,9 @@ export function classifySocketDisconnect(code, reason, socketError = null) {
   if (code === 4001 || reason === "credential_revoked" || reason === "credential_rejected") return "authorization";
   if (code === 4002 || reason === "protocol_incompatible") return "protocol";
   if (reason?.startsWith("unexpected_response_")) return "handshake";
-  if (["transport_pong_timeout", "heartbeat_ack_timeout"].includes(socketError)) return "timeout";
+  if (["transport_pong_timeout", "heartbeat_ack_timeout", "ETIMEDOUT"].includes(socketError)) return "timeout";
+  if (socketError === "ENOTFOUND") return "dns";
+  if (["ECONNRESET", "ECONNREFUSED", "EPIPE"].includes(socketError)) return "network";
   if (code === 1006) return "abnormal_transport";
   if (code === 1012 || reason === "restart_requested" || reason === "upgrade_requested") return "restart";
   if (code === 1000 || code === 1001) return "normal";
@@ -45,7 +47,7 @@ export function computeReconnectDelay(attempt, options = {}) {
   const raw = Math.min(maxMs, baseMs * (2 ** exponent));
   const spread = raw * jitterRatio;
   const sample = Math.min(Math.max(Number(random()) || 0, 0), 1);
-  return Math.max(100, Math.round(raw - spread + (spread * 2 * sample)));
+  return Math.min(maxMs, Math.max(100, Math.round(raw - spread + (spread * 2 * sample))));
 }
 
 export class AgentConnectionState {

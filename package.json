@@ -52,7 +52,7 @@
         "test:desktop": "node test/mcp-desktop-smoke.mjs",
         "test:device-management": "node test/device-management-smoke.mjs",
         "test:submission": "node test/submission-smoke.mjs",
-        "test:agent-state": "node --experimental-strip-types --test test/agent-state.test.mjs",
+        "test:agent-state": "node --experimental-strip-types --test test/agent-state.test.mjs test/reconnect-chaos.test.mjs",
         "test:tui": "node --test test/cli-tui.test.mjs",
         "test:config-security": "node --test test/config-security.test.mjs",
         "test:self-update": "node --test test/self-update.test.mjs test/agent-lifecycle-upgrade.test.mjs",
