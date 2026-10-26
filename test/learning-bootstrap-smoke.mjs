@@ -199,3 +199,16 @@ const agentRecords = [
 }
 
 console.log("learning prepare/routing tests passed");
+
+
+{
+  const relevant = memory("thai-relevant", "image-gallery", "problem_solving", "project", "buddy2",
+    "แก้ปัญหารูปภาพไม่แสดงในแกลเลอรีและซิงก์รูปภาพ", 90);
+  const unrelated = memory("thai-unrelated", "connection-status", "problem_solving", "project", "buddy2",
+    "ตรวจสอบสถานะการเชื่อมต่อเครือข่าย", 90);
+  const ctx = buildLearnRelevanceContext("learn_prepare", {}, "buddy2", null, "รูปภาพไม่แสดง");
+  const ranked = selectRelevantLearnRecords([unrelated, relevant], ctx, 2);
+  assert.equal(ranked[0].id, "thai-relevant",
+    "continuous Thai words should contribute to relevance ranking");
+  console.log("PASS bounded Thai substring ranking");
+}

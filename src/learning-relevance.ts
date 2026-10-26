@@ -85,7 +85,18 @@ function tokenize(value: unknown, maxTokens = 40): string[] {
     .split(/\s+/)
     .map((token) => token.trim())
     .filter((token) => token.length >= 2 && token.length <= 48);
-  return [...new Set(tokens)].slice(0, maxTokens);
+  const expanded: string[] = [];
+  for (const token of tokens) {
+    expanded.push(token);
+    // Thai words are not always separated by spaces. Bounded trigrams improve
+    // matching without an external tokenizer or another Durable Object read.
+    if (/[\u0e00-\u0e7f]/.test(token) && token.length >= 4) {
+      for (let index = 0; index <= token.length - 3 && expanded.length < maxTokens * 3; index++) {
+        expanded.push(token.slice(index, index + 3));
+      }
+    }
+  }
+  return [...new Set(expanded)].slice(0, maxTokens);
 }
 
 function contentTokenSet(record: LearnRecord) {
