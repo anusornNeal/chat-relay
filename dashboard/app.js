@@ -750,7 +750,7 @@ let learnScopeFilter = "all";
 let learnScopeKeyFilter = "";
 let learnSelectedMemoryId = null;
 let learnSearchQuery = "";
-let learnSortMode = "name";
+let learnSortMode = "usage";
 const learnTreeExpanded = { global: true, project: true, agent: true, shared: true };
 let learnLibraryScrollTop = 0;
 const learnScopedTreeExpanded = new Set();
@@ -857,6 +857,17 @@ function learnItemsForScope(items, scope, scopeKey = "") {
   );
 }
 
+function learnUsageLabel(item) {
+  const score = item?.usage?.score;
+  if (typeof score === "number" && Number.isFinite(score)) return score + "/100";
+  return item?.usage?.status === "unrated" ? "Unrated" : "New";
+}
+
+function learnUsageSortValue(item) {
+  const score = item?.usage?.score;
+  return typeof score === "number" && Number.isFinite(score) ? score : -1;
+}
+
 function learnVisibleItems(items) {
   let visible = learnItemsForScope(items, learnScopeFilter, learnScopeKeyFilter);
   if (learnKindFilter !== "all") visible = visible.filter((item) => item.kind === learnKindFilter);
@@ -871,8 +882,8 @@ function learnVisibleItems(items) {
     if (learnSortMode === "updated") {
       return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
     }
-    if (learnSortMode === "confidence") {
-      return Number(b.confidence || 0) - Number(a.confidence || 0) ||
+    if (learnSortMode === "usage") {
+      return learnUsageSortValue(b) - learnUsageSortValue(a) ||
         String(a.key || "").localeCompare(String(b.key || ""));
     }
     return String(a.key || "").localeCompare(String(b.key || ""));
@@ -1089,7 +1100,7 @@ function renderLearnProfile({ patch = false } = {}) {
     return '<button class="learn-folder-row' + active + '" type="button" data-learn-memory="' + esc(item.id) + '" data-live-key="learn-row-' + esc(item.id) + '">' +
       '<span class="learn-folder-file">' + icon("folder") + '</span>' +
       '<span class="learn-folder-copy"><strong>' + esc(item.key) + '</strong><small>' + esc(learnKindLabel(item.kind)) + '</small></span>' +
-      '<span class="learn-folder-confidence">' + esc(item.confidence) + '%</span>' +
+      '<span class="learn-folder-confidence">' + esc(learnUsageLabel(item)) + '</span>' +
       '<span class="learn-folder-updated">' + esc(bkkDateTime(item.updatedAt)) + '</span>' +
     '</button>';
   }).join("") : '<div class="learn-folder-empty">' + icon("search") + '<strong>No memories found</strong><span>Try another folder or search term.</span></div>';
@@ -1110,11 +1121,17 @@ function renderLearnProfile({ patch = false } = {}) {
       '<div class="learn-detail-rule"></div>' +
       '<div class="learn-detail-section"><label>Memory</label><div class="learn-markdown">' + renderLearnMarkdown(selected.content) + '</div></div>' +
       '<div class="learn-detail-meta">' +
-        '<div><span>Confidence</span><strong>' + esc(selected.confidence) + '%</strong></div>' +
+        '<div><span>Usage Score</span><strong>' + esc(learnUsageLabel(selected)) + '</strong></div>' +
         '<div><span>Updated</span><strong>' + esc(bkkDateTime(selected.updatedAt)) + '</strong></div>' +
         '<div><span>Scope</span><strong>' + esc(selected.scope === "global" ? "Global" : selected.scope.charAt(0).toUpperCase() + selected.scope.slice(1)) + '</strong></div>' +
         '<div><span>' + esc(selected.scope === "agent" ? "Agent" : selected.scope === "project" ? "Project" : "Level") + '</span><strong>' + esc(selected.scopeKey || "Global") + '</strong></div>' +
       '</div>' +
+      '<div class="learn-detail-section"><label>Usage (per task)</label><div class="learn-detail-usage">' +
+        '<div><span>Retrieved</span><strong>' + esc(Number(selected.usage?.retrieved || 0)) + '</strong></div>' +
+        '<div><span>Evaluated</span><strong>' + esc(Number(selected.usage?.evaluated || 0)) + '</strong></div>' +
+        '<div><span>Applied</span><strong>' + esc(Number(selected.usage?.applied || 0)) + '</strong></div>' +
+        '<div><span>Verified</span><strong>' + esc(Number(selected.usage?.verified || 0)) + '</strong></div>' +
+      '</div><p class="learn-detail-usage-hint">Usage Score uses evaluated tasks, not unreported retrievals. Verified is evidence-referenced agent reporting, not an independently audited result.</p></div>' +
       '<div class="learn-detail-rule"></div>' +
       '<div class="learn-detail-section"><label>Feedback</label><div class="learn-detail-feedback" role="radiogroup" aria-label="Feedback for ' + esc(selected.key) + '">' +
         '<label class="learn-detail-radio useful' + (positiveChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="positive" data-learn-feedback="positive" data-memory-id="' + esc(selected.id) + '"' + positiveChecked + '>' + icon("thumbUp") + '<span>Useful</span></label>' +
@@ -1141,10 +1158,10 @@ function renderLearnProfile({ patch = false } = {}) {
         '<div class="learn-folder-list-toolbar"><div class="learn-folder-sort">' +
           '<button class="' + (learnSortMode === "name" ? "active" : "") + '" type="button" data-learn-sort="name">Name</button>' +
           '<button class="' + (learnSortMode === "updated" ? "active" : "") + '" type="button" data-learn-sort="updated">Updated</button>' +
-          '<button class="' + (learnSortMode === "confidence" ? "active" : "") + '" type="button" data-learn-sort="confidence">Confidence</button>' +
+          '<button class="' + (learnSortMode === "usage" ? "active" : "") + '" type="button" data-learn-sort="usage">Usage Score</button>' +
         '</div><span>Folder view</span></div>' +
         '<div class="learn-folder-workspace">' +
-          '<div class="learn-folder-list"><div class="learn-folder-list-head"><span>Name</span><span>Confidence</span><span>Updated</span></div><div class="learn-folder-list-scroll">' + rowsHtml + '</div></div>' +
+          '<div class="learn-folder-list"><div class="learn-folder-list-head"><span>Name</span><span>Usage Score</span><span>Updated</span></div><div class="learn-folder-list-scroll">' + rowsHtml + '</div></div>' +
           '<aside class="learn-detail-pane">' + detailHtml + '</aside>' +
         '</div>' +
       '</div>' +

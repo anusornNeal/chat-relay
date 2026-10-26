@@ -221,18 +221,30 @@ async function prepareLearnContext(
     items: [],
   };
 
+  let usageReceiptId: string | null = null;
+  const privateIds = preparedContext.items.filter(item => !item.origin).map(item => item.id);
+  if (privateIds.length) {
+    // Exactly one additional Learning DO request per preparation, never per tool.
+    // Retrieval counters only include records actually delivered in the envelope.
+    try {
+      const receipt = await learningCall(env, user, "/usage/prepare", { memoryIds: privateIds });
+      if (receipt.ok) usageReceiptId = (JSON.parse(receipt.body) as { receiptId?: string }).receiptId || null;
+    } catch { /* Learn context still works if usage telemetry is unavailable. */ }
+  }
+
   return {
     ok: true,
     body: JSON.stringify({
       mode: "explicit-one-shot",
       preparedContext,
+      usageReceiptId,
       routingContext: {
         projectKey,
         projectSource: projectKey ? (requestedProjectKey !== projectKey ? "alias" : explicitProjectKey ? "explicit" : "project-root") : null,
         agentId,
         agentSource: agentId ? (explicitAgentId ? "explicit" : preferredAgent?.source ?? "preferred") : null,
       },
-      guidance: "Reuse this prepared context for the current task. Do not call learn_prepare before every tool.",
+      guidance: "Reuse this prepared context for the current task. Do not call learn_prepare before every tool. When the task ends, report actual Learn application once with learn_usage_report and this usageReceiptId; do not mark Retrieved as Applied or fabricate verification evidence.",
     }),
   };
 }
@@ -392,12 +404,13 @@ type LearningMutationPayload = {
   change?: LearnChange | null;
 };
 
-type LearnActivityTool = "learn_prepare" | "learn_get" | "learn_put" | "learn_delete" | "learn_feedback";
+type LearnActivityTool = "learn_prepare" | "learn_get" | "learn_put" | "learn_delete" | "learn_feedback" | "learn_usage_report";
 
 const LEARN_ACTIVITY_TOOLS = new Set<LearnActivityTool>([
   "learn_prepare",
   "learn_get",
   "learn_put",
+  "learn_usage_report",
   "learn_delete",
   "learn_feedback",
 ]);
@@ -1297,7 +1310,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
   registerTool(
     "learn_prepare",
     {
-      description: LEARN_BASELINE_CONTEXT + " Prepare relevant learned context once when prior user/project/agent context may materially affect decisions, including on fresh accounts. Read-only; reuse the result for the task, not before every tool.",
+      description: LEARN_BASELINE_CONTEXT + " Prepare relevant learned context once when prior user/project/agent context may materially affect decisions, including on fresh accounts. Reads memory context and records bounded retrieval usage; reuse the result for the task, not before every tool.",
       inputSchema: {
         query: z.string().min(1).max(1200),
         toolHint: z.string().min(1).max(80).optional(),
@@ -1307,7 +1320,7 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
         cwd: z.string().min(1).max(2048).optional(),
         limit: z.number().int().min(1).max(32).optional(),
       },
-      annotations: annotationsForTool("learn_prepare"),
+      annotations: annotationsForTool("learn_prepare", { readOnlyHint: false }),
       ...oauthToolSecurity(),
     } as any,
     async (args: LearnPrepareArgs) => instrumentTool(env, user, "learn_prepare", args, async () => {
@@ -1320,6 +1333,23 @@ function createMcpServer(env: Env, user: AuthUser, requestedTool?: string) {
       };
     }),
   );
+
+  registerTool("learn_usage_report", {
+    description: "At the end of a task, report which private Learn memories from a specific learn_prepare receipt were genuinely applied. Call once per receipt. Empty appliedMemoryIds marks reviewed-but-unused, not failure. Only include verified evidence for applied memories when you have a real test/result/commit or explicit user confirmation; evidence is self-reported, not independently audited. Missing reports are unrated and never treated as failures.",
+    inputSchema: {
+      receiptId: z.string().uuid(),
+      appliedMemoryIds: z.array(z.string().regex(/^mem_[a-f0-9]{64}$/)).max(32),
+      verified: z.array(z.object({
+        memoryId: z.string().regex(/^mem_[a-f0-9]{64}$/),
+        evidenceRef: z.string().min(8).max(200),
+      })).max(32).optional(),
+    },
+    annotations: annotationsForTool("learn_usage_report", { destructiveHint: false }),
+    ...oauthToolSecurity(),
+  } as any, async (args) => instrumentTool(env, user, "learn_usage_report", args, async () => {
+    const call = await learningCall(env, user, "/usage/report", args);
+    return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+  }));
 
   registerTool("learn_get", { description: "Read raw learned memories for targeted inspection or deduplication. Prefer learn_prepare once for task-level context; do not call learn_get automatically before ordinary MCP tools.", inputSchema: { scopes: z.array(learnScopeSchema).min(1).max(8), kind: learnKindSchema.optional(), limit: z.number().int().min(1).max(100).optional() }, annotations: annotationsForTool("learn_get"), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_get", args, async () => { const call = await learningCall(env, user, "/get", args); return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode }; }));

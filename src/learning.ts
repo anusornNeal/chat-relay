@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { canonicalLearnProjectKey } from "./project-identity";
 import { SharedLearnGroups } from "./shared-learn";
+import { calculateLearnUsage, type LearnUsage } from "./learn-usage";
+import { LearnUsageStore } from "./learn-usage-store";
 
 export type LearnScope = "global" | "project" | "agent";
 export type LearnKind =
@@ -26,6 +28,7 @@ export type LearnRecord = {
   content: string;
   confidence: number;
   positiveFeedback: number;
+  usage?: LearnUsage;
   negativeFeedback: number;
   origin?: "shared";
   groupId?: string;
@@ -131,6 +134,15 @@ function rowToRecord(row: any): LearnRecord {
     confidence: Number(row.confidence),
     positiveFeedback: Number(row.positive_feedback),
     negativeFeedback: Number(row.negative_feedback),
+    usage: calculateLearnUsage({
+      retrieved: Number(row.usage_retrieved || 0),
+      evaluated: Number(row.usage_evaluated || 0),
+      applied: Number(row.usage_applied || 0),
+      verified: Number(row.usage_verified || 0),
+      lastRetrievedAt: row.usage_last_retrieved || null,
+      lastAppliedAt: row.usage_last_applied || null,
+      lastVerifiedAt: row.usage_last_verified || null,
+    }),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -321,6 +333,7 @@ function mergeProjectContextContent(
 
 export class Learning extends DurableObject {
   private sharedGroups?: SharedLearnGroups;
+  private readonly usage: LearnUsageStore;
   private memoryCount: number | null = null;
 
   constructor(ctx: DurableObjectState, env: unknown) {
@@ -370,6 +383,9 @@ export class Learning extends DurableObject {
       token TEXT PRIMARY KEY, source_key TEXT NOT NULL, target_key TEXT NOT NULL,
       revision TEXT NOT NULL, expires_at INTEGER NOT NULL
     ) WITHOUT ROWID`);
+    this.usage = new LearnUsageStore(this.ctx.storage.sql,
+      this.ctx.storage.transactionSync?.bind(this.ctx.storage));
+    this.usage.initialize();
     this.migrateProjectKeys();
 
   }
@@ -417,12 +433,26 @@ export class Learning extends DurableObject {
     if (url.pathname === "/project-merge-preview" && request.method === "POST") return this.previewProjectMerge(request);
     if (url.pathname === "/project-merge-confirm" && request.method === "POST") return this.mergeProject(request, true);
     if (url.pathname === "/project-merge" && request.method === "POST") return this.mergeProject(request);
+    if (url.pathname === "/usage/prepare" && request.method === "POST") return this.usagePrepare(request);
+    if (url.pathname === "/usage/report" && request.method === "POST") return this.usageReport(request);
     if (url.pathname === "/get" && request.method === "POST") return this.get(request);
     if (url.pathname === "/profile" && request.method === "POST") return this.profile(request);
     if (url.pathname === "/put" && request.method === "POST") return this.put(request);
     if (url.pathname === "/delete" && request.method === "POST") return this.delete(request);
     if (url.pathname === "/feedback" && request.method === "POST") return this.feedback(request);
     return Response.json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async usagePrepare(request: Request) {
+    const body = await request.json<any>().catch(() => null);
+    const result = this.usage.createReceipt(body?.memoryIds);
+    return Response.json({ ok: true, ...result });
+  }
+
+  private async usageReport(request: Request) {
+    const body = await request.json<any>().catch(() => null);
+    const result = this.usage.report(body?.receiptId, body?.appliedMemoryIds, body?.verified);
+    return Response.json(result, { status: result.ok ? 200 : result.status });
   }
 
   // One bounded migration per account DO cold start, not per tool call.
@@ -717,6 +747,7 @@ export class Learning extends DurableObject {
         confidence: groupConfidence,
         positiveFeedback,
         negativeFeedback,
+        usage: canonicalExisting?.usage,
         createdAt,
         updatedAt: now,
       };
@@ -995,6 +1026,10 @@ export class Learning extends DurableObject {
       confidence,
       positiveFeedback: existing?.positiveFeedback ?? 0,
       negativeFeedback: existing?.negativeFeedback ?? 0,
+      usage: existing?.usage ?? calculateLearnUsage({
+        retrieved: 0, evaluated: 0, applied: 0, verified: 0,
+        lastRetrievedAt: null, lastAppliedAt: null, lastVerifiedAt: null,
+      }),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };

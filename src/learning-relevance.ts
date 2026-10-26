@@ -1,5 +1,6 @@
 import type { LearnKind, LearnRecord, LearnScope } from "./learning";
 import { extractRoutingSignals } from "./context-routing";
+import { usageRoutingAdjustment } from "./learn-usage";
 
 export type LearnScopeSelector = {
   scope: LearnScope;
@@ -154,6 +155,9 @@ export function buildLearnRelevanceContext(
 function recordScore(record: LearnRecord, ctx: LearnRelevanceContext) {
   let score = Math.max(0, Math.min(100, Number(record.confidence) || 0));
   if (record.origin === "shared") score += 55;
+  // Usage supports relevance only after enough evaluated reports; new memories
+  // keep equal access to retrieval and never start with a negative penalty.
+  score += usageRoutingAdjustment(record.usage);
   score += Math.min(24, Math.max(-24, (record.positiveFeedback || 0) * 5 - (record.negativeFeedback || 0) * 7));
 
   if (record.scope === "agent") {

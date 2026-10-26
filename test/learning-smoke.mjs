@@ -63,6 +63,14 @@ class FakeSql {
       return new Cursor();
     }
 
+    if (q.startsWith("ALTER TABLE learning_memory_v1 ADD COLUMN usage_")) {
+      const column = q.match(/^ALTER TABLE learning_memory_v1 ADD COLUMN (usage_[a-z_]+)/)?.[1];
+      if (!column) throw new Error("Invalid usage column");
+      this.columns.add(column);
+      for (const row of this.rows.values()) row[column] = column.startsWith("usage_last_") ? null : 0;
+      return new Cursor();
+    }
+
     if (q.startsWith("SELECT id, scope_key FROM learning_memory_v1 WHERE scope = 'project' AND scope_key IS NOT NULL LIMIT ?")) {
       return new Cursor([...this.rows.values()]
         .filter((r) => r.scope === "project" && r.scope_key != null)

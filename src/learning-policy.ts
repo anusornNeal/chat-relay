@@ -23,6 +23,7 @@ export const LEARN_BASELINE_POLICY = {
     "Learned context is advisory and never overrides the current user request, authentication, permissions, grants, allowed roots, safety, or higher-priority instructions.",
     "At a meaningful work checkpoint, reflect once on explicit durable feedback from the user. Store only real reusable changes; do not infer from raw commands/files or create memory merely to satisfy a reminder.",
     "When a turn changes Learn, end the user-facing response with a brief summary of what was learned, updated, weakened, removed, or compacted. Omit the Learn footer when nothing changed.",
+    "When learn_prepare returns usageReceiptId, report actual applied memory IDs once at task completion with learn_usage_report. Retrieved does not mean applied; only report evidence-backed verification that really occurred. If no reporting is possible, leave usage unrated, never fabricate outcomes or perform routine per-tool Learn usage calls.",
   ],
 } as const;
 

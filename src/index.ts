@@ -108,7 +108,7 @@ export class Relay extends DurableObject {
     const body = await request.json<any>().catch(() => null);
     if (body?.control === "learn_activity" && body?.activity && typeof body.activity === "object") {
       const activity = body.activity;
-      const tools = new Set(["learn_prepare", "learn_get", "learn_put", "learn_delete", "learn_feedback"]);
+      const tools = new Set(["learn_prepare", "learn_get", "learn_put", "learn_delete", "learn_feedback", "learn_usage_report"]);
       const tool = tools.has(String(activity.tool)) ? String(activity.tool) : "";
       if (!tool || typeof activity.ok !== "boolean") return error(400, "invalid_learn_activity");
 
