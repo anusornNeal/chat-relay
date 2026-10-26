@@ -629,7 +629,7 @@ export class Relay extends DurableObject {
   private failPending(status: number, code: string): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
-      pending.resolve(error(status, code));
+      pending.resolve(error(status, code, { executionStatus: "unknown", retrySafe: false }));
     }
     this.pending.clear();
   }
@@ -656,7 +656,7 @@ export class Relay extends DurableObject {
     return new Promise<Response>((resolve) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
-        resolve(error(504, "agent_timeout"));
+        resolve(error(504, "agent_timeout", { executionStatus: "unknown", retrySafe: false }));
       }, TIMEOUT_MS);
 
       const payload = (body as any).payload;
