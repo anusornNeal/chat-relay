@@ -568,7 +568,7 @@ test("mock-inspired TUI shows project and humanized title on separate activity l
   assert.equal(primary, header + 2, "activity starts just below the divider, not at terminal bottom");
   assert.match(lines[primary], /^\d{2}:\d{2}:\d{2} {2}✏️ SkillAdmin\.tsx/);
   assert.match(lines[primary], /12ms\s*$/);
-  assert.match(lines[primary + 1], /flowly · 📁/);
+  assert.match(lines[primary + 1], /^ {10}flowly$/);
   assert.match(frame, /1 operation/);
   assert.match(frame, /AGENT\s+SESSION\s+RECONNECTS/);
   assert.match(lines[primary + 2], /apps\/web\/src\/SkillAdmin\.tsx/);
@@ -620,7 +620,7 @@ test("successful and failed tool end preserve humanized text and project on TUI"
   tui.render();
   const text = writes.at(-1);
   assert.match(text, /Check command availability/);
-  assert.match(text, /chat-relay · 📟\n\s+Error: Command failed/);
+  assert.match(text, / {10}chat-relay\n\s+Error: Command failed/);
   assert.doesNotMatch(text, /Run Write-Output some raw command/);
   assert.equal(tui.transactions.at(-1).status, "done");
   tui.stop();
@@ -707,7 +707,7 @@ test("Learn activity displays the brain emoji with humanized text in wide and na
     assert.match(frame, /🧠 Load relevant Lea/, columns + "-column prefixed Learn emoji");
     assert.doesNotMatch(frame, /🧠 🧠/, "must not repeat the emoji");
     assert.ok(frame.split("\n").every((line) => terminalCellWidth(line) <= columns - 1));
-    if (columns === 120) assert.match(frame, /chat-relay · 🧠/);
+    if (columns === 120) assert.match(frame, /^ {10}chat-relay$/m);
     tui.stop();
   }
 });

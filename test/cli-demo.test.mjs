@@ -17,13 +17,13 @@ test("offline snapshot includes demo warning and varied project-aware activity",
   assert.match(content, /◈ DEMO/);
   assert.match(content, /◈ SAMPLE/);
   assert.match(content, /TIME\s+OPERATION\s+DURATION/);
-  assert.match(content, /flowly · 📁/);
-  assert.match(content, /chat-relay · 📟/);
-  assert.match(content, /Multiple projects · 📁/);
-  assert.match(content, /buddy-android · 📁/);
+  assert.match(content, /^ {10}flowly$/m);
+  assert.match(content, /^ {10}chat-relay$/m);
+  assert.match(content, /^ {10}Multiple projects$/m);
+  assert.match(content, /^ {10}buddy-android$/m);
   assert.match(content, /Review terminal batch results/);
   assert.match(content, /🧠 Load relevant Learn context/);
-  assert.match(content, /chat-relay · 🧠/);
+  assert.doesNotMatch(content, /(?:flowly|chat-relay|buddy-android|Multiple projects) · [📁📟🧠⚙️]/u);
   assert.match(content, /Error: Test failed/);
   assert.match(content, /running/);
   assert.match(content, /9 operations/);
@@ -146,7 +146,7 @@ test("styled demo uses muted project labels and hides transfer sizes", () => {
   assert.match(styled, /\x1b\[38;2;128;145;164mflowly\x1b\[0m/, "project should use subdued slate");
   assert.doesNotMatch(styled, /\x1b\[38;2;93;218;203mflowly\x1b\[0m/, "project should not use bright accent");
   const plain = styled.replace(/\x1b\[[0-9;]*m/g, "");
-  assert.match(plain, /flowly · 📁/);
+  assert.match(plain, /^ {10}flowly$/m);
   assert.doesNotMatch(plain, /↑\s*\d|↓\s*\d/, "transaction sizes must not clutter the display");
   assert.doesNotMatch(plain, /Q Quit/);
   assert.doesNotMatch(plain, /Ctrl\+C Exit|Offline preview/);

@@ -338,10 +338,6 @@ function activityIcon(item) {
   return "";
 }
 
-function activitySourceIcon(category) {
-  return { Filesystem: "📁", Terminal: "📟", Desktop: "🖥️", Learn: "🧠" }[category] || "⚙️";
-}
-
 function shortActivityDetail(value, project) {
   const normalized = String(value || "").replace(/\\/g, "/").replace(/\s+/g, " ").trim();
   if (!normalized) return "";
@@ -397,18 +393,10 @@ function activityRows(item, width, { color = false, twoLines = false } = {}) {
       : prefix + operation + ending;
   if (!twoLines) return [headline];
 
-  const category = activityCategory(item);
-  const secondary = " · " + activitySourceIcon(category);
-  // Keep request/response telemetry in transaction state but leave it out of
-  // the monitoring view, where it competes with operation and project context.
-  const textWidth = Math.max(1, limit - opStart);
-  const name = truncateCells(project, textWidth);
-  const rest = truncateCells(secondary, Math.max(0, textWidth - terminalCellWidth(name)));
+  // Display the project on its own line without duplicating the operation icon.
+  const name = truncateCells(project, Math.max(1, limit - opStart));
   const metadata = " ".repeat(opStart)
-    + (color
-      ? tint(name, item.ok === false ? MONITOR.bad : item.project ? MONITOR.muted : MONITOR.dim, true)
-        + tint(rest, item.ok === false ? MONITOR.bad : MONITOR.dim, true)
-      : name + rest);
+    + tint(name, item.ok === false ? MONITOR.bad : item.project ? MONITOR.muted : MONITOR.dim, color);
   const rows = [headline, metadata];
   const extra = item.error && item.ok === false ? "Error: " + shortActivityDetail(item.error, project)
     : shortActivityDetail(item.detail, project);
