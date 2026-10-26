@@ -130,7 +130,7 @@ export function renderDemoSnapshot({ width = 112, height = 30, now } = {}) {
   const fragments = [];
   const output = {
     isTTY: false,
-    columns: boundedDimension(width, 112, 1, 220),
+    columns: boundedDimension(width, 112, 1, 2048),
     rows: boundedDimension(height, 30, 1, 90),
     write: (value) => { fragments.push(String(value)); return true; },
   };

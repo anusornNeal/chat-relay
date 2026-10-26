@@ -33,7 +33,7 @@ test("offline snapshot includes demo warning and varied project-aware activity",
 });
 
 test("snapshot is bounded across tiny, compact and wide terminal sizes", () => {
-  for (const [width, height] of [[28, 7], [44, 12], [72, 18], [80, 24], [120, 30], [180, 36]]) {
+  for (const [width, height] of [[28, 7], [44, 12], [72, 18], [80, 24], [120, 30], [180, 36], [220, 36], [320, 36], [480, 50]]) {
     const screen = renderDemoSnapshot({ width, height, now: 1000 * 1000 * 1000 });
     const lines = screen.split("\n");
     assert.ok(lines.length <= height - 1, "rows overflowed at " + width + "x" + height);
@@ -148,5 +148,44 @@ test("styled demo uses muted project labels and hides transfer sizes", () => {
   assert.doesNotMatch(plain, /↑\s*\d|↓\s*\d/, "transaction sizes must not clutter the display");
   assert.doesNotMatch(plain, /Q Quit/);
   assert.match(plain, /Ctrl\+C Exit/);
+  tui.stop();
+});
+
+test("fullscreen snapshot fills available columns without a right-side blank strip", () => {
+  for (const columns of [180, 220, 320, 480]) {
+    const screen = renderDemoSnapshot({ width: columns, height: 36, now: Date.parse("2026-10-26T12:00:00Z") });
+    const lines = screen.split("\n");
+    const divider = lines.find((line) => line.startsWith("─"));
+    const header = lines.find((line) => line.includes("TIME") && line.includes("OPERATION") && line.includes("DURATION"));
+    assert.equal(terminalCellWidth(divider), columns - 1, "divider must reach the rightmost safe column");
+    assert.equal(terminalCellWidth(lines[0]), columns - 1, "DEMO indicator must align with the right edge");
+    assert.ok(header.indexOf("DURATION") >= columns - 12, "duration column should track viewport width");
+    assert.ok(lines.some((line) => line.endsWith("9 operations")), "activity counter should align right");
+    assert.ok(lines.at(-1).endsWith("◈ Offline preview"), "footer should align right");
+    assert.ok(lines.every((line) => terminalCellWidth(line) <= columns - 1));
+  }
+});
+
+test("resizing fullscreen TUI redraws across the entire new width", () => {
+  const writes = [];
+  const output = { isTTY: true, columns: 96, rows: 34, write: (value) => writes.push(String(value)) };
+  const tui = new RemoteTui({
+    config: buildDemoConfig(), version: "demo-test", demo: true, output,
+    input: { isTTY: false }, env: { NO_COLOR: "1" },
+  });
+  seedDemo(tui, { now: Date.parse("2026-10-26T12:00:00Z") });
+  tui.render();
+  assert.equal(tui.viewportMetrics().width, 95);
+  output.columns = 260;
+  tui.render();
+  assert.equal(tui.viewportMetrics().width, 259);
+  const enlarged = writes.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
+  assert.ok(enlarged.split("\n").some((line) => terminalCellWidth(line) === 259));
+  assert.match(enlarged, /Review Git status/);
+  output.columns = 76;
+  tui.render();
+  assert.equal(tui.viewportMetrics().width, 75);
+  const narrowed = writes.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
+  assert.ok(narrowed.split("\n").every((line) => terminalCellWidth(line) <= 75));
   tui.stop();
 });

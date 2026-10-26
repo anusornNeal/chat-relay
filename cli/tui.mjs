@@ -15,7 +15,8 @@ const STYLE = {
 const LABEL_WIDTH = 12;
 const GAP = 3;
 const MIN_FRAME_WIDTH = 60;
-const MAX_FRAME_WIDTH = 179;
+const MAX_FRAME_WIDTH = 179; // Legacy fixed-width formatter only.
+const MAX_TUI_VIEWPORT_WIDTH = 2048; // Full-width monitor, bounded for unusual terminals.
 const FRAME_BOTTOM_MARGIN = 1;
 
 function clamp(value, min, max) {
@@ -547,7 +548,8 @@ export class RemoteTui {
 
   viewportMetrics() {
     const columns = Math.max(1, Number(this.output.columns) || 110);
-    const width = Math.min(Math.max(1, columns - 1), MAX_FRAME_WIDTH);
+    // Fill the actual terminal width; reserve one cell to avoid line wrapping.
+    const width = Math.min(Math.max(1, columns - 1), MAX_TUI_VIEWPORT_WIDTH);
     const height = Math.max(1, Number(this.output.rows) || 30);
     const usableHeight = Math.max(1, height - FRAME_BOTTOM_MARGIN);
     let layout = width >= 88 && usableHeight >= 15 ? "wide"
