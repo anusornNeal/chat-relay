@@ -530,6 +530,7 @@ let securityRevisionCheckedAt = 0;
 let securityRevisionCheckPromise: Promise<void> | null = null;
 const usageRecordBudget = new DailyOptionalBudget();
 const USAGE_BATCH_MAX_EVENTS = 96;
+const USAGE_BUFFER_MAX_EVENTS = USAGE_BATCH_MAX_EVENTS * 4;
 const USAGE_BATCH_DELAY_MS = 3_000;
 const usageEventBuffer: UsageEvent[] = [];
 let usageFlushPromise: Promise<void> | null = null;
@@ -662,11 +663,11 @@ async function flushUsageEvents(env: Env) {
 
   while (usageEventBuffer.length) {
     const events = usageEventBuffer.splice(0, USAGE_BATCH_MAX_EVENTS);
-    const outcome = await deliverUsageBatch(events, (batch) =>
+    const outcome = await deliverUsageBatch(events, (batch, batchId) =>
       usageStub(env).fetch(new Request("https://usage.internal/record-batch", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ events: batch }),
+        body: JSON.stringify({ events: batch, batchId }),
       })),
     );
     if (!outcome.delivered) {
@@ -685,6 +686,12 @@ function recordUsage(
     const budget = usageRecordBudget.consume(env.USAGE_RECORD_DAILY_BUDGET);
     if (!budget.allowed) return;
 
+    if (usageEventBuffer.length >= USAGE_BUFFER_MAX_EVENTS) {
+      // Fail optional telemetry gracefully rather than growing unbounded memory.
+      usageDeliveryFailures++;
+      usageFlushWake?.();
+      return;
+    }
     usageEventBuffer.push(event);
     if (!usageFlushPromise) {
       const flush = flushUsageEvents(env).finally(() => {
@@ -2198,6 +2205,7 @@ export default {
           usageBatch: {
             pending: usageEventBuffer.length,
             maxEvents: USAGE_BATCH_MAX_EVENTS,
+            maxPendingEvents: USAGE_BUFFER_MAX_EVENTS,
             delayMs: USAGE_BATCH_DELAY_MS,
             failedEvents: usageDeliveryFailures,
             uncertainEvents: usageDeliveryUncertain,

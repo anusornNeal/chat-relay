@@ -1,72 +1,66 @@
-# Usage storage access
+# Usage storage and data accuracy
 
-Usage counting is intentionally minimal. The dashboard only needs tool-call counts grouped by account and agent for Today, 7 days, and 30 days.
+## Production write path
 
-## Current write path
+The Worker buffers optional Usage events (up to 384 queued events in one
+isolate, grouped into 96-event batches) and normally starts a flush within
+3 seconds. The queue is bounded: overflow increments a non-durable failure
+counter instead of allocating unbounded memory or blocking user tools.
 
-Each completed tool call sends only:
+Each batch POSTs `/record-batch` with `events[]` and one randomly generated
+UUID `batchId`. Same-agent/user/hour events are folded into one aggregate
+upsert per distinct bucket inside the Usage SQLite Durable Object. Current
+table: `usage_hourly_v3`. It stores counts plus per-tool call details,
+duration histogram and approximate p95 inputs; **no raw request history**.
 
-- `userId`
-- `agentId` (or the synthetic `__relay__` agent for relay-local calls)
-- completion `timestamp`
+Each newly accepted batch writes one short receipt to
+`usage_batch_receipts` atomically with the aggregate update. Duplicate
+`batchId` is accepted with `duplicate: true` without incrementing counts.
+A failed transaction rolls back the receipt so a retry can succeed.
+Legacy clients omitting `batchId` use the original non-deduplicated behavior.
 
-The Usage Durable Object stores that call with one SQLite upsert into `usage_hourly_v2`, keyed by `(hour_ms, user_id, agent_id)`.
+Transient explicit statuses (429/502/503/504) and ambiguous transport failures
+retry up to three total attempts with the **same** batch UUID and 150/300ms
+backoff. Permanent validation/auth failures are not retried. A batch can still
+be lost after all attempts fail; usage is deliberately best-effort and does
+not gate ordinary tools. The Worker `/health` response exposes isolate-scoped
+`usageBatch.pending`, `maxEvents`, `maxPendingEvents`, `delayMs`,
+`failedEvents`, and `uncertainEvents`.
 
-This replaces the previous minute + hour + day aggregate writes. Normal usage accounting is therefore one aggregate row write per tool call. Failed calls use the same counter path and do not create raw error-history rows.
+Receipt retention is seven days, with opportunistic bounded pruning (up to
+128 old receipts every 512 accepted batches). An ancient replay after
+expiration is not covered. This introduces **one SQL receipt row per batch**,
+not a new DO request or write per tool call; SQL row costs should be
+verified after deployment, not assumed from local tests.
+
+The non-SQL test/runtime fallback uses transactional KV receipts. Production
+runs the SQLite DO implementation. The optional dashboard publish budget is
+independent of quota enforcement; per-user usage quotas remain disabled.
 
 ## Query path
 
-`/window` is the only usage-count query used by the dashboard.
+The dashboard queries `/window` with server-side time, optional userId
+and optional agentId filters. `SUM(calls) GROUP BY user_id, agent_id` produces
+already-grouped totals; raw calls are never sent to the dashboard. Detail
+queries can return aggregate durations, approximate p95, infrastructure
+failure counts and tool summaries without exposing command contents.
 
-Filtering is performed in SQLite:
+Legacy `agg:v1:day` data is read in bounded batched operations, with hourly
+fallback for legacy overflow days, and no backfill writes. When a window falls
+entirely after SQL cutover the legacy reads are skipped. The Registry overview
+uses an in-memory state cache with mutation invalidation rather than polling
+persistent Registry rows for every dashboard refresh.
 
-- time range
-- optional `userId`
-- optional `agentId`
+The previous minute/hour/day triple-write and raw Tool Calls/Errors history
+are not part of this path. Removed legacy endpoints `/summary` and
+`/query` are not supported.
 
-The query groups with `SUM(calls) GROUP BY user_id, agent_id`. The dashboard receives already-grouped account/agent counts and does not filter raw usage rows in the browser.
+## Verification
 
-For pre-cutover data, the Usage Durable Object reads the old BKK daily `agg:v1:day:...` buckets in one batched storage read. If a legacy day was marked overflow, one additional batched hourly read is used for that day. Legacy reads never backfill or rewrite storage. Once a requested range is entirely after the SQL cutover day, the legacy read path is skipped.
-
-## Registry metadata
-
-Dashboard Overview performs one Usage query and one Registry state query. Registry state is cached in-memory for 30 seconds and invalidated by user/agent/grant mutations, avoiding repeated storage-list reads while the Durable Object is hot.
-
-## Removed paths
-
-The detailed usage/history system is intentionally gone:
-
-- raw successful/error event history
-- Tool Calls history
-- Errors history
-- usage SQL event index/backfill
-- minute/hour/day triple-write aggregation
-- rolling `/summary`
-- compatibility `/query`
-- usage raw-retention cleanup
-
-Run `npm run test:usage-storage` for storage/query access-pattern regression tests. Local tests validate code behavior and write-call counts; Cloudflare billing metrics remain the source of truth for deployed row accounting.
-
-## Current Worker batching and failure semantics
-
-The Worker buffers up to 96 usage events per batch and normally flushes after 3 seconds.
-The Usage DO collapses repeated events in the same account/agent/hour bucket
-into one SQL upsert for each distinct bucket within a batch.
-Each event still contributes to exact call counts if successfully delivered.
-
-Explicit transient HTTP errors (429/502/503/504) are retried up to three total
-attempts with bounded 150/300 ms backoff. Non-retryable HTTP errors do not replay.
-An exception while sending is *ambiguous*: the remote DO may have already
-committed the batch. Therefore, it is **not retried automatically**, to avoid
-silently double-counting calls. The Worker health response exposes cumulative
-`usageBatch.failedEvents` and `usageBatch.uncertainEvents` for the current
-isolate. These are diagnostics, not durable counters.
-
-This behavior is best-effort rather than exactly-once. A future durable
-idempotency key + receiver-side deduplication would be needed to provide
-reliable retries across uncertain acknowledgements. That design must first be
-measured for added Cloudflare SQL writes and DO CPU cost.
-
-The existing hourly aggregate supports optional detailed latency summaries and
-approximate p95 from histogram bins; raw commands, payloads and request history
-are not stored. Neither batch telemetry nor diagnostic counters enforce quotas.
+- `npm run test:usage-storage` tests counter accuracy, replay/UUID rejection,
+  receipt transaction behavior and bucket write counts.
+- `npm run test:budget` checks that optional telemetry does not reinstate
+  usage quota gates.
+- `npm run test:dashboard-timers` checks live dashboard timers and fallback.
+- Cloudflare production DO requests, SQL rows written/read, CPU and p95
+  should be measured only after explicitly authorized deployment.

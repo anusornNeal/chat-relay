@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { DashboardTopic } from "./dashboard-hub";
 import { UsageAggregates } from "./usage-aggregates";
 import { DailyOptionalBudget } from "./usage-budget.mjs";
+import { UsageBatchReceipts } from "./usage-batch-receipts.mjs";
 
 type UsageEnv = {
   DASHBOARD: DurableObjectNamespace;
@@ -81,6 +82,7 @@ function normalizeUsageEvent(body: any): { event?: UsageEvent; skipped?: true; e
 export class Usage extends DurableObject {
   private readonly usageEnv: UsageEnv;
   private readonly aggregates: UsageAggregates;
+  private readonly batchReceipts: UsageBatchReceipts;
   private readonly lastOverviewPublishAt = new Map<string, number>();
   private readonly dashboardPublishBudget = new DailyOptionalBudget();
 
@@ -88,6 +90,7 @@ export class Usage extends DurableObject {
     super(ctx, env);
     this.usageEnv = env;
     this.aggregates = new UsageAggregates(ctx.storage);
+    this.batchReceipts = new UsageBatchReceipts(ctx.storage);
   }
 
   private async publishOverviewForUsers(userIds: Iterable<string>) {
@@ -129,9 +132,15 @@ export class Usage extends DurableObject {
     }
 
     if (url.pathname === "/record-batch" && request.method === "POST") {
-      const body = await request.json<{ events?: UsageEvent[] }>().catch(() => null);
+      const body = await request.json<{ events?: UsageEvent[]; batchId?: string }>().catch(() => null);
       if (!Array.isArray(body?.events) || body.events.length === 0 || body.events.length > 256) {
         return Response.json({ error: "invalid_usage_batch" }, { status: 400 });
+      }
+
+      const batchId = body.batchId;
+      if (batchId !== undefined && (typeof batchId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(batchId))) {
+        return Response.json({ error: "invalid_usage_batch_id" }, { status: 400 });
       }
 
       const events: UsageEvent[] = [];
@@ -146,11 +155,18 @@ export class Usage extends DurableObject {
         events.push(normalized.event);
       }
 
-      if (events.length) {
-        await this.aggregates.recordBatch(events);
+      const receipt = await this.batchReceipts.record(batchId ?? null, async () => {
+        if (events.length) await this.aggregates.recordBatch(events);
+      });
+      if (!receipt.duplicate && events.length) {
         await this.publishOverviewForUsers(events.map((event) => event.userId));
       }
-      return Response.json({ ok: true, accepted: events.length, skipped });
+      return Response.json({
+        ok: true,
+        accepted: receipt.duplicate ? 0 : events.length,
+        skipped: receipt.duplicate ? 0 : skipped,
+        duplicate: receipt.duplicate,
+      });
     }
 
     if (url.pathname === "/window" && request.method === "GET") {

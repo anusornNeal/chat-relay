@@ -324,6 +324,8 @@ console.log("usage storage/query optimization tests passed");
 {
   const worker = fs.readFileSync("src/worker-app.ts", "utf8");
   assert.match(worker, /USAGE_BATCH_MAX_EVENTS = 96/);
+  assert.match(worker, /USAGE_BUFFER_MAX_EVENTS = USAGE_BATCH_MAX_EVENTS \* 4/);
+  assert.match(worker, /usageEventBuffer\.length >= USAGE_BUFFER_MAX_EVENTS/);
   assert.match(worker, /USAGE_BATCH_DELAY_MS = 3_000/);
   assert.match(worker, /record-batch/);
   assert.match(worker, /executionCtx\.waitUntil\(flush\)/);
@@ -333,4 +335,25 @@ console.log("usage storage/query optimization tests passed");
   assert.match(worker, /SECURITY_CACHE_TTL_MS = 30 \* 60_000/);
   assert.match(worker, /SECURITY_REVISION_POLL_MS = 30_000/);
   console.log("PASS Worker batches optional usage and bounds security revision polling");
+}
+
+
+{
+  const f = fixture();
+  const timestamp = "2026-10-04T08:01:00Z";
+  const batchId = "1b2079e5-8e83-4b63-952a-4122183d02c7";
+  const batch = { batchId, events: [event(timestamp)] };
+  const original = await f.call("/record-batch", batch);
+  const duplicate = await f.call("/record-batch", batch);
+  const invalid = await f.call("/record-batch", { ...batch, batchId: "invalid" });
+  assert.equal(original.status, 200);
+  assert.equal(original.accepted, 1);
+  assert.equal(original.duplicate, false);
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicate.accepted, 0);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(invalid.status, 400);
+  const window = await f.call("/window?from=2026-10-04T08:00:00Z&to=2026-10-04T08:59:59Z");
+  assert.equal(window.metric.calls, 1, "replayed batch must count once");
+  console.log("PASS batch receipt validates UUID and prevents duplicate aggregate increments");
 }
