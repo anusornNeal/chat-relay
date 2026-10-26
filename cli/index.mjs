@@ -1,4 +1,5 @@
 import { clearConfig, configPath, loadConfig, saveConfig } from "./config.mjs";
+import { runTuiDemo } from "./demo.mjs";
 import { login, needsRelayLogin, requestJson } from "./device-login.mjs";
 import { protocolCompatibility, remote, validateConfig } from "./remote.mjs";
 import { launchLatestRemote } from "./self-update.mjs";
@@ -15,6 +16,11 @@ function parseOptions(args) {
     else if (arg === "--no-desktop") options.desktopEnabled = false;
     else if (arg === "--plain") options.tuiEnabled = false;
     else if (arg === "--tui") options.tuiEnabled = true;
+    else if (arg === "--snapshot") options.snapshot = true;
+    else if (arg === "--width") options.width = args[++index];
+    else if (arg.startsWith("--width=")) options.width = arg.slice(8);
+    else if (arg === "--height") options.height = args[++index];
+    else if (arg.startsWith("--height=")) options.height = arg.slice(9);
     else if (arg === "--relay") options.relayUrl = args[++index];
     else if (arg.startsWith("--relay=")) options.relayUrl = arg.slice(8);
     else if (arg === "--root") options.allowedRoot = args[++index];
@@ -33,6 +39,7 @@ function help() {
 
 Usage:
   chat-relay remote [options]   Connect this computer to ChatGPT
+  chat-relay demo [options]     Preview the real TUI offline with sample activity
   chat-relay login [options]    Sign in and register this computer
   chat-relay status             Show account and connection status
   chat-relay drain              Stop accepting new long-running work
@@ -51,11 +58,15 @@ Options:
   --no-desktop                  Disable desktop access (default)
   --plain                       Use legacy line-by-line logs
   --tui                         Force interactive terminal UI
+  --snapshot                    Print demo as plain text and exit
+  --width <columns>             Demo snapshot width
+  --height <rows>               Demo snapshot height
   --no-open                     Do not open the browser automatically
   --force                       Force a new login
 
 Examples:
   npx @anusornneal/chat-relay@latest remote
+  node bin/chat-relay.js demo
   npx @anusornneal/chat-relay@latest login
   npx @anusornneal/chat-relay@latest status
 `);
@@ -237,6 +248,8 @@ export async function runCli(argv = process.argv.slice(2)) {
     help();
     return 0;
   }
+
+  if (command === "demo" || command === "preview") return runTuiDemo(options);
 
   if (command === "login") {
     const current = loadConfig();

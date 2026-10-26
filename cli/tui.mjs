@@ -446,15 +446,17 @@ function headingRow(width, color) {
   return tint(left + op + right, MONITOR.muted, color);
 }
 
-function monitorFooter(width, color, online) {
-  const hint = width >= 65 ? "↑↓ Scroll  ·  End Live  ·  Ctrl+C Exit" : "End Live  ·  Ctrl+C Exit";
-  const status = online ? "● Connected" : "○ Disconnected";
+function monitorFooter(width, color, online, demo = false) {
+  const hint = demo
+    ? width >= 65 ? "↑↓ Scroll  ·  End Live  ·  Q Quit" : "Q Quit  ·  Ctrl+C Exit"
+    : width >= 65 ? "↑↓ Scroll  ·  End Live  ·  Ctrl+C Exit" : "End Live  ·  Ctrl+C Exit";
+  const status = demo ? "◈ Offline preview" : online ? "● Connected" : "○ Disconnected";
   if (terminalCellWidth(hint) + terminalCellWidth(status) + 3 > width) {
     return tint(truncateCells(hint, width), MONITOR.dim, color);
   }
   return tint(hint, MONITOR.dim, color)
     + " ".repeat(width - terminalCellWidth(hint) - terminalCellWidth(status))
-    + tint(status, online ? MONITOR.accent : MONITOR.warning, color);
+    + tint(status, demo ? MONITOR.accent : online ? MONITOR.accent : MONITOR.warning, color);
 }
 
 export class RemoteTui {
@@ -465,6 +467,7 @@ export class RemoteTui {
     input = process.stdin,
     env = process.env,
     onInterrupt = () => process.emit("SIGINT"),
+    demo = false,
   }) {
     this.output = output;
     this.input = input;
@@ -484,6 +487,7 @@ export class RemoteTui {
     };
     this.version = version || "-";
     this.colorEnabled = shouldUseColor(output, env);
+    this.demoMode = demo === true;
     this.transactions = [];
     this.timer = null;
     this.closed = false;
@@ -775,8 +779,8 @@ export class RemoteTui {
       headingRows, footerRows, availableRows, twoLines } = this.viewportMetrics();
     const state = { ...this.state, uptimeMs: Date.now() - this.startedAt };
     const online = state.status === "connected" && relayIsOnline(state.relayHealth);
-    const health = online ? "● ONLINE" : state.status === "connected" ? "○ OFFLINE" : statusText(state.status);
-    const headline = "Chat Relay  v" + this.version;
+    const health = this.demoMode ? "◈ DEMO" : online ? "● ONLINE" : state.status === "connected" ? "○ OFFLINE" : statusText(state.status);
+    const headline = "Chat Relay  v" + this.version + (this.demoMode ? "  · PREVIEW" : "");
     const headlineRoom = width - terminalCellWidth(health) - 2;
     const title = headlineRoom >= 12
       ? tint(truncateCells(headline, headlineRoom), MONITOR.accent, this.colorEnabled)
@@ -790,7 +794,7 @@ export class RemoteTui {
     const end = Math.max(0, allRows.length - this.scrollOffset);
     const begin = Math.max(0, end - availableRows);
     const visible = allRows.slice(begin, end);
-    const badge = this.scrollOffset === 0 ? "● LIVE"
+    const badge = this.demoMode ? "◈ SAMPLE" : this.scrollOffset === 0 ? "● LIVE"
       : this.unseenTransactions ? "+" + this.unseenTransactions + " NEW" : "HISTORY";
     const left = "Activity  " + badge;
     const count = this.transactions.length + (this.transactions.length === 1 ? " operation" : " operations");
@@ -814,7 +818,7 @@ export class RemoteTui {
     }
     lines.push(...visible);
     while (lines.length < usableHeight - footerRows) lines.push("");
-    if (footerRows) lines.push(monitorFooter(width, this.colorEnabled, online));
+    if (footerRows) lines.push(monitorFooter(width, this.colorEnabled, online, this.demoMode));
     const screen = lines.slice(0, Math.max(1, usableHeight)).join("\n");
     if (screen !== this.previousFrame) {
       this.previousFrame = screen;
