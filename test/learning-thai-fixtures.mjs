@@ -43,4 +43,26 @@ for (const [query, best] of cases) {
   assert.deepEqual(selectRelevantLearnRecords(memories, ctx, 3).map((x) => x.id),
     ranked.map((x) => x.id), "ranking must be deterministic");
 }
-console.log("PASS Thai/English mixed Learn relevance fixtures (4 cases)");
+// A changing clock must not introduce arbitrary differences between equal-age records.
+const actualNow = Date.now;
+try {
+  let time = actualNow();
+  Date.now = () => (time += 3_600_000);
+  const tiedRecords = [
+    mem("zeta", "zeta-only", "red apples"),
+    mem("alpha", "alpha-only", "blue rocks"),
+    mem("beta", "beta-only", "gold leaves"),
+  ];
+  const ctx = buildLearnRelevanceContext("learn_prepare", {}, "buddy2", null, "unmatched query");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.deepEqual(
+      selectRelevantLearnRecords(tiedRecords, ctx, 3).map((record) => record.id),
+      ["alpha", "beta", "zeta"],
+      "equal-age records must use the stable ID tie-breaker",
+    );
+  }
+} finally {
+  Date.now = actualNow;
+}
+
+console.log("PASS Thai/English mixed Learn relevance fixtures (4 cases + clock stability)");

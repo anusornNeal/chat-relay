@@ -152,7 +152,7 @@ export function buildLearnRelevanceContext(
   };
 }
 
-function recordScore(record: LearnRecord, ctx: LearnRelevanceContext) {
+function recordScore(record: LearnRecord, ctx: LearnRelevanceContext, nowMs: number) {
   let score = Math.max(0, Math.min(100, Number(record.confidence) || 0));
   if (record.origin === "shared") score += 55;
   // Usage supports relevance only after enough evaluated reports; new memories
@@ -179,7 +179,7 @@ function recordScore(record: LearnRecord, ctx: LearnRelevanceContext) {
 
   const updatedMs = Date.parse(record.updatedAt);
   if (Number.isFinite(updatedMs)) {
-    const ageDays = Math.max(0, (Date.now() - updatedMs) / 86_400_000);
+    const ageDays = Math.max(0, (nowMs - updatedMs) / 86_400_000);
     score += Math.max(0, 10 - Math.min(10, ageDays / 14));
   }
 
@@ -200,8 +200,10 @@ export function selectRelevantLearnRecords(
   limit = DEFAULT_TOP_K,
 ): LearnRecord[] {
   const boundedLimit = Math.max(1, Math.min(32, Math.floor(limit) || DEFAULT_TOP_K));
+  // Capture time once so identical timestamps have stable ordering.
+  const nowMs = Date.now();
   const ranked: RankedRecord[] = records
-    .map((record) => ({ record, score: recordScore(record, ctx), contentTokens: contentTokenSet(record) }))
+    .map((record) => ({ record, score: recordScore(record, ctx, nowMs), contentTokens: contentTokenSet(record) }))
     .sort((a, b) =>
       b.score - a.score ||
       b.record.confidence - a.record.confidence ||
