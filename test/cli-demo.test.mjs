@@ -26,6 +26,8 @@ test("offline snapshot includes demo warning and varied project-aware activity",
   assert.match(content, /running/);
   assert.match(content, /9 operations/);
   assert.match(content, /Offline preview/);
+  assert.match(content, /Ctrl\+C Exit/);
+  assert.doesNotMatch(content, /Q Quit|↑\s*\d|↓\s*\d/);
   assert.doesNotMatch(content, /● ONLINE|● Connected|● LIVE/);
   assert.doesNotMatch(content, /\x1b\[/);
 });
@@ -51,12 +53,16 @@ test("sample events flow through the actual RemoteTui state machine", () => {
   });
   seedDemo(tui, { now: Date.parse("2026-10-26T12:00:00Z") });
   assert.equal(tui.transactions.length, 9);
+  // Transfer telemetry remains available to the agent but is not rendered.
+  assert.equal(tui.transactions[0].requestBytes, 6800);
+  assert.equal(tui.transactions[0].responseBytes, 330);
   assert.equal(tui.transactions.filter((item) => item.status === "running").length, 1);
   assert.equal(tui.transactions.filter((item) => item.ok === false).length, 1);
   assert.equal(tui.transactions.find((item) => item.operation === "Review terminal batch results")?.project, "flowly");
   assert.equal(tui.transactions.find((item) => item.project === "Multiple projects")?.category, "Filesystem");
   tui.render();
   assert.match(frames.at(-1), /SkillAdminOverview\.tsx/);
+  assert.doesNotMatch(frames.at(-1), /↑\s*\d|↓\s*\d/);
   tui.stop();
 });
 
@@ -88,7 +94,7 @@ test("non-TTY demo is a one-shot plain snapshot without fetching network data", 
   }
 });
 
-test("interactive demo supports scrolling and Q exit, restoring raw input and screen", async () => {
+test("interactive demo ignores Q and exits with Ctrl+C, restoring input and screen", async () => {
   class FakeInput extends EventEmitter {
     constructor() {
       super();
@@ -110,6 +116,11 @@ test("interactive demo supports scrolling and Q exit, restoring raw input and sc
   input.emit("data", Buffer.from("\x1b[A"));
   input.emit("data", Buffer.from("\x1b[F"));
   input.emit("data", Buffer.from("q"));
+  input.emit("data", Buffer.from("Q"));
+  assert.equal(input.isRaw, true, "Q must not quit the preview accidentally");
+  assert.equal(input.listenerCount("data"), 1);
+  assert.ok(!writes.some((chunk) => chunk.includes("\x1b[?1049l")));
+  input.emit("data", Buffer.from("\x03"));
   const result = await running;
   assert.equal(result, 0);
   assert.equal(input.isRaw, false);
@@ -118,4 +129,24 @@ test("interactive demo supports scrolling and Q exit, restoring raw input and sc
   assert.ok(writes.some((chunk) => chunk.includes("\x1b[?1049h")));
   assert.ok(writes.some((chunk) => chunk.includes("\x1b[?1049l")));
   assert.ok(writes.some((chunk) => chunk.includes("◈ DEMO")));
+});
+
+test("styled demo uses muted project labels and hides transfer sizes", () => {
+  const frames = [];
+  const tui = new RemoteTui({
+    config: buildDemoConfig(), demo: true, version: "demo-test",
+    output: { isTTY: true, columns: 120, rows: 30, write: (text) => frames.push(String(text)) },
+    input: { isTTY: false }, env: { TERM: "xterm-256color" },
+  });
+  seedDemo(tui, { now: Date.parse("2026-10-26T12:00:00Z") });
+  tui.render();
+  const styled = frames.at(-1);
+  assert.match(styled, /\x1b\[38;2;128;145;164mflowly\x1b\[0m/, "project should use subdued slate");
+  assert.doesNotMatch(styled, /\x1b\[38;2;93;218;203mflowly\x1b\[0m/, "project should not use bright accent");
+  const plain = styled.replace(/\x1b\[[0-9;]*m/g, "");
+  assert.match(plain, /flowly · Filesystem/);
+  assert.doesNotMatch(plain, /↑\s*\d|↓\s*\d/, "transaction sizes must not clutter the display");
+  assert.doesNotMatch(plain, /Q Quit/);
+  assert.match(plain, /Ctrl\+C Exit/);
+  tui.stop();
 });

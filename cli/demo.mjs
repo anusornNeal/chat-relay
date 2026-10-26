@@ -165,28 +165,21 @@ export async function runTuiDemo({
     function stop() {
       if (done) return;
       done = true;
-      input.removeListener?.("data", onKey);
       process.removeListener("SIGINT", stop);
       process.removeListener("SIGTERM", stop);
       tui?.stop();
       resolve(0);
-    }
-    function onKey(chunk) {
-      const value = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-      if (value.toLowerCase() === "q") stop();
     }
     try {
       tui = demoTui({ output, input, env, onInterrupt: stop });
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);
       tui.start();
-      input.on?.("data", onKey);
       seedDemo(tui);
       tui.render();
     } catch (error) {
       if (!done) {
         done = true;
-        input.removeListener?.("data", onKey);
         process.removeListener("SIGINT", stop);
         process.removeListener("SIGTERM", stop);
         tui?.stop();

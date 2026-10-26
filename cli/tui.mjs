@@ -339,13 +339,6 @@ function activityTitle(item) {
   return value;
 }
 
-function activityTraffic(item) {
-  return [
-    Number.isFinite(item.requestBytes) ? "↑ " + formatBytes(item.requestBytes) : null,
-    Number.isFinite(item.responseBytes) ? "↓ " + formatBytes(item.responseBytes) : null,
-  ].filter(Boolean).join("  ");
-}
-
 function activityRows(item, width, { color = false, twoLines = false } = {}) {
   const limit = Math.max(1, width);
   const project = String(item.project || "General");
@@ -356,9 +349,14 @@ function activityRows(item, width, { color = false, twoLines = false } = {}) {
   if (limit < 52) {
     if (limit <= 2) return [tint(truncateCells(symbol, limit), symbolColor, color)];
     const prefix = limit >= 37 ? time.slice(0, 5) + " " : "";
-    const body = truncateCells(project + " · " + title, limit - terminalCellWidth(prefix) - 2);
-    const plain = prefix + symbol + " " + body;
-    return [color ? tint(prefix, MONITOR.dim, true) + tint(symbol, symbolColor, true) + " " + tint(body, MONITOR.bright, true) : plain];
+    const bodyWidth = Math.max(0, limit - terminalCellWidth(prefix) - 2);
+    const projectText = truncateCells(project + " · ", bodyWidth);
+    const titleText = truncateCells(title, Math.max(0, bodyWidth - terminalCellWidth(projectText)));
+    const plain = prefix + symbol + " " + projectText + titleText;
+    return [color
+      ? tint(prefix, MONITOR.dim, true) + tint(symbol, symbolColor, true) + " "
+        + tint(projectText, MONITOR.muted, true) + tint(titleText, MONITOR.bright, true)
+      : plain];
   }
   const opStart = 13;
   const durationWidth = 10;
@@ -377,19 +375,16 @@ function activityRows(item, width, { color = false, twoLines = false } = {}) {
     ? " · Error: " + String(item.error).replace(/\s+/g, " ").slice(0, 70)
     : item.detail ? " · " + String(item.detail).replace(/\s+/g, " ").slice(0, 100) : "";
   const secondary = " · " + category + extra;
-  const traffic = activityTraffic(item);
-  const metaWidth = Math.max(1, limit - opStart);
-  const showTraffic = limit >= 106 && traffic && terminalCellWidth(traffic) + 7 < metaWidth;
-  const transfer = showTraffic ? "  " + traffic : "";
-  const textWidth = Math.max(1, metaWidth - terminalCellWidth(transfer));
+  // Keep request/response telemetry in transaction state but leave it out of
+  // the monitoring view, where it competes with operation and project context.
+  const textWidth = Math.max(1, limit - opStart);
   const name = truncateCells(project, textWidth);
   const rest = truncateCells(secondary, Math.max(0, textWidth - terminalCellWidth(name)));
   const metadata = " ".repeat(opStart)
     + (color
-      ? tint(name, item.project ? MONITOR.accent : MONITOR.dim, true) + tint(rest, item.ok === false ? MONITOR.bad : MONITOR.muted, true)
-      : name + rest)
-    + " ".repeat(Math.max(0, textWidth - terminalCellWidth(name) - terminalCellWidth(rest)))
-    + tint(transfer, MONITOR.dim, color);
+      ? tint(name, item.project ? MONITOR.muted : MONITOR.dim, true)
+        + tint(rest, item.ok === false ? MONITOR.bad : MONITOR.dim, true)
+      : name + rest);
   return [headline, metadata];
 }
 
@@ -447,9 +442,9 @@ function headingRow(width, color) {
 }
 
 function monitorFooter(width, color, online, demo = false) {
-  const hint = demo
-    ? width >= 65 ? "↑↓ Scroll  ·  End Live  ·  Q Quit" : "Q Quit  ·  Ctrl+C Exit"
-    : width >= 65 ? "↑↓ Scroll  ·  End Live  ·  Ctrl+C Exit" : "End Live  ·  Ctrl+C Exit";
+  const hint = width >= 65
+    ? "↑↓ Scroll  ·  End " + (demo ? "Newest" : "Live") + "  ·  Ctrl+C Exit"
+    : "Ctrl+C Exit";
   const status = demo ? "◈ Offline preview" : online ? "● Connected" : "○ Disconnected";
   if (terminalCellWidth(hint) + terminalCellWidth(status) + 3 > width) {
     return tint(truncateCells(hint, width), MONITOR.dim, color);
