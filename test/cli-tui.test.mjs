@@ -550,7 +550,7 @@ test("mock-inspired TUI shows project and humanized title on separate activity l
     at: "2026-10-26T04:40:00Z", action: "fs.write",
     summary: "Write apps/web/src/SkillAdmin.tsx · replace file · 11 KB",
     operation: "Write SkillAdmin.tsx", project: "flowly", category: "Filesystem",
-    detail: "apps/web/src/SkillAdmin.tsx", requestBytes: 1000,
+    detail: "C:\\Users\\tatar\\Projects\\flowly\\apps\\web\\src\\SkillAdmin.tsx", requestBytes: 1000,
   });
   tui.handleMessage({
     type: "chat-relay-ui", event: "tool:end", requestId: "demo-write",
@@ -561,14 +561,15 @@ test("mock-inspired TUI shows project and humanized title on separate activity l
   const frame = frames.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
   const lines = frame.split("\n");
   const header = lines.findIndex((line) => line.includes("TIME") && line.includes("OPERATION") && line.includes("DURATION"));
-  const primary = lines.findIndex((line) => line.includes("Write SkillAdmin.tsx"));
+  const primary = lines.findIndex((line) => line.includes("✏️ SkillAdmin.tsx"));
   assert.ok(header >= 0, "table headings should be visible");
   assert.equal(primary, header + 2, "activity starts just below the divider, not at terminal bottom");
   assert.match(lines[primary], /12ms\s*$/);
-  assert.match(lines[primary + 1], /flowly · Filesystem · apps\/web\/src\/SkillAdmin\.tsx/);
+  assert.match(lines[primary + 1], /flowly · 📁/);
   assert.match(frame, /1 operation/);
   assert.match(frame, /AGENT\s+SESSION\s+RECONNECTS/);
-  assert.match(frame, /● Connected/);
+  assert.match(lines[primary + 2], /apps\/web\/src\/SkillAdmin\.tsx/);
+  assert.doesNotMatch(frame, /Ctrl\+C Exit|● Connected|End Live/);
   assert.doesNotMatch(frame, /\x1b\[[0-9;]*m/, "NO_COLOR should omit styling");
   tui.stop();
 });
@@ -592,7 +593,7 @@ test("activity uses General for unknown project and prioritizes context in narro
   });
   tui.render();
   screen = logs.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
-  assert.match(screen, /flowly · Run integration/);
+  assert.match(screen, /flowly · 💻 Run integration/);
   tui.stop();
 });
 
@@ -616,7 +617,7 @@ test("successful and failed tool end preserve humanized text and project on TUI"
   tui.render();
   const text = writes.at(-1);
   assert.match(text, /Check command availability/);
-  assert.match(text, /chat-relay · Terminal · Error: Command failed/);
+  assert.match(text, /chat-relay · 💻\n\s+Error: Command failed/);
   assert.doesNotMatch(text, /Run Write-Output some raw command/);
   assert.equal(tui.transactions.at(-1).status, "done");
   tui.stop();
@@ -657,7 +658,7 @@ test("Learn activity displays the brain emoji with humanized text in wide and na
     assert.match(frame, /🧠 Load relevant Lea/, columns + "-column prefixed Learn emoji");
     assert.doesNotMatch(frame, /🧠 🧠/, "must not repeat the emoji");
     assert.ok(frame.split("\n").every((line) => terminalCellWidth(line) <= columns - 1));
-    if (columns === 120) assert.match(frame, /chat-relay · Learn/);
+    if (columns === 120) assert.match(frame, /chat-relay · 🧠/);
     tui.stop();
   }
 });

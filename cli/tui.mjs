@@ -332,13 +332,44 @@ function activityCategory(item) {
   return "Agent";
 }
 
+function activityIcon(item) {
+  const action = String(item.action || "").toLowerCase();
+  const title = String(item.operation || item.summary || "").toLowerCase();
+  if (/search/.test(action) || /^(start|search)\b/.test(title)) return "🔎";
+  if (/(^|\.)(read|readmany|getcontent)(_|$|\.)/.test(action) || /^read\b/.test(title)) return "📖";
+  if (/(^|\.)(write|edit|move|mkdir|delete)(_|$|\.)/.test(action) || /^(write|edit|create|delete|move)\b/.test(title)) return "✏️";
+  if (activityCategory(item) === "Terminal") return "💻";
+  if (activityCategory(item) === "Filesystem") return "📁";
+  return "";
+}
+
+function activitySourceIcon(category) {
+  return { Filesystem: "📁", Terminal: "💻", Desktop: "🖥️", Learn: "🧠" }[category] || "⚙️";
+}
+
+function shortActivityDetail(value, project) {
+  const normalized = String(value || "").replace(/\\/g, "/").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  const projectName = String(project || "").toLowerCase();
+  const rootMatch = normalized.match(/(?:[A-Za-z]:)?\/[^\s]*?\/Projects\/([^/\s]+)\//i);
+  if (rootMatch) {
+    const beginning = normalized.slice(0, rootMatch.index);
+    const tail = normalized.slice(rootMatch.index + rootMatch[0].length);
+    return beginning + (rootMatch[1].toLowerCase() === projectName ? "" : rootMatch[1] + "/") + tail;
+  }
+  return normalized.replace(/(?:[A-Za-z]:)?\/[^\s]*?\/Projects\//ig, "");
+}
+
 function activityTitle(item) {
   const value = String(item.operation || item.summary || item.action || "Tool call").replace(/\s+/g, " ").trim();
   if (!item.operation && /^Run (?:Write-Output|Get-Command|Get-Content|Set-Variable|Start-Process)\b/i.test(value)) {
     return "Execute terminal command";
   }
   // Preserve the familiar Learn marker even when an operation is humanized.
-  return activityCategory(item) === "Learn" && !value.startsWith("🧠") ? "🧠 " + value : value;
+  if (activityCategory(item) === "Learn") return value.startsWith("🧠") ? value : "🧠 " + value;
+  const icon = activityIcon(item);
+  const cleaned = value.replace(/^(?:Start Search|Search|Read|Write|Filesystem|Terminal)\b\s*/i, "").trim();
+  return icon ? icon + " " + (cleaned || value) : value;
 }
 
 function activityRows(item, width, { color = false, twoLines = false } = {}) {
@@ -373,10 +404,7 @@ function activityRows(item, width, { color = false, twoLines = false } = {}) {
   if (!twoLines) return [headline];
 
   const category = activityCategory(item);
-  const extra = item.error && item.ok === false
-    ? " · Error: " + String(item.error).replace(/\s+/g, " ").slice(0, 70)
-    : item.detail ? " · " + String(item.detail).replace(/\s+/g, " ").slice(0, 100) : "";
-  const secondary = " · " + category + extra;
+  const secondary = " · " + activitySourceIcon(category);
   // Keep request/response telemetry in transaction state but leave it out of
   // the monitoring view, where it competes with operation and project context.
   const textWidth = Math.max(1, limit - opStart);
@@ -387,7 +415,13 @@ function activityRows(item, width, { color = false, twoLines = false } = {}) {
       ? tint(name, item.project ? MONITOR.muted : MONITOR.dim, true)
         + tint(rest, item.ok === false ? MONITOR.bad : MONITOR.dim, true)
       : name + rest);
-  return [headline, metadata];
+  const rows = [headline, metadata];
+  const extra = item.error && item.ok === false ? "Error: " + shortActivityDetail(item.error, project)
+    : shortActivityDetail(item.detail, project);
+  if (extra) {
+    rows.push(" ".repeat(opStart) + tint(truncateCells(extra, Math.max(1, limit - opStart)), item.ok === false ? MONITOR.bad : MONITOR.dim, color));
+  }
+  return rows;
 }
 
 function monitorCapabilities(state, width, color) {
@@ -441,19 +475,6 @@ function headingRow(width, color) {
   const op = cellPad("OPERATION", Math.max(1, width - 23));
   const right = cellPad("DURATION", 10);
   return tint(left + op + right, MONITOR.muted, color);
-}
-
-function monitorFooter(width, color, online, demo = false) {
-  const hint = width >= 65
-    ? "↑↓ Scroll  ·  End " + (demo ? "Newest" : "Live") + "  ·  Ctrl+C Exit"
-    : "Ctrl+C Exit";
-  const status = demo ? "◈ Offline preview" : online ? "● Connected" : "○ Disconnected";
-  if (terminalCellWidth(hint) + terminalCellWidth(status) + 3 > width) {
-    return tint(truncateCells(hint, width), MONITOR.dim, color);
-  }
-  return tint(hint, MONITOR.dim, color)
-    + " ".repeat(width - terminalCellWidth(hint) - terminalCellWidth(status))
-    + tint(status, demo ? MONITOR.accent : online ? MONITOR.accent : MONITOR.warning, color);
 }
 
 export class RemoteTui {
@@ -559,7 +580,7 @@ export class RemoteTui {
     let summaryRows = layout === "wide" ? 4 : layout === "medium" ? 3 : 1;
     let dividerRows = usableHeight >= 6 ? 1 : 0;
     let headingRows = layout === "tiny" ? 0 : 2;
-    const footerRows = usableHeight >= 6 ? 1 : 0;
+    const footerRows = 0;
     let fixedRows = 1 + topLine + summaryRows + dividerRows + 1 + headingRows + footerRows;
     if (fixedRows >= usableHeight && layout !== "tiny") {
       layout = "tiny";
@@ -816,7 +837,7 @@ export class RemoteTui {
     }
     lines.push(...visible);
     while (lines.length < usableHeight - footerRows) lines.push("");
-    if (footerRows) lines.push(monitorFooter(width, this.colorEnabled, online, this.demoMode));
+
     const screen = lines.slice(0, Math.max(1, usableHeight)).join("\n");
     if (screen !== this.previousFrame) {
       this.previousFrame = screen;
