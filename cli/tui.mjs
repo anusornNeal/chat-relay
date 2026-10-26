@@ -49,7 +49,6 @@ function codePointCellWidth(codePoint) {
   if (
     codePoint >= 0x1100 && (
       codePoint <= 0x115f
-      || codePoint === 0x2328
       || codePoint === 0x2329
       || codePoint === 0x232a
       || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
@@ -339,13 +338,13 @@ function activityIcon(item) {
   if (/search/.test(action) || /^(start|search)\b/.test(title)) return "🔎";
   if (/(^|\.)(read|readmany|getcontent)(_|$|\.)/.test(action) || /^read\b/.test(title)) return "📖";
   if (/(^|\.)(write|edit|move|mkdir|delete)(_|$|\.)/.test(action) || /^(write|edit|create|delete|move)\b/.test(title)) return "✏️";
-  if (activityCategory(item) === "Terminal") return "⌨️";
+  if (activityCategory(item) === "Terminal") return "📟";
   if (activityCategory(item) === "Filesystem") return "📁";
   return "";
 }
 
 function activitySourceIcon(category) {
-  return { Filesystem: "📁", Terminal: "⌨️", Desktop: "🖥️", Learn: "🧠" }[category] || "⚙️";
+  return { Filesystem: "📁", Terminal: "📟", Desktop: "🖥️", Learn: "🧠" }[category] || "⚙️";
 }
 
 function shortActivityDetail(value, project) {

@@ -441,7 +441,7 @@ test("TUI compact layout respects tiny terminal rows and cell width", () => {
 test("terminalCellWidth treats relay emoji as wide glyphs", () => {
   assert.equal(terminalCellWidth("abc"), 3);
   assert.equal(terminalCellWidth("🚀"), 2);
-  assert.equal(terminalCellWidth("⌨️"), 2);
+  assert.equal(terminalCellWidth("📟"), 2);
   assert.equal(terminalCellWidth("📜 Transactions"), 15);
 });
 
@@ -594,7 +594,7 @@ test("activity uses General for unknown project and prioritizes context in narro
   });
   tui.render();
   screen = logs.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
-  assert.match(screen, /flowly · ⌨️ Run integration/);
+  assert.match(screen, /flowly · 📟 Run integration/);
   tui.stop();
 });
 
@@ -618,7 +618,7 @@ test("successful and failed tool end preserve humanized text and project on TUI"
   tui.render();
   const text = writes.at(-1);
   assert.match(text, /Check command availability/);
-  assert.match(text, /chat-relay · ⌨️\n\s+Error: Command failed/);
+  assert.match(text, /chat-relay · 📟\n\s+Error: Command failed/);
   assert.doesNotMatch(text, /Run Write-Output some raw command/);
   assert.equal(tui.transactions.at(-1).status, "done");
   tui.stop();
