@@ -203,7 +203,7 @@ test("tui redraw stays inside terminal bounds and uses alternate screen", () => 
   const lines = visible.split("\n");
   assert.ok(lines.length <= output.rows - 1);
   assert.ok(lines.every((line) => stripAnsi(line).length <= output.columns - 1));
-  assert.match(frame, /\x1b\[36m/);
+  assert.match(frame, /\x1b\[38;2;93;218;203m/);
 });
 
 test("TUI Learn indicator follows Worker capability instead of local config defaults", () => {
@@ -529,4 +529,100 @@ test("compact monitor adapts to viewport and preserves cell bounds", () => {
       tui.stop();
     }
   }
+});
+
+test("mock-inspired TUI shows project and humanized title on separate activity lines", () => {
+  const frames = [];
+  const output = { isTTY: true, columns: 120, rows: 28, write(value) { frames.push(String(value)); return true; } };
+  const tui = new RemoteTui({
+    config: {
+      agentName: "DESKTOP-5IQPSSC", allowedRoots: "C:\\Users\\tatar\\Projects",
+      relayUrl: "https://chat-relay.example.workers.dev",
+      terminalEnabled: true, desktopEnabled: true,
+    },
+    version: "1.3.3-test", output, input: { isTTY: false }, env: { NO_COLOR: "1" },
+  });
+  tui.start();
+  tui.setRelayHealth({ state: "reachable", code: 200, features: { learn: true } });
+  tui.handleMessage({ type: "chat-relay-ui", event: "connection", state: "connected" });
+  tui.handleMessage({
+    type: "chat-relay-ui", event: "tool:start", requestId: "demo-write",
+    at: "2026-10-26T04:40:00Z", action: "fs.write",
+    summary: "Write apps/web/src/SkillAdmin.tsx · replace file · 11 KB",
+    operation: "Write SkillAdmin.tsx", project: "flowly", category: "Filesystem",
+    detail: "apps/web/src/SkillAdmin.tsx", requestBytes: 1000,
+  });
+  tui.handleMessage({
+    type: "chat-relay-ui", event: "tool:end", requestId: "demo-write",
+    ok: true, durationMs: 12, responseBytes: 340,
+  });
+  tui.render();
+
+  const frame = frames.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
+  const lines = frame.split("\n");
+  const header = lines.findIndex((line) => line.includes("TIME") && line.includes("OPERATION") && line.includes("DURATION"));
+  const primary = lines.findIndex((line) => line.includes("Write SkillAdmin.tsx"));
+  assert.ok(header >= 0, "table headings should be visible");
+  assert.equal(primary, header + 2, "activity starts just below the divider, not at terminal bottom");
+  assert.match(lines[primary], /12ms\s*$/);
+  assert.match(lines[primary + 1], /flowly · Filesystem · apps\/web\/src\/SkillAdmin\.tsx/);
+  assert.match(frame, /1 operation/);
+  assert.match(frame, /AGENT\s+SESSION\s+RECONNECTS/);
+  assert.match(frame, /● Connected/);
+  assert.doesNotMatch(frame, /\x1b\[[0-9;]*m/, "NO_COLOR should omit styling");
+  tui.stop();
+});
+
+test("activity uses General for unknown project and prioritizes context in narrow view", () => {
+  const logs = [];
+  const output = { isTTY: false, columns: 40, rows: 11, write(v) { logs.push(String(v)); return true; } };
+  const tui = new RemoteTui({ config: { agentName: "DESKTOP", allowedRoots: "C:\\Projects" }, output, input: { isTTY: false } });
+  tui.start();
+  tui.handleMessage({
+    type: "chat-relay-ui", event: "tool:start", requestId: "generic",
+    action: "ping", operation: "Check agent connection", project: null, category: "Agent",
+  });
+  tui.render();
+  let screen = logs.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
+  assert.match(screen, /General · Check agent/);
+  assert.ok(screen.split("\n").every((line) => terminalCellWidth(line) <= 39));
+  tui.handleMessage({
+    type: "chat-relay-ui", event: "tool:start", requestId: "project",
+    action: "terminal.exec", operation: "Run integration tests", project: "flowly", category: "Terminal",
+  });
+  tui.render();
+  screen = logs.at(-1).replace(/^\x1b\[2J\x1b\[H/, "");
+  assert.match(screen, /flowly · Run integration/);
+  tui.stop();
+});
+
+test("successful and failed tool end preserve humanized text and project on TUI", () => {
+  const writes = [];
+  const tui = new RemoteTui({
+    config: { agentName: "DESKTOP" },
+    output: { isTTY: true, columns: 100, rows: 24, write(v) { writes.push(String(v)); } },
+    input: { isTTY: false }, env: { NO_COLOR: "1" },
+  });
+  tui.start();
+  tui.handleMessage({
+    type: "chat-relay-ui", event: "tool:start", requestId: "a",
+    action: "terminal.exec", summary: "Run Write-Output some raw command",
+    project: "chat-relay", operation: "Check command availability", category: "Terminal",
+  });
+  tui.handleMessage({
+    type: "chat-relay-ui", event: "tool:end", requestId: "a",
+    durationMs: 8, responseBytes: 100, ok: false, error: "Command failed with exit code 1",
+  });
+  tui.render();
+  const text = writes.at(-1);
+  assert.match(text, /Check command availability/);
+  assert.match(text, /chat-relay · Terminal · Error: Command failed/);
+  assert.doesNotMatch(text, /Run Write-Output some raw command/);
+  assert.equal(tui.transactions.at(-1).status, "done");
+  tui.stop();
+});
+
+test("Thai combining marks occupy no extra terminal cells", () => {
+  assert.equal(terminalCellWidth("ก่า"), 2);
+  assert.equal(terminalCellWidth("ภาษาไทย"), 7);
 });

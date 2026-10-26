@@ -14,6 +14,7 @@ import {
   summarizeAgentWork,
 } from "./lifecycle.mjs";
 import { humanizeToolCall } from "./toolcall-summary.mjs";
+import { describeToolActivity } from "./toolcall-context.mjs";
 import { toolErrorGuidance } from "./tool-error-guidance.mjs";
 import {
   HeartbeatAckWatchdog,
@@ -83,6 +84,16 @@ const desktop = new DesktopManager({
   controlQueueTimeoutMs: process.env.AGENT_QUEUE_TIMEOUT_MS,
 });
 const recentCalls = [];
+// Correlate asynchronous batch/session output with the project where work began.
+// Local only, bounded and never queried from the Worker.
+const recentToolProjects = new Map();
+function rememberToolProject(id, project) {
+  if (!id || !project) return;
+  const key = String(id);
+  recentToolProjects.delete(key);
+  recentToolProjects.set(key, project);
+  if (recentToolProjects.size > 96) recentToolProjects.delete(recentToolProjects.keys().next().value);
+}
 const RECENT_TIMING_KEYS = ["queueWaitMs", "inputMs", "explicitWaitMs", "settleMs", "captureMs", "encodeMs", "workerMs", "managerMs", "totalMs", "requestedActions", "executedActions"];
 function recentTiming(value) {
   if (!value || typeof value !== "object") return null;
@@ -518,8 +529,9 @@ function connect() {
       ? String(message.payload.action ?? "unknown")
       : "unknown";
     const callSummary = humanizeToolCall(message.payload);
+    const uiActivity = describeToolActivity(message.payload, files.getRoots(), recentToolProjects);
     const requestBytes = Buffer.byteLength(JSON.stringify(message), "utf8");
-    emitUi("tool:start", { requestId: message.requestId, action, summary: callSummary, requestBytes });
+    emitUi("tool:start", { requestId: message.requestId, action, summary: callSummary, ...uiActivity, requestBytes });
     let scheduleMeta = { lane: "unknown", queueWaitMs: 0, queueDepthAtStart: 0, activeAtStart: 0 };
     let handlerDurationMs = 0;
     try {
@@ -533,6 +545,12 @@ function connect() {
         }
       });
       const timing = recentTiming(result?.timing);
+      if (result?.ok !== false) {
+        if (action === "terminal.batch.start") rememberToolProject(result?.batchId, uiActivity.project);
+        if (action === "terminal.start" || action === "terminal.shell.start" || action === "fs.search.start") {
+          rememberToolProject(result?.sessionId, uiActivity.project);
+        }
+      }
       recentCalls.push({
         at: new Date().toISOString(),
         action,

@@ -40,6 +40,9 @@ function codePointCellWidth(codePoint) {
     || (codePoint >= 0x20d0 && codePoint <= 0x20ff)
     || (codePoint >= 0xfe20 && codePoint <= 0xfe2f)
     || codePoint === 0xfe0f
+    || codePoint === 0x0e31
+    || (codePoint >= 0x0e34 && codePoint <= 0x0e3a)
+    || (codePoint >= 0x0e47 && codePoint <= 0x0e4e)
     || codePoint === 0x200d
   ) return 0;
   if (
@@ -297,66 +300,161 @@ export function shouldUseColor(stdout = process.stdout, env = process.env) {
   return true;
 }
 
+const MONITOR = {
+  accent: "\x1b[38;2;93;218;203m",
+  bright: "\x1b[38;2;235;241;248m",
+  muted: "\x1b[38;2;128;145;164m",
+  dim: "\x1b[38;2;104;121;139m",
+  border: "\x1b[38;2;45;60;77m",
+  good: "\x1b[38;2;91;218;163m",
+  bad: "\x1b[38;2;247;114;114m",
+  warning: "\x1b[38;2;243;192;101m",
+  liveBg: "\x1b[48;2;20;62;55m",
+};
+
+function tint(value, style, enabled) {
+  return enabled ? paint(value, style) : value;
+}
+
 function cellPad(value, width) {
   const clipped = truncateCells(value, Math.max(0, width));
   return clipped + " ".repeat(Math.max(0, width - terminalCellWidth(clipped)));
 }
 
-function compactActivityRows(item, width, color = false) {
-  const limit = Math.max(1, width);
-  const isRunning = item.status === "running";
-  const symbol = isRunning ? "◌" : item.ok === false ? "×" : "✓";
-  const tint = isRunning ? STYLE.yellow : item.ok === false ? STYLE.red : STYLE.green;
-  const time = clock(item.at);
-  const duration = formatDuration(item.durationMs, item.status);
-  const text = String(item.summary || item.action || "Tool call").replace(/\s+/g, " ").trim();
-  const traffic = [
-    Number.isFinite(Number(item.requestBytes)) ? "↑" + formatBytes(item.requestBytes) : null,
-    Number.isFinite(Number(item.responseBytes)) ? "↓" + formatBytes(item.responseBytes) : null,
-  ].filter(Boolean).join(" ");
-  // Small viewports keep the operation visible instead of forcing telemetry columns.
-  if (limit < 43) {
-    const prefix = limit < 25 ? symbol + " " : time.slice(0, 5) + " " + symbol + " ";
-    const row = cellPad(prefix + text, limit);
-    return [color ? paint(symbol, tint) + row.slice(1) : row];
-  }
-  const durationWidth = Math.min(9, Math.max(5, terminalCellWidth(duration)));
-  const prefix = time + "  " + symbol + "  ";
-  const suffix = " " + cellPad(duration, durationWidth);
-  const trafficText = limit >= 106 && traffic ? "  " + traffic : "";
-  const bodyWidth = Math.max(1, limit - terminalCellWidth(prefix) - terminalCellWidth(suffix) - terminalCellWidth(trafficText));
-  const readable = truncateCells(text, bodyWidth);
-  const row = prefix + cellPad(readable, bodyWidth) + trafficText + suffix;
-  const first = color
-    ? paint(time, STYLE.gray) + "  " + paint(symbol, tint) + "  " + cellPad(readable, bodyWidth) + paint(trafficText + suffix, STYLE.gray)
-    : row;
-  return [first];
+function activityCategory(item) {
+  if (item.category) return String(item.category);
+  const action = String(item.action || "");
+  if (action.startsWith("fs.")) return "Filesystem";
+  if (action.startsWith("terminal.")) return "Terminal";
+  if (action.startsWith("desktop.")) return "Desktop";
+  if (action.startsWith("learn")) return "Learn";
+  return "Agent";
 }
 
-function compactSummary(state, width, rows, color) {
-  const online = String(state.status || "").toLowerCase() === "connected" && relayIsOnline(state.relayHealth);
-  const stateText = online ? "● ONLINE" : statusText(state.status).replace("WebSocket open", "CONNECTED");
-  const c = (text, style = STYLE.gray) => color ? paint(text, style) : text;
-  const capabilities = [
-    state.terminal ? "✓ Terminal" : "× Terminal",
-    state.desktop ? "✓ Desktop" : "× Desktop",
-    "Learn " + compactLearnStatus(state.learn),
-  ].join("   ");
-  const basic = [
-    "Agent  " + String(state.agent || "-"),
-    "Uptime " + formatUptime(state.uptimeMs) + "   Reconnects " + (state.reconnects ?? 0),
-    "Root   " + String(state.root || "-"),
-    capabilities,
-  ];
-  if (rows === 1) return [c(truncateCells(state.agent + " · " + stateText, width), online ? STYLE.green : STYLE.yellow)];
-  if (rows === 2) return [c(truncateCells(basic[0] + " · " + basic[1], width), STYLE.bold), c(truncateCells(capabilities, width))];
-  if (rows === 3) return [c(truncateCells(basic[0] + "   " + basic[1], width), STYLE.bold), c(truncateCells(basic[2], width)), c(truncateCells(capabilities, width))];
+function activityTitle(item) {
+  const value = String(item.operation || item.summary || item.action || "Tool call").replace(/\s+/g, " ").trim();
+  if (!item.operation && /^Run (?:Write-Output|Get-Command|Get-Content|Set-Variable|Start-Process)\b/i.test(value)) {
+    return "Execute terminal command";
+  }
+  return value;
+}
+
+function activityTraffic(item) {
   return [
-    c(truncateCells(basic[0] + "   " + basic[1], width), STYLE.bold),
-    c(truncateCells("Account " + state.account + "   Relay " + state.relay, width)),
-    c(truncateCells(basic[2], width)),
-    c(truncateCells(capabilities, width), STYLE.green),
+    Number.isFinite(item.requestBytes) ? "↑ " + formatBytes(item.requestBytes) : null,
+    Number.isFinite(item.responseBytes) ? "↓ " + formatBytes(item.responseBytes) : null,
+  ].filter(Boolean).join("  ");
+}
+
+function activityRows(item, width, { color = false, twoLines = false } = {}) {
+  const limit = Math.max(1, width);
+  const project = String(item.project || "General");
+  const title = activityTitle(item);
+  const symbol = item.status === "running" ? "◌" : item.ok === false ? "×" : "✓";
+  const symbolColor = item.status === "running" ? MONITOR.warning : item.ok === false ? MONITOR.bad : MONITOR.good;
+  const time = clock(item.at);
+  if (limit < 52) {
+    if (limit <= 2) return [tint(truncateCells(symbol, limit), symbolColor, color)];
+    const prefix = limit >= 37 ? time.slice(0, 5) + " " : "";
+    const body = truncateCells(project + " · " + title, limit - terminalCellWidth(prefix) - 2);
+    const plain = prefix + symbol + " " + body;
+    return [color ? tint(prefix, MONITOR.dim, true) + tint(symbol, symbolColor, true) + " " + tint(body, MONITOR.bright, true) : plain];
+  }
+  const opStart = 13;
+  const durationWidth = 10;
+  const operationWidth = Math.max(1, limit - opStart - durationWidth);
+  const duration = formatDuration(item.durationMs, item.status);
+  const operation = cellPad(title, operationWidth);
+  const prefix = cellPad(time, 8) + "  ";
+  const ending = cellPad(duration, durationWidth);
+  const headline = color
+    ? tint(prefix, MONITOR.dim, true) + tint(symbol, symbolColor, true) + "  " + tint(operation, MONITOR.bright, true) + tint(ending, MONITOR.dim, true)
+    : prefix + symbol + "  " + operation + ending;
+  if (!twoLines) return [headline];
+
+  const category = activityCategory(item);
+  const extra = item.error && item.ok === false
+    ? " · Error: " + String(item.error).replace(/\s+/g, " ").slice(0, 70)
+    : item.detail ? " · " + String(item.detail).replace(/\s+/g, " ").slice(0, 100) : "";
+  const secondary = " · " + category + extra;
+  const traffic = activityTraffic(item);
+  const metaWidth = Math.max(1, limit - opStart);
+  const showTraffic = limit >= 106 && traffic && terminalCellWidth(traffic) + 7 < metaWidth;
+  const transfer = showTraffic ? "  " + traffic : "";
+  const textWidth = Math.max(1, metaWidth - terminalCellWidth(transfer));
+  const name = truncateCells(project, textWidth);
+  const rest = truncateCells(secondary, Math.max(0, textWidth - terminalCellWidth(name)));
+  const metadata = " ".repeat(opStart)
+    + (color
+      ? tint(name, item.project ? MONITOR.accent : MONITOR.dim, true) + tint(rest, item.ok === false ? MONITOR.bad : MONITOR.muted, true)
+      : name + rest)
+    + " ".repeat(Math.max(0, textWidth - terminalCellWidth(name) - terminalCellWidth(rest)))
+    + tint(transfer, MONITOR.dim, color);
+  return [headline, metadata];
+}
+
+function monitorCapabilities(state, width, color) {
+  const parts = [
+    { text: (state.terminal ? "✓" : "×") + " Terminal", color: state.terminal ? MONITOR.good : MONITOR.dim },
+    { text: (state.desktop ? "✓" : "×") + " Desktop", color: state.desktop ? MONITOR.good : MONITOR.dim },
+    { text: (state.learn === null ? "◌" : state.learn ? "✓" : "×") + " Learn",
+      color: state.learn === null ? MONITOR.warning : state.learn ? MONITOR.good : MONITOR.dim },
   ];
+  const plain = parts.map((part) => part.text).join("    ");
+  if (terminalCellWidth(plain) > width) return tint(truncateCells(plain, width), MONITOR.muted, color);
+  return parts.map((part) => tint(part.text, part.color, color)).join("    ");
+}
+
+function monitoringSummary(state, width, layout, color) {
+  if (layout === "tiny") {
+    return [tint(truncateCells((state.agent || "Agent") + " · " + formatUptime(state.uptimeMs), width), MONITOR.muted, color)];
+  }
+  if (layout === "medium") {
+    const line = "Agent  " + String(state.agent || "-") + "    Session  " + formatUptime(state.uptimeMs)
+      + "    Reconnects  " + (state.reconnects ?? 0);
+    return [
+      tint(truncateCells(line, width), MONITOR.bright, color),
+      tint(truncateCells("Root  " + String(state.root || "-"), width), MONITOR.muted, color),
+      monitorCapabilities(state, width, color),
+    ];
+  }
+  const w1 = Math.floor(width * 0.49);
+  const w2 = Math.floor(width * 0.29);
+  const w3 = width - w1 - w2;
+  const headings = [
+    tint(cellPad("AGENT", w1), MONITOR.muted, color),
+    tint(cellPad("SESSION", w2), MONITOR.muted, color),
+    tint(cellPad("RECONNECTS", w3), MONITOR.muted, color),
+  ].join("");
+  const stats = [
+    tint(cellPad(state.agent || "-", w1), MONITOR.bright, color),
+    tint(cellPad(formatUptime(state.uptimeMs), w2), MONITOR.bright, color),
+    tint(cellPad(String(state.reconnects ?? 0), w3), state.reconnects > 0 ? MONITOR.warning : MONITOR.bright, color),
+  ].join("");
+  return [
+    headings,
+    stats,
+    tint(truncateCells("Root  " + String(state.root || "-"), width), MONITOR.muted, color),
+    monitorCapabilities(state, width, color),
+  ];
+}
+
+function headingRow(width, color) {
+  const left = cellPad("TIME", 13);
+  const op = cellPad("OPERATION", Math.max(1, width - 23));
+  const right = cellPad("DURATION", 10);
+  return tint(left + op + right, MONITOR.muted, color);
+}
+
+function monitorFooter(width, color, online) {
+  const hint = width >= 65 ? "↑↓ Scroll  ·  End Live  ·  Ctrl+C Exit" : "End Live  ·  Ctrl+C Exit";
+  const status = online ? "● Connected" : "○ Disconnected";
+  if (terminalCellWidth(hint) + terminalCellWidth(status) + 3 > width) {
+    return tint(truncateCells(hint, width), MONITOR.dim, color);
+  }
+  return tint(hint, MONITOR.dim, color)
+    + " ".repeat(width - terminalCellWidth(hint) - terminalCellWidth(status))
+    + tint(status, online ? MONITOR.accent : MONITOR.warning, color);
 }
 
 export class RemoteTui {
@@ -449,23 +547,39 @@ export class RemoteTui {
   }
 
   viewportMetrics() {
-    const terminalWidth = Number(this.output.columns) || 110;
-    const width = clamp(terminalWidth - 1, Math.min(MIN_FRAME_WIDTH, Math.max(1, terminalWidth - 1)), MAX_FRAME_WIDTH);
+    const columns = Math.max(1, Number(this.output.columns) || 110);
+    const width = Math.min(Math.max(1, columns - 1), MAX_FRAME_WIDTH);
     const height = Math.max(1, Number(this.output.rows) || 30);
-    const compact = height < 12 || width < 48;
-    const headerRows = height < 9 ? 1 : compact ? 2 : width < 86 ? 3 : 4;
-    const fixedRows = 1 + headerRows + 2 + (height >= 14 ? 1 : 0);
-    const availableRows = Math.max(1, height - fixedRows - FRAME_BOTTOM_MARGIN);
-    return { width, height, availableRows, compact, headerRows };
+    const usableHeight = Math.max(1, height - FRAME_BOTTOM_MARGIN);
+    let layout = width >= 88 && usableHeight >= 15 ? "wide"
+      : width >= 54 && usableHeight >= 11 ? "medium" : "tiny";
+    let topLine = layout === "wide" ? 1 : 0;
+    let summaryRows = layout === "wide" ? 4 : layout === "medium" ? 3 : 1;
+    let dividerRows = usableHeight >= 6 ? 1 : 0;
+    let headingRows = layout === "tiny" ? 0 : 2;
+    const footerRows = usableHeight >= 6 ? 1 : 0;
+    let fixedRows = 1 + topLine + summaryRows + dividerRows + 1 + headingRows + footerRows;
+    if (fixedRows >= usableHeight && layout !== "tiny") {
+      layout = "tiny";
+      topLine = 0;
+      summaryRows = 1;
+      headingRows = 0;
+      fixedRows = 1 + summaryRows + dividerRows + 1 + footerRows;
+    }
+    return {
+      width, height, layout, usableHeight, topLine, dividerRows, headingRows, footerRows,
+      availableRows: Math.max(0, usableHeight - fixedRows),
+      twoLines: layout !== "tiny" && height >= 17,
+    };
   }
 
-  transactionRows(width) {
-    return this.transactions.flatMap((item) => compactActivityRows(item, width, this.colorEnabled));
+  transactionRows(width, twoLines = this.viewportMetrics().twoLines) {
+    return this.transactions.flatMap((item) => activityRows(item, width, { color: this.colorEnabled, twoLines }));
   }
 
   maxScrollOffset() {
-    const { width, availableRows } = this.viewportMetrics();
-    return Math.max(0, this.transactionRows(width).length - availableRows);
+    const { width, twoLines, availableRows } = this.viewportMetrics();
+    return Math.max(0, this.transactionRows(width, twoLines).length - availableRows);
   }
 
   scrollBy(lines) {
@@ -515,8 +629,8 @@ export class RemoteTui {
 
   appendTransaction(item) {
     if (this.scrollOffset > 0) {
-      const { width } = this.viewportMetrics();
-      this.scrollOffset += compactActivityRows(item, width, false).length;
+      const { width, twoLines } = this.viewportMetrics();
+      this.scrollOffset += activityRows(item, width, { twoLines }).length;
       this.unseenTransactions += 1;
     }
     this.transactions.push(item);
@@ -534,6 +648,10 @@ export class RemoteTui {
         at: message.at || new Date().toISOString(),
         action: message.action,
         summary: message.summary || humanizeToolCall({ action: message.action }),
+        operation: typeof message.operation === "string" ? message.operation : undefined,
+        project: typeof message.project === "string" ? message.project : null,
+        category: typeof message.category === "string" ? message.category : undefined,
+        detail: typeof message.detail === "string" ? message.detail : "",
         status: "running",
         ok: null,
         requestBytes: Number.isFinite(Number(message.requestBytes)) ? Number(message.requestBytes) : undefined,
@@ -545,7 +663,7 @@ export class RemoteTui {
         item.ok = message.ok !== false;
         item.durationMs = message.durationMs;
         if (Number.isFinite(Number(message.responseBytes))) item.responseBytes = Number(message.responseBytes);
-        if (message.error && message.ok === false) item.summary += ` · ${truncate(message.error, 48)}`;
+        if (message.error && message.ok === false) item.error = truncate(message.error, 90);
       }
     } else if (message.event === "learn") {
       const activity = message.activity && typeof message.activity === "object" ? message.activity : null;
@@ -584,6 +702,12 @@ export class RemoteTui {
           at: activity.at || message.at || new Date().toISOString(),
           action: tool,
           summary: "🧠 Learn · " + truncate(detail, 120),
+          operation: tool === "learn_prepare" ? "Load relevant Learn context"
+            : tool === "learn_get" ? "Read Learn memories"
+              : tool === "learn_delete" ? "Delete Learn memory" : "Update Learn memory",
+          category: "Learn",
+          project: typeof activity.projectKey === "string" ? activity.projectKey
+            : activity.scope === "project" && typeof activity.scopeKey === "string" ? activity.scopeKey : null,
           status: "done",
           ok: activity.ok !== false,
           ...(Number.isFinite(durationMs) ? { durationMs } : {}),
@@ -603,6 +727,9 @@ export class RemoteTui {
           at: change.at || message.at || new Date().toISOString(),
           action: "learn",
           summary: "Learn " + marker + " " + truncate(detail, 120),
+          operation: "Update Learn memory",
+          category: "Learn",
+          project: typeof change.projectKey === "string" ? change.projectKey : null,
           status: "done",
           ok: true,
         });
@@ -644,32 +771,54 @@ export class RemoteTui {
 
   render() {
     if (this.closed) return;
-    const { width, height, availableRows, headerRows } = this.viewportMetrics();
+    const { width, height, layout, usableHeight, topLine, dividerRows,
+      headingRows, footerRows, availableRows, twoLines } = this.viewportMetrics();
     const state = { ...this.state, uptimeMs: Date.now() - this.startedAt };
     const online = state.status === "connected" && relayIsOnline(state.relayHealth);
     const health = online ? "● ONLINE" : state.status === "connected" ? "○ OFFLINE" : statusText(state.status);
-    const healthWidth = terminalCellWidth(health);
-    const label = truncateCells("Chat Relay  v" + this.version, Math.max(1, width - healthWidth - 2));
-    const topGap = " ".repeat(Math.max(1, width - terminalCellWidth(label) - healthWidth));
-    const top = (this.colorEnabled ? paint(label, STYLE.bold, STYLE.cyan) : label) + topGap
-      + (this.colorEnabled ? paint(health, online ? STYLE.green : state.status === "connected" ? STYLE.red : STYLE.yellow) : health);
-    const summary = compactSummary(state, width, headerRows, this.colorEnabled);
-    const divider = this.colorEnabled ? paint("─".repeat(width), STYLE.gray) : "─".repeat(width);
-    const mode = this.scrollOffset === 0 ? "● LIVE" : this.unseenTransactions ? "+" + this.unseenTransactions + " NEW" : "HISTORY";
-    const sectionLeft = "Activity  " + mode;
-    const help = "↑↓ scroll · End live";
-    const section = truncateCells(sectionLeft + (width > terminalCellWidth(sectionLeft) + terminalCellWidth(help) + 3
-      ? " ".repeat(width - terminalCellWidth(sectionLeft) - terminalCellWidth(help)) + help : ""), width);
-    const sectionLine = this.colorEnabled ? paint(section, STYLE.cyan) : section;
-    const activity = this.transactionRows(width);
-    this.scrollOffset = clamp(this.scrollOffset, 0, Math.max(0, activity.length - availableRows));
-    const end = Math.max(0, activity.length - this.scrollOffset);
-    const start = Math.max(0, end - availableRows);
-    const events = activity.slice(start, end);
-    const body = events.length ? events : [this.colorEnabled ? paint("  No recent activity", STYLE.gray) : "  No recent activity"];
-    while (body.length < availableRows) body.unshift("");
-    const lines = [top, ...summary, divider, sectionLine, ...(height >= 14 ? [divider] : []), ...body];
-    const screen = lines.slice(0, Math.max(1, height - FRAME_BOTTOM_MARGIN)).join("\n");
-    this.output.write(ESC + "2J" + ESC + "H" + screen);
+    const headline = "Chat Relay  v" + this.version;
+    const headlineRoom = width - terminalCellWidth(health) - 2;
+    const title = headlineRoom >= 12
+      ? tint(truncateCells(headline, headlineRoom), MONITOR.accent, this.colorEnabled)
+        + " ".repeat(width - terminalCellWidth(truncateCells(headline, headlineRoom)) - terminalCellWidth(health))
+        + tint(health, online ? MONITOR.good : MONITOR.warning, this.colorEnabled)
+      : tint(truncateCells(headline, width), MONITOR.accent, this.colorEnabled);
+    const divider = tint("─".repeat(width), MONITOR.border, this.colorEnabled);
+    const allRows = this.transactionRows(width, twoLines);
+    this.scrollOffset = clamp(this.scrollOffset, 0, Math.max(0, allRows.length - availableRows));
+    if (this.scrollOffset === 0) this.unseenTransactions = 0;
+    const end = Math.max(0, allRows.length - this.scrollOffset);
+    const begin = Math.max(0, end - availableRows);
+    const visible = allRows.slice(begin, end);
+    const badge = this.scrollOffset === 0 ? "● LIVE"
+      : this.unseenTransactions ? "+" + this.unseenTransactions + " NEW" : "HISTORY";
+    const left = "Activity  " + badge;
+    const count = this.transactions.length + (this.transactions.length === 1 ? " operation" : " operations");
+    const showCount = width >= terminalCellWidth(left) + terminalCellWidth(count) + 3;
+    const section = terminalCellWidth(left) > width
+      ? tint(truncateCells(left, width), MONITOR.accent, this.colorEnabled)
+      : this.colorEnabled
+      ? tint("Activity", MONITOR.bright, true) + "  "
+        + (this.scrollOffset === 0 ? paint(badge, MONITOR.good, MONITOR.liveBg) : tint(badge, MONITOR.warning, true))
+        + (showCount ? " ".repeat(width - terminalCellWidth(left) - terminalCellWidth(count))
+          + tint(count, MONITOR.muted, true) : "")
+      : left + (showCount ? " ".repeat(width - terminalCellWidth(left) - terminalCellWidth(count)) + count : "");
+    const lines = [title];
+    if (topLine) lines.push(divider);
+    lines.push(...monitoringSummary(state, width, layout, this.colorEnabled));
+    if (dividerRows) lines.push(divider);
+    lines.push(section);
+    if (headingRows) lines.push(headingRow(width, this.colorEnabled), divider);
+    if (availableRows > 0 && visible.length === 0) {
+      visible.push(tint("  No recent activity", MONITOR.dim, this.colorEnabled));
+    }
+    lines.push(...visible);
+    while (lines.length < usableHeight - footerRows) lines.push("");
+    if (footerRows) lines.push(monitorFooter(width, this.colorEnabled, online));
+    const screen = lines.slice(0, Math.max(1, usableHeight)).join("\n");
+    if (screen !== this.previousFrame) {
+      this.previousFrame = screen;
+      this.output.write(ESC + "2J" + ESC + "H" + screen);
+    }
   }
 }
