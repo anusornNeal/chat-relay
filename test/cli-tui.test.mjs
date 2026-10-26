@@ -71,7 +71,7 @@ test("wraps long transaction summaries onto continuation lines", () => {
   assert.ok(rows.length <= 3);
   assert.ok(rows.every((line) => line.length <= 72));
   assert.match(rows[0], /378ms$/);
-  assert.match(rows[1], /^\s{13,}/);
+  assert.match(rows[1], /^\s{10,}/);
 });
 
 test("formats remote header as two columns", () => {
@@ -143,7 +143,7 @@ test("formats transaction rows and tui selection", () => {
     ok: true,
     durationMs: 34,
   }, 100);
-  assert.match(row, /✅/);
+  assert.doesNotMatch(row, /[✅❌✓×]/);
   assert.match(row, /Read cli\/remote\.mjs/);
   assert.match(row, /34ms$/);
 
@@ -154,7 +154,8 @@ test("formats transaction rows and tui selection", () => {
     ok: false,
     durationMs: 100,
   }, 100, { color: true });
-  assert.match(failedRow, /^\x1b\[31m.*❌.*Command failed with exit code 1.*100ms\x1b\[0m$/);
+  assert.match(failedRow, /^\x1b\[31m.*Command failed with exit code 1.*100ms\x1b\[0m$/);
+  assert.doesNotMatch(failedRow, /[✅❌✓×]/);
 
   assert.equal(shouldUseTui({ tuiEnabled: false }, { isTTY: true }), false);
   assert.equal(shouldUseTui({ tuiEnabled: true }, { isTTY: false }), true);
@@ -565,6 +566,7 @@ test("mock-inspired TUI shows project and humanized title on separate activity l
   const primary = lines.findIndex((line) => line.includes("✏️ SkillAdmin.tsx"));
   assert.ok(header >= 0, "table headings should be visible");
   assert.equal(primary, header + 2, "activity starts just below the divider, not at terminal bottom");
+  assert.match(lines[primary], /^\d{2}:\d{2}:\d{2} {2}✏️ SkillAdmin\.tsx/);
   assert.match(lines[primary], /12ms\s*$/);
   assert.match(lines[primary + 1], /flowly · 📁/);
   assert.match(frame, /1 operation/);
@@ -622,6 +624,52 @@ test("successful and failed tool end preserve humanized text and project on TUI"
   assert.doesNotMatch(text, /Run Write-Output some raw command/);
   assert.equal(tui.transactions.at(-1).status, "done");
   tui.stop();
+});
+
+test("monitoring activity has no status markers and colors only failures red", () => {
+  for (const columns of [40, 100]) {
+    const frames = [];
+    const tui = new RemoteTui({
+      config: { agentName: "DESKTOP" },
+      output: { isTTY: true, columns, rows: 30, write(value) { frames.push(String(value)); } },
+      input: { isTTY: false },
+      env: {},
+    });
+
+    const start = (requestId, action, operation, category) => tui.handleMessage({
+      type: "chat-relay-ui", event: "tool:start", requestId,
+      action, operation, category, project: "sample",
+      at: "2026-10-26T07:00:00.000Z",
+    });
+    const end = (requestId, ok, error) => tui.handleMessage({
+      type: "chat-relay-ui", event: "tool:end", requestId,
+      ok, error, durationMs: 12,
+    });
+
+    start("read", "fs.read", "Read status.txt", "Filesystem");
+    end("read", true);
+    start("fail", "terminal.exec", "Run invalid command", "Terminal");
+    end("fail", false, "Broken command");
+    start("search", "fs.search", "Start Search files", "Filesystem");
+    tui.render();
+
+    const frame = frames.at(-1);
+    const plain = frame.replace(/\x1b\[[0-9;]*m/g, "").replace(/^\x1b\[2J\x1b\[H/, "");
+    const activityText = plain.split("\n").filter((line) =>
+      /sample ·|status\.txt|invalid command|Broken command/.test(line)).join("\n");
+    assert.match(activityText, /status\.txt/);
+    assert.match(activityText, /invalid command/);
+    assert.doesNotMatch(activityText, /[✓×◌✅❌🟡]/u);
+    assert.match(frame, /\x1b\[38;2;247;114;114m[^\x1b\n]*📟 Run invalid command/);
+    assert.doesNotMatch(frame, /\x1b\[38;2;247;114;114m[^\x1b\n]*📖 status\.txt/);
+    assert.ok(plain.split("\n").every((line) => terminalCellWidth(line) <= columns - 1));
+    if (columns === 100) {
+      assert.match(plain, /^\d{2}:\d{2}:\d{2} {2}📖 status\.txt/m);
+      assert.match(plain, /^\d{2}:\d{2}:\d{2} {2}📟 Run invalid command/m);
+      assert.match(frame, /\x1b\[38;2;247;114;114mError: Broken command/);
+    }
+    tui.stop();
+  }
 });
 
 test("Thai combining marks occupy no extra terminal cells", () => {

@@ -17,18 +17,17 @@ test("offline snapshot includes demo warning and varied project-aware activity",
   assert.match(content, /◈ DEMO/);
   assert.match(content, /◈ SAMPLE/);
   assert.match(content, /TIME\s+OPERATION\s+DURATION/);
-  assert.match(content, /flowly · Filesystem/);
-  assert.match(content, /chat-relay · Terminal/);
-  assert.match(content, /Multiple projects · Filesystem/);
-  assert.match(content, /buddy-android · Filesystem/);
+  assert.match(content, /flowly · 📁/);
+  assert.match(content, /chat-relay · 📟/);
+  assert.match(content, /Multiple projects · 📁/);
+  assert.match(content, /buddy-android · 📁/);
   assert.match(content, /Review terminal batch results/);
   assert.match(content, /🧠 Load relevant Learn context/);
-  assert.match(content, /chat-relay · Learn/);
+  assert.match(content, /chat-relay · 🧠/);
   assert.match(content, /Error: Test failed/);
   assert.match(content, /running/);
   assert.match(content, /9 operations/);
-  assert.match(content, /Offline preview/);
-  assert.match(content, /Ctrl\+C Exit/);
+  assert.doesNotMatch(content, /Offline preview|Ctrl\+C Exit|End Live/);
   assert.doesNotMatch(content, /Q Quit|↑\s*\d|↓\s*\d/);
   assert.doesNotMatch(content, /● ONLINE|● Connected|● LIVE/);
   assert.doesNotMatch(content, /\x1b\[/);
@@ -147,10 +146,10 @@ test("styled demo uses muted project labels and hides transfer sizes", () => {
   assert.match(styled, /\x1b\[38;2;128;145;164mflowly\x1b\[0m/, "project should use subdued slate");
   assert.doesNotMatch(styled, /\x1b\[38;2;93;218;203mflowly\x1b\[0m/, "project should not use bright accent");
   const plain = styled.replace(/\x1b\[[0-9;]*m/g, "");
-  assert.match(plain, /flowly · Filesystem/);
+  assert.match(plain, /flowly · 📁/);
   assert.doesNotMatch(plain, /↑\s*\d|↓\s*\d/, "transaction sizes must not clutter the display");
   assert.doesNotMatch(plain, /Q Quit/);
-  assert.match(plain, /Ctrl\+C Exit/);
+  assert.doesNotMatch(plain, /Ctrl\+C Exit|Offline preview/);
   tui.stop();
 });
 
@@ -164,7 +163,7 @@ test("fullscreen snapshot fills available columns without a right-side blank str
     assert.equal(terminalCellWidth(lines[0]), columns - 1, "DEMO indicator must align with the right edge");
     assert.ok(header.indexOf("DURATION") >= columns - 12, "duration column should track viewport width");
     assert.ok(lines.some((line) => line.endsWith("9 operations")), "activity counter should align right");
-    assert.ok(lines.at(-1).endsWith("◈ Offline preview"), "footer should align right");
+    assert.ok(!lines.some((line) => /Offline preview|Ctrl\+C Exit/.test(line)), "footer should be absent");
     assert.ok(lines.every((line) => terminalCellWidth(line) <= columns - 1));
   }
 });

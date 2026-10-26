@@ -238,14 +238,11 @@ function wrapText(value, width, maxLines = 3) {
 export function formatTransactionRows(item, width = 110, { color = false } = {}) {
   const requested = Number(width) || 110;
   const usable = clamp(requested, Math.min(60, Math.max(1, requested)), 180);
-  const status = item.status === "running" ? "🟡" : item.ok === false ? "❌" : "✅";
   if (usable < 32) {
-    const compact = truncateCells(`${clock(item.at)} ${status} ${item.summary || item.action || "Tool call"}`, usable);
-    if (!color) return [compact];
-    const glyphStyle = item.status === "running" ? STYLE.yellow : item.ok === false ? STYLE.red : STYLE.green;
-    return [paint(compact, glyphStyle)];
+    const compact = truncateCells(`${clock(item.at)} ${item.summary || item.action || "Tool call"}`, usable);
+    return [color && item.ok === false ? paint(compact, STYLE.red) : compact];
   }
-  const prefix = `${clock(item.at)}  ${status}  `;
+  const prefix = `${clock(item.at)}  `;
   const prefixWidth = terminalCellWidth(prefix);
   const continuationPrefix = " ".repeat(prefixWidth);
   const duration = formatDuration(item.durationMs, item.status);
@@ -263,11 +260,9 @@ export function formatTransactionRows(item, width = 110, { color = false } = {})
       if (!color) return plainRow;
       if (item.ok === false) return paint(plainRow, STYLE.red);
       const time = paint(clock(item.at), STYLE.gray);
-      const glyphStyle = item.status === "running" ? STYLE.yellow : STYLE.green;
-      const glyph = paint(status, glyphStyle, STYLE.bold);
       const summary = item.status === "running" ? paint(line.padEnd(summaryWidth), STYLE.bold) : line.padEnd(summaryWidth);
       const timing = paint(suffix, STYLE.gray);
-      return `${time}  ${glyph}  ${summary}${timing}`;
+      return `${time}  ${summary}${timing}`;
     }
     if (!color) return continuationPrefix + line;
     if (item.ok === false) return continuationPrefix + paint(line, STYLE.red);
@@ -376,31 +371,30 @@ function activityRows(item, width, { color = false, twoLines = false } = {}) {
   const limit = Math.max(1, width);
   const project = String(item.project || "General");
   const title = activityTitle(item);
-  const symbol = item.status === "running" ? "◌" : item.ok === false ? "×" : "✓";
-  const symbolColor = item.status === "running" ? MONITOR.warning : item.ok === false ? MONITOR.bad : MONITOR.good;
   const time = clock(item.at);
   if (limit < 52) {
-    if (limit <= 2) return [tint(truncateCells(symbol, limit), symbolColor, color)];
+    if (limit <= 2) return [tint(truncateCells(title, limit), item.ok === false ? MONITOR.bad : MONITOR.bright, color)];
     const prefix = limit >= 37 ? time.slice(0, 5) + " " : "";
-    const bodyWidth = Math.max(0, limit - terminalCellWidth(prefix) - 2);
+    const bodyWidth = Math.max(0, limit - terminalCellWidth(prefix));
     const projectText = truncateCells(project + " · ", bodyWidth);
     const titleText = truncateCells(title, Math.max(0, bodyWidth - terminalCellWidth(projectText)));
-    const plain = prefix + symbol + " " + projectText + titleText;
-    return [color
-      ? tint(prefix, MONITOR.dim, true) + tint(symbol, symbolColor, true) + " "
-        + tint(projectText, MONITOR.muted, true) + tint(titleText, MONITOR.bright, true)
-      : plain];
+    if (!color) return [prefix + projectText + titleText];
+    if (item.ok === false) return [tint(prefix + projectText + titleText, MONITOR.bad, true)];
+    return [tint(prefix, MONITOR.dim, true) + tint(projectText, MONITOR.muted, true)
+      + tint(titleText, MONITOR.bright, true)];
   }
-  const opStart = 13;
+  const opStart = 10;
   const durationWidth = 10;
   const operationWidth = Math.max(1, limit - opStart - durationWidth);
   const duration = formatDuration(item.durationMs, item.status);
   const operation = cellPad(title, operationWidth);
   const prefix = cellPad(time, 8) + "  ";
   const ending = cellPad(duration, durationWidth);
-  const headline = color
-    ? tint(prefix, MONITOR.dim, true) + tint(symbol, symbolColor, true) + "  " + tint(operation, MONITOR.bright, true) + tint(ending, MONITOR.dim, true)
-    : prefix + symbol + "  " + operation + ending;
+  const headline = item.ok === false
+    ? tint(prefix + operation + ending, MONITOR.bad, color)
+    : color
+      ? tint(prefix, MONITOR.dim, true) + tint(operation, MONITOR.bright, true) + tint(ending, MONITOR.dim, true)
+      : prefix + operation + ending;
   if (!twoLines) return [headline];
 
   const category = activityCategory(item);
@@ -412,7 +406,7 @@ function activityRows(item, width, { color = false, twoLines = false } = {}) {
   const rest = truncateCells(secondary, Math.max(0, textWidth - terminalCellWidth(name)));
   const metadata = " ".repeat(opStart)
     + (color
-      ? tint(name, item.project ? MONITOR.muted : MONITOR.dim, true)
+      ? tint(name, item.ok === false ? MONITOR.bad : item.project ? MONITOR.muted : MONITOR.dim, true)
         + tint(rest, item.ok === false ? MONITOR.bad : MONITOR.dim, true)
       : name + rest);
   const rows = [headline, metadata];
@@ -471,8 +465,8 @@ function monitoringSummary(state, width, layout, color) {
 }
 
 function headingRow(width, color) {
-  const left = cellPad("TIME", 13);
-  const op = cellPad("OPERATION", Math.max(1, width - 23));
+  const left = cellPad("TIME", 10);
+  const op = cellPad("OPERATION", Math.max(1, width - 20));
   const right = cellPad("DURATION", 10);
   return tint(left + op + right, MONITOR.muted, color);
 }
