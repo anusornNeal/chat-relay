@@ -7,6 +7,7 @@ import { browserSessionUser, handleAdmin } from "./admin";
 import { hashToken, newToken, normalizeAgentId, type Scope } from "./registry";
 import type { UsageEvent } from "./usage";
 import { DailyOptionalBudget } from "./usage-budget.mjs";
+import { deliverUsageBatch } from "./usage-batch.mjs";
 import { AGENT_PROTOCOL_VERSION } from "./agent-state";
 import { handleStatusRequest } from "./status-route.mjs";
 import { error, hasPayload, readJson } from "./http-utils";
@@ -533,6 +534,8 @@ const USAGE_BATCH_DELAY_MS = 3_000;
 const usageEventBuffer: UsageEvent[] = [];
 let usageFlushPromise: Promise<void> | null = null;
 let usageFlushWake: (() => void) | null = null;
+let usageDeliveryFailures = 0;
+let usageDeliveryUncertain = 0;
 
 function securityCacheGet<T>(cache: Map<string, TimedSecurityCacheEntry<T>>, key: string): T | undefined {
   const entry = cache.get(key);
@@ -659,13 +662,17 @@ async function flushUsageEvents(env: Env) {
 
   while (usageEventBuffer.length) {
     const events = usageEventBuffer.splice(0, USAGE_BATCH_MAX_EVENTS);
-    try {
-      await usageStub(env).fetch(new Request("https://usage.internal/record-batch", {
+    const outcome = await deliverUsageBatch(events, (batch) =>
+      usageStub(env).fetch(new Request("https://usage.internal/record-batch", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ events }),
-      }));
-    } catch {}
+        body: JSON.stringify({ events: batch }),
+      })),
+    );
+    if (!outcome.delivered) {
+      usageDeliveryFailures += events.length;
+      if (outcome.uncertain) usageDeliveryUncertain += events.length;
+    }
   }
 }
 
@@ -2192,6 +2199,8 @@ export default {
             pending: usageEventBuffer.length,
             maxEvents: USAGE_BATCH_MAX_EVENTS,
             delayMs: USAGE_BATCH_DELAY_MS,
+            failedEvents: usageDeliveryFailures,
+            uncertainEvents: usageDeliveryUncertain,
           },
         })
         : error(405, "method_not_allowed");

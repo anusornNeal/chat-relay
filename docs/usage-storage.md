@@ -46,3 +46,27 @@ The detailed usage/history system is intentionally gone:
 - usage raw-retention cleanup
 
 Run `npm run test:usage-storage` for storage/query access-pattern regression tests. Local tests validate code behavior and write-call counts; Cloudflare billing metrics remain the source of truth for deployed row accounting.
+
+## Current Worker batching and failure semantics
+
+The Worker buffers up to 96 usage events per batch and normally flushes after 3 seconds.
+The Usage DO collapses repeated events in the same account/agent/hour bucket
+into one SQL upsert for each distinct bucket within a batch.
+Each event still contributes to exact call counts if successfully delivered.
+
+Explicit transient HTTP errors (429/502/503/504) are retried up to three total
+attempts with bounded 150/300 ms backoff. Non-retryable HTTP errors do not replay.
+An exception while sending is *ambiguous*: the remote DO may have already
+committed the batch. Therefore, it is **not retried automatically**, to avoid
+silently double-counting calls. The Worker health response exposes cumulative
+`usageBatch.failedEvents` and `usageBatch.uncertainEvents` for the current
+isolate. These are diagnostics, not durable counters.
+
+This behavior is best-effort rather than exactly-once. A future durable
+idempotency key + receiver-side deduplication would be needed to provide
+reliable retries across uncertain acknowledgements. That design must first be
+measured for added Cloudflare SQL writes and DO CPU cost.
+
+The existing hourly aggregate supports optional detailed latency summaries and
+approximate p95 from histogram bins; raw commands, payloads and request history
+are not stored. Neither batch telemetry nor diagnostic counters enforce quotas.
