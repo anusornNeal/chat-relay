@@ -865,7 +865,8 @@ function learnUsageLabel(item) {
 
 function learnUsageSortValue(item) {
   const score = item?.usage?.score;
-  return typeof score === "number" && Number.isFinite(score) ? score : -1;
+  if (typeof score === "number" && Number.isFinite(score)) return { tier: 2, score };
+  return { tier: item?.usage?.status === "unrated" ? 1 : 0, score: 0 };
 }
 
 function learnVisibleItems(items) {
@@ -883,7 +884,9 @@ function learnVisibleItems(items) {
       return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
     }
     if (learnSortMode === "usage") {
-      return learnUsageSortValue(b) - learnUsageSortValue(a) ||
+      const left = learnUsageSortValue(a);
+      const right = learnUsageSortValue(b);
+      return right.tier - left.tier || right.score - left.score ||
         String(a.key || "").localeCompare(String(b.key || ""));
     }
     return String(a.key || "").localeCompare(String(b.key || ""));

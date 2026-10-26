@@ -127,6 +127,17 @@ assert.match(ui, /Applied<\/span>/);
 assert.match(ui, /Verified<\/span>/);
 assert.doesNotMatch(ui, /data-learn-sort="confidence"/);
 
-f.db.close();
+// The usage sort must rank rated scores first, then Unrated, then New.
+const sortFunction = ui.slice(ui.indexOf('function learnUsageSortValue('), ui.indexOf('function learnTreeKindRows('));
+const sortVisible = new Function('items', 'learnScopeFilter', 'learnScopeKeyFilter', 'learnKindFilter', 'learnSearchQuery', 'learnSortMode',
+  'const learnItemsForScope = (items) => items;\n' + sortFunction + '\nreturn learnVisibleItems(items);');
+const sorted = sortVisible([
+  { key: 'new', usage: { status: 'new', score: null } },
+  { key: 'low', usage: { status: 'rated', score: 0 } },
+  { key: 'unrated', usage: { status: 'unrated', score: null } },
+  { key: 'high', usage: { status: 'rated', score: 90 } },
+  { key: 'mid', usage: { status: 'rated', score: 45 } },
+], 'all', '', 'all', '', 'usage');
+assert.deepEqual(sorted.map((item) => item.key), ['high', 'mid', 'low', 'unrated', 'new']);f.db.close();
 another.db.close();
 console.log("PASS Learn usage receipts, score, isolation, idempotence and UI contract");
