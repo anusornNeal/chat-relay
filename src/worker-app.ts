@@ -1665,7 +1665,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "write_file",
-    "Write or append UTF-8 text to a file. New backup files must be necessary and stored inside the owning project's workspace/backups/, never in a sibling directory.",
+    "Write or append UTF-8 text to a file. New backup files must be necessary and stored inside the owning project's .workspace/backups/, never in a sibling directory.",
     "write",
     {
       path: z.string().min(1).max(2048),
@@ -1694,7 +1694,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "create_directory",
-    "Create a directory recursively. Create new backup/worktree directories only when needed, under the verified target project's workspace/backups/ or workspace/worktrees/; never as project siblings.",
+    "Create a directory recursively. Create new backup/worktree directories only when needed, under the verified target project's .workspace/backups/ or .workspace/worktrees/; never as project siblings.",
     "write",
     { path: z.string().min(1).max(2048) },
     ({ path }) => ({ action: "fs.mkdir", path }),
@@ -1976,7 +1976,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_exec",
-    "Run one shell command and wait up to 20 seconds. Prefer list_processes for process inspection, start_search for source search, and file tools for edits. Security policy blocks dangerous commands; do not retry blocked commands unchanged. Create backups or Git worktrees only when needed, under the owning project's workspace/ (not sibling folders).",
+    "Run one shell command and wait up to 20 seconds. Prefer list_processes for process inspection, start_search for source search, and file tools for edits. Security policy blocks dangerous commands; do not retry blocked commands unchanged. Create backups or Git worktrees only when needed, under the owning project's .workspace/ (not sibling folders).",
     "terminal",
     {
       command: z.string().min(1).max(4000),
@@ -1989,7 +1989,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_batch_start",
-    "Start 2-20 PowerShell jobs in one MCP call with bounded per-agent concurrency and queue backpressure. Any new backup or Git worktree must be necessary and under the owning project's workspace/, never a sibling directory.",
+    "Start 2-20 PowerShell jobs in one MCP call with bounded per-agent concurrency and queue backpressure. Any new backup or Git worktree must be necessary and under the owning project's .workspace/, never a sibling directory.",
     "terminal",
     {
       jobs: z.array(z.union([
@@ -2031,7 +2031,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_start",
-    "Start a long-running PowerShell command and return a terminal session ID immediately. Place any necessary new backups or Git worktrees only under the owning project's workspace/, not beside the repository.",
+    "Start a long-running PowerShell command and return a terminal session ID immediately. Place any necessary new backups or Git worktrees only under the owning project's .workspace/, not beside the repository.",
     "terminal",
     {
       command: z.string().min(1).max(4000),
@@ -2043,7 +2043,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_start_shell",
-    "Start a persistent interactive PowerShell session. Create new backups/Git worktrees only when needed inside the target project's workspace/, not in sibling directories.",
+    "Start a persistent interactive PowerShell session. Create new backups/Git worktrees only when needed inside the target project's .workspace/, not in sibling directories.",
     "terminal",
     { cwd: z.string().min(1).max(2048).optional() },
     ({ cwd }) => ({ action: "terminal.shell.start", cwd }),

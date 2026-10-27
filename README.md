@@ -170,7 +170,7 @@ A single account can own multiple computers. Each computer keeps its own agent i
 
 Clone the repository only when developing Chat Relay itself. Normal users should use the zero-checkout `npx` flow above.
 
-Agents must create new WIP backups or Git worktrees only when necessary and only inside the **owning target project's** `workspace/` folder (e.g. `chat-relay/workspace/worktrees/<id>`). Do not create sibling project folders. See [Project workspace policy](docs/PROJECT_WORKSPACE_POLICY.md) and `AGENTS.md`; existing legacy folders remain untouched until verified cleanup.
+Agents must create new WIP backups or Git worktrees only when necessary and only inside the **owning target project's** `.workspace/` folder (e.g. `chat-relay/.workspace/worktrees/<id>`). Do not create sibling project folders. See [Project workspace policy](docs/PROJECT_WORKSPACE_POLICY.md) and `AGENTS.md`; existing legacy folders remain untouched until verified cleanup.
 
 Common development commands:
 

@@ -8,4 +8,4 @@ node_modules/
 wrangler.selfhost.jsonc
 
 # Project-local temporary backups and Git worktrees
-workspace/
+.workspace/

@@ -10,14 +10,14 @@ Applies to **new** temporary artifacts created by agents using Chat Relay, wheth
 
    ```text
    <project-root>/
-     workspace/
+     .workspace/
        backups/<task-id-or-purpose>-<timestamp>/
        worktrees/<task-id-or-purpose>/
    ```
 
-   Examples: `chat-relay/workspace/worktrees/REL-11`, `flowly/workspace/backups/FLY-69-20261026`, `buddy-android/workspace/worktrees/QCA-4131`. Use unique, descriptive names and reuse a safe existing workspace instead of making duplicates.
-4. Ensure the owning project's `.gitignore` or local `.git/info/exclude` ignores `/workspace/` before creation. Use `git worktree add <project-root>/workspace/worktrees/<id> ...` for Git worktrees; do not clone repositories repeatedly. Verify the canonical destination stays under the owning project root (no `..`, junction or symlink escapes). Do not create nested workspaces inside a secondary worktree.
-5. Back up only relevant non-secret files, and **exclude `workspace/` itself** from any backup. Avoid recursively copying the entire repository into its own child, including dependency/build caches. Capture owner, reason, source/branch and cleanup conditions in task notes or a small backup manifest.
+   Examples: `chat-relay/.workspace/worktrees/REL-11`, `flowly/.workspace/backups/FLY-69-20261026`, `buddy-android/.workspace/worktrees/QCA-4131`. Use unique, descriptive names and reuse a safe existing workspace instead of making duplicates.
+4. Ensure the owning project's `.gitignore` or local `.git/info/exclude` ignores `/.workspace/` before creation. Use `git worktree add <project-root>/.workspace/worktrees/<id> ...` for Git worktrees; do not clone repositories repeatedly. Verify the canonical destination stays under the owning project root (no `..`, junction or symlink escapes). Do not create nested workspaces inside a secondary worktree.
+5. Back up only relevant non-secret files, and **exclude `.workspace/` itself** from any backup. Avoid recursively copying the entire repository into its own child, including dependency/build caches. Capture owner, reason, source/branch and cleanup conditions in task notes or a small backup manifest.
 
 ## Cleanup and legacy directories
 
