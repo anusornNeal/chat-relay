@@ -9,3 +9,5 @@ wrangler.selfhost.jsonc
 
 # Project-local temporary backups and Git worktrees
 .workspace/
+# Preserve existing legacy directories; do not create new artifacts here.
+workspace/
