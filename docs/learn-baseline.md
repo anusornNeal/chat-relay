@@ -1,4 +1,8 @@
-# Learn baseline v7
+# Learn baseline v10
+
+## High-priority coding default
+
+Before builds or runtime debugging, mentally execute relevant source branches, state transitions, normal/edge/error cases and suspected counterexamples. Use the result to narrow fixes and avoid redundant iterations; redo the mental trace after edits. This is **Simulated / Not Executed**, never PASS or executed QA evidence. Keep real risk-based tests, builds, device checks and integration verification (especially asynchronous, lifecycle, network, database or UI behavior). Explicit user-required checks and project gates always take precedence. This is guidance for every account, including fresh accounts, without adding per-tool learning operations.
 
 Chat Relay exposes the Learn baseline in the `learn_prepare` and `learn_put` MCP tool descriptions for every account, including new accounts. It is guidance for the assistant, **not a background scanner, automatic memory writer, or validation/enforcement layer**. Learn remains account-scoped and advisory.
 
