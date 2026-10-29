@@ -1652,7 +1652,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "read_file",
-    "Read a UTF-8 text file by line offset/count with a bounded response and deterministic nextOffset.",
+    "Read one UTF-8 file range. For multiple independent files prefer read_multiple_files or fs_batch to reduce MCP calls. Bounded nextOffset.",
     "read",
     {
       path: z.string().min(1).max(2048),
@@ -1667,7 +1667,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "read_multiple_files",
-    "Read up to 20 UTF-8 text files with one aggregate response budget. String paths remain supported; object entries can set offset, length, and maxBytes.",
+    "Batch-first: read 1-20 independent UTF-8 files in one MCP call instead of repeated read_file. 48KiB total; use nextIndex and per-file nextOffset when truncated.",
     "read",
     {
       paths: z.array(z.union([
@@ -1687,7 +1687,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "fs_batch",
-    "Run up to 20 bounded read-only filesystem stat/read/list operations in one relay round trip. Per-item failures are isolated; use nextIndex and nested continuation fields when results are truncated.",
+    "Prefer fs_batch for 2-20 independent stat/read/list operations: one MCP call, bounded 48KiB response, ordered results. Per-item errors isolated; use nextIndex and nested continuations.",
     "read",
     {
       operations: z.array(z.object({
@@ -2047,7 +2047,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_exec",
-    "Run one shell command and wait up to 20 seconds. Prefer list_processes for process inspection, start_search for source search, and file tools for edits. Security policy blocks dangerous commands; do not retry blocked commands unchanged. Create backups or Git worktrees only when needed, under the owning project's .workspace/ (not sibling folders).",
+    "For short commands only (max 20s). Use terminal_start + terminal_read for builds/tests or unknown duration; batch independent short commands via terminal_batch_start. Prefer filesystem/process tools over shell. Do not retry blocked or executionStatus=unknown commands blindly; project backups/worktrees belong under .workspace/.",
     "terminal",
     {
       command: z.string().min(1).max(4000),
@@ -2060,7 +2060,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_batch_start",
-    "Start 2-20 PowerShell jobs in one MCP call with bounded per-agent concurrency and queue backpressure. Any new backup or Git worktree must be necessary and under the owning project's .workspace/, never a sibling directory.",
+    "Start 2-20 INDEPENDENT short PowerShell jobs per MCP call, bounded concurrency and 20s per job. For long builds use terminal_start. Backups/worktrees only when necessary under the owning project's .workspace/.",
     "terminal",
     {
       jobs: z.array(z.union([
@@ -2102,7 +2102,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_start",
-    "Start a long-running PowerShell command and return a terminal session ID immediately. Place any necessary new backups or Git worktrees only under the owning project's .workspace/, not beside the repository.",
+    "Use for long builds/tests or commands potentially >20s. Returns sessionId immediately; poll via terminal_read and respect exitCode/cancellation. New backups/worktrees only when necessary under the project .workspace/.",
     "terminal",
     {
       command: z.string().min(1).max(4000),
