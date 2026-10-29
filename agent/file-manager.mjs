@@ -483,7 +483,7 @@ export class FileManager {
     }
   }
 
-  async startSearch(input, pattern, searchType = "files", maxResults = 100) {
+  async startSearch(input, pattern, searchType = "files", maxResults = 100, previewLines = 0) {
     const target = await this.#resolveExisting(input);
     if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > 300) {
       throw new Error("invalid_pattern");
@@ -570,6 +570,20 @@ export class FileManager {
       if (firstPage.length > 0 && pageBytes + size > MAX_SEARCH_FIRST_PAGE_BYTES) break;
       firstPage.push(item);
       pageBytes += size;
+    }
+    // Optional bounded snippets reduce follow-up reads.
+    const count = Math.min(60, Math.max(0, Number(previewLines) || 0));
+    if (count > 0) {
+      let remaining = 16384;
+      for (const item of firstPage) {
+        if (remaining < 1024) break;
+        if (item.type === "directory" || !item.path) continue;
+        try {
+          const preview = await this.read(item.path, 0, count, Math.min(4096, remaining));
+          item.preview = { content: preview.content, nextOffset: preview.nextOffset };
+          remaining -= byteSize(item.preview);
+        } catch { item.preview = { unavailable: true }; }
+      }
     }
     return {
       sessionId,

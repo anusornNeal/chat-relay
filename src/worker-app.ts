@@ -1708,16 +1708,17 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "start_search",
-    "Search files or content inside allowedRoots. Returns up to 20 matches and a sessionId; use get_more_search_results only if nextOffset. Narrow scope when incomplete. Skips generated dirs and binary content.",
+    "Search files/content inside allowedRoots. For code exploration set previewLines (up to 60) to receive bounded first-page file snippets in the SAME call; expand only relevant matches. Use nextOffset for more matches. Skips generated dirs and binary content.",
     "read",
     {
       path: z.string().min(1).max(2048),
       pattern: z.string().min(1).max(300),
       searchType: z.enum(["files", "content"]).optional(),
       maxResults: z.number().int().min(1).max(500).optional(),
+      previewLines: z.number().int().min(0).max(60).optional(),
     },
-    ({ path, pattern, searchType, maxResults }) => ({
-      action: "fs.search.start", path, pattern, searchType, maxResults,
+    ({ path, pattern, searchType, maxResults, previewLines }) => ({
+      action: "fs.search.start", path, pattern, searchType, maxResults, previewLines,
     }),
   );
 

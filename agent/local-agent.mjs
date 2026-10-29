@@ -236,7 +236,7 @@ async function handlePayload(payload) {
     case "fs.delete":
       return files.remove(payload.path, payload.recursive);
     case "fs.search.start":
-      return files.startSearch(payload.path, payload.pattern, payload.searchType, payload.maxResults);
+      return files.startSearch(payload.path, payload.pattern, payload.searchType, payload.maxResults, payload.previewLines);
     case "fs.search.results":
       return files.getSearchResults(payload.sessionId, payload.offset, payload.length);
 
