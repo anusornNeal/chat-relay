@@ -2,8 +2,8 @@
 
 ## Scope and semantics
 The **Usage Score** is derived from actual Learn context usage, not from memory
-`confidence`. Confidence remains internal for eligibility, quality and legacy
-routing compatibility. Existing memories start with usage `New`, and after
+`confidence`. Confidence remains a ranking tie-breaker but cannot exclude
+a memory from index discovery or establish factual content validity. Existing memories start with usage `New`, and after
 retrieval but before a use report they show `Unrated`.
 
 | Counter | What increments it | What does not increment it |
@@ -91,3 +91,48 @@ verification caveat. Explicit Useful/Not useful feedback remains separate.
 
 Usage aggregates are not exposed through Shared Learn project proposals.
 No per-tool Learning DO read/write, polling or new quota enforcement is added.
+
+
+## Learn Engine v2 — requirement-first retrieval and lifecycle (REL-16–20)
+
+### Indexed prepare contract
+- Each account has its own `Learning` Durable Object. The canonical `learning_memory_v1` table retains full content; `learning_metadata_index_v1` holds key, scope, kind, phase mask, required/core flags, content length, 120-character preview and update time. It is NOT a second content store.
+- SQLite INSERT/UPDATE/DELETE triggers synchronize metadata atomically with source updates, including direct SQL project merges and project-context compaction. A versioned rebuild backfills legacy data and can be explicitly rerun; routine tools do not touch Learn.
+- `/candidates` enumerates up to 512 metadata rows before selection and hydrates 48 records (64 for explicit project + agent, in one combined request). Keys `required-`, `required:`, `core-`, `core:` and `flowly-implementation-workflow` take precedence over confidence, negative usage feedback, recency and per-kind mix. Coding standards are prioritized in implement/review/test.
+- Required rules are delivered in full or their keys appear in `preparedContext.coverage.missingKeys`; no silent truncation. `coverage.status` is `complete`, `needs-review` or `incomplete`. `previouslyLoadedIds` distinguishes a previously delivered required rule from a miss on later phase preparations. A medium/large Flowly planning task without the workflow rule surfaces a missing checkpoint. Advisory coverage never bypasses security, approves a plan or executes work.
+- Scope resolution: explicit global/project/agent scopes can be fetched together in **one Learning DO request**. Inferred project/agent routes may require subsequent bounded reads. Shared Learn remains permission-filtered and approval-gated. Optional usage receipt still costs one additional request. No per-tool automatic Learn reads, cron, polling or quota enforcement.
+- Content budget: 12,000 characters for general/read/plan and up to 16,000 for implement/review/test. Ordinary records may be shortened with `contentTruncated`; mandatory records cannot. `loadedMemoryIds` filters previously delivered context on phase transitions.
+
+### Validity, revisions and provenance
+- Factual validity is stored independently from `usage.score` and retrieval relevance: `valid`, `needs-review`, or `deprecated`. Retrieved-but-unused reports change usage telemetry only, never factual validity.
+- `learn_lifecycle_review` requires explicit status, reason (at least eight characters), evidence reference and optional source fingerprint. Stale-source evidence must be genuinely checked before changing status; no automatic code or URL scanner runs.
+- Content mutations save prior revisions. `learn_lifecycle_get` returns state, history and audit; `learn_lifecycle_restore` reverses earlier content only with an explicit reason/evidence. A normal content edit does not silently certify a `needs-review` record.
+- Deprecated required records remain visible to coverage discovery, but cannot count toward complete coverage. Intentional delete clears the memory and its lifecycle history.
+
+### Benchmark: local synthetic test, NOT Cloudflare production
+Measured using `node test/learn-perf-benchmark.mjs`, Node.js 24.16.0 and in-memory SQLite, 151 stored records, 60 alternating iterations, 3 explicit scopes, 10 returned Learn items. One local run on 29 Oct 2026:
+
+| Metric | Legacy per-kind | Indexed v2 |
+| --- | ---: | ---: |
+| Scoped Learning DO calls per explicit prepare (logical) | 3 | 1 |
+| Optional usage receipt calls | 1 | 1 |
+| Discoverable candidate records | 121 | 151 |
+| Hydrated full-content records | 121 | 64 |
+| Mandatory low-confidence workflow | Missing | Included |
+| Coverage status | Not checked | Complete |
+| Local median execution | 3.261 ms | 2.854 ms |
+| Local p95 execution | 3.712 ms | 3.520 ms |
+| Median internal response bytes | 119,154 | 133,014 |
+| Returned context characters | 5,151 | 4,676 |
+| Estimated context tokens (chars / 4) | 1,288 | 1,169 |
+
+Interpretation: mandatory-rule coverage improved and explicit-scope requests decrease 3→1. Synthetic median improved slightly; the internal metadata reply is approximately **12% larger** because all 151 metadata entries are returned. Token counts are rough estimates, not tokenizer measurements. No network, Cloudflare binding dispatch, request billing, production CPU or realistic Worker load were measured. Actual Cloudflare Free plan CPU and Durable Object costs remain **unverified** pending separately authorized deployment and measurement. One-request batching applies to explicit project + agent; inferred routes can need additional scoped reads.
+
+### Verification
+- `node test/learn-index.test.mjs`: index CRUD/rebuild, 111 candidates, required priority, isolation.
+- `node test/learn-lifecycle.test.mjs`: evidence-backed validity, stale fingerprint, revision restoration, ACL and delete.
+- `node test/learn-phase-coverage.test.mjs`: 122 candidates, read→plan→implement, coding/loaded coverage, budgets, stale/deprecated and isolation.
+- `npm run test:learn`, `npm run test:learn-bootstrap`, `npx wrangler deploy --dry-run`: regression, routing and Worker bundling. Dry-run does **not deploy**.
+- `npm run test:hardening`: wider verification (record the actual exit code separately). This repository does not define `npm run typecheck`.
+
+No push, publication, Cloudflare deployment or production configuration changes are part of REL-16.

@@ -50,7 +50,17 @@ class FakeSql {
     if (q.startsWith("SELECT project_key FROM learning_project_alias_v1")) return new Cursor();
     if (q.startsWith("SELECT alias_key, project_key FROM learning_project_alias_v1")) return new Cursor();
     if (q.startsWith("CREATE INDEX")) return new Cursor();
+    // Learn Index trigger behavior is covered by real SQLite integration tests.
+    // This in-memory FakeSql only tests the existing Learn API behavior.
+    if (q.startsWith("CREATE TRIGGER")) return new Cursor();
+    if (q.startsWith("SELECT version FROM learning_metadata_index_meta_v1")) {
+      return new Cursor([{ version: 3 }]);
+    }
 
+    if (q.startsWith("SELECT version FROM learning_lifecycle_meta_v1")) return new Cursor([{ version: 1 }]);
+    if (q.startsWith("PRAGMA table_info(learning_metadata_index_v1)")) {
+      return new Cursor(["content_preview", "phase_mask"].map((name) => ({ name })));
+    }
     if (q.startsWith("PRAGMA table_info")) {
       return new Cursor([...this.columns].map((name, index) => ({ cid: index, name })));
     }

@@ -219,10 +219,14 @@ const agentRecords = [
   assert.match(worker, /"explicit-one-shot"/);
   assert.match(worker, /loadedMemoryIds: z\.array/);
   assert.match(worker, /remainingRecords = deduped\.filter/);
-  assert.match(worker, /guidance: "Reuse all prior prepared context/);
+  assert.match(worker, /REQUIRED LEARN COVERAGE INCOMPLETE/, "missing required rules must be surfaced before action");
+  assert.match(worker, /withRequiredLearnCoverage\(/, "required rules need an explicit coverage contract");
   assert.match(worker, /usageReceiptId \? LEARN_USAGE_REPORT_INSTRUCTION/, "prepared receipts must carry the task-completion rule");
   assert.match(worker, /Do not repeat for the same phase or before every tool/);
-  assert.match(worker, /readLearnPrepareScopes\(env, user, \[globalScope\]\)/);
+  assert.match(worker, /const globalRead = await readScopes\(initialScopes\)/);
+  assert.match(worker, /initialScopes\.push\(\{ scope: "project"/, "explicit scopes should be batched");
+  assert.match(worker, /"\/candidates"/, "prepare must read from the indexed candidate API");
+  assert.doesNotMatch(worker, /perKind: 4/, "no confidence top-four prefilter");
   assert.match(worker, /preferredAgentForContext\(records, projectKey\)/, "explicit project keys must still use project-scoped preferred-agent routing");
   assert.match(worker, /buildLearnRelevanceContext\([\s\S]*args\.query/);
   assert.match(worker, /"learn_prepare", "learn_get"/, "learn_prepare and learn_get must be read-only tools");
@@ -232,7 +236,7 @@ const agentRecords = [
   assert.match(worker, /automatically canonicalized\/compacted/);
 
   const policy = fs.readFileSync("src/learning-policy.ts", "utf8");
-  assert.match(policy, /LEARN_BASELINE_VERSION = 9/);
+  assert.match(policy, /LEARN_BASELINE_VERSION = 10/);
   assert.match(policy, /call learn_prepare again/);
   assert.match(policy, /Ordinary Relay tools do not read or write Learn automatically/);
   assert.match(policy, /direct user correction or explicit enduring preference/);
@@ -241,8 +245,8 @@ const agentRecords = [
   assert.match(policy, /Do not learn one-off situational details/);
   assert.match(policy, /Keep project_context project-level and canonical/);
   assert.match(policy, /compacted into bounded canonical buckets/);
-  assert.equal(LEARN_BASELINE_VERSION, 9);
-  assert.equal(LEARN_BASELINE_POLICY.version, 9);
+  assert.equal(LEARN_BASELINE_VERSION, 10);
+  assert.equal(LEARN_BASELINE_POLICY.version, 10);
   assert.ok(LEARN_BASELINE_POLICY.rules.includes(LEARN_WRITING_FORMAT));
   assert.ok(LEARN_BASELINE_POLICY.rules.includes(LEARN_USAGE_REPORT_INSTRUCTION));
   assert.ok(LEARN_BASELINE_CONTEXT.includes(LEARN_USAGE_REPORT_INSTRUCTION));

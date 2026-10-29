@@ -152,7 +152,7 @@ async function readLearnPrepareScopes(
   if (!call.ok) return { ok: false, statusCode: call.statusCode };
   try {
     const data = JSON.parse(call.body) as { items?: LearnRecord[]; entries?: LearnIndexEntry[]; resolvedProjectKey?: string };
-    return { ok: true, items: Array.isArray(data.items) ? data.items.slice(0, 128) : [],
+    return { ok: true, items: Array.isArray(data.items) ? data.items.slice(0, 128).filter(item => item.validity?.status !== "deprecated") : [],
       entries: Array.isArray(data.entries) ? data.entries.slice(0, 512) : [], projectKey: data.resolvedProjectKey };
   } catch {
     return { ok: false, statusCode: 502 };

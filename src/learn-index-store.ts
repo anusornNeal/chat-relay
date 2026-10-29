@@ -3,7 +3,7 @@
 const SOURCE = "learning_memory_v1";
 const INDEX = "learning_metadata_index_v1";
 const META = "learning_metadata_index_meta_v1";
-const VERSION = 2;
+const VERSION = 3;
 type Sql = {exec<T = any>(query:string,...args:any[]):{toArray():T[]}};
 const required = `CASE WHEN NEW.memory_key='flowly-implementation-workflow'
   OR NEW.memory_key LIKE 'required-%' OR NEW.memory_key LIKE 'required:%'
@@ -58,7 +58,7 @@ export class LearnIndexStore {
         (id,memory_key,kind,scope,scope_key,updated_at,content_length,
          content_preview,required_rule,core_rule,phase_mask)
       VALUES (NEW.id,NEW.memory_key,NEW.kind,NEW.scope,NEW.scope_key,
-        NEW.updated_at,length(NEW.content),substr(NEW.content,1,240),
+        NEW.updated_at,length(NEW.content),substr(NEW.content,1,120),
         ${required},${core},${mask});
       END`);
     this.sql.exec(`CREATE TRIGGER learning_metadata_after_update
@@ -68,7 +68,7 @@ export class LearnIndexStore {
         (id,memory_key,kind,scope,scope_key,updated_at,content_length,
          content_preview,required_rule,core_rule,phase_mask)
       VALUES (NEW.id,NEW.memory_key,NEW.kind,NEW.scope,NEW.scope_key,
-        NEW.updated_at,length(NEW.content),substr(NEW.content,1,240),
+        NEW.updated_at,length(NEW.content),substr(NEW.content,1,120),
         ${required},${core},${mask})
       ON CONFLICT(id) DO UPDATE SET
         memory_key=excluded.memory_key,kind=excluded.kind,scope=excluded.scope,
@@ -89,7 +89,7 @@ export class LearnIndexStore {
         (id,memory_key,kind,scope,scope_key,updated_at,content_length,
          content_preview,required_rule,core_rule,phase_mask)
         SELECT id,memory_key,kind,scope,scope_key,updated_at,length(content),
-        substr(content,1,240),${requiredSelect},${coreSelect},
+        substr(content,1,120),${requiredSelect},${coreSelect},
         CASE WHEN kind='coding_style' THEN 28 ELSE 31 END FROM ${SOURCE}`);
       this.sql.exec(`INSERT INTO ${META}(version,rebuilt_at) VALUES (?,?)
         ON CONFLICT(version) DO UPDATE SET rebuilt_at=excluded.rebuilt_at`,
