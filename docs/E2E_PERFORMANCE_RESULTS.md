@@ -79,3 +79,29 @@ An earlier live read-only Android repository scan visited 4,445 entries with bas
 5. Full cross-platform CI and production smoke require their own gate and access. Keep task cards **Ready for Review** until independent review/QA confirms the residual criteria.
 
 No git push, npm publish, tag or Cloudflare production deploy was performed for these changes.
+
+
+## REL-29 to REL-33 — Multi-account Learn and MCP response optimization (2026-10-29)
+
+This section covers local source, measured **before publishing**. Run: node test/learn-response-perf.test.mjs --samples=30. Uses actual bundled MCP tools/list and two isolated in-memory Learning Durable Object stores (Alpha and Bravo), plus an empty account. Results use 30 samples after three warmups.
+
+| Metric | Baseline | Candidate | Reduction |
+|---|---:|---:|---:|
+| MCP tool count | 65 | 65 | 0 (unchanged) |
+| Total MCP description bytes | 21,658 | 14,408 | **33.47%** |
+| Full tools/list JSON bytes | 61,958 | 54,708 | **11.70%** |
+| learn_prepare tool description bytes | 4,408 | 2,719 | **38.32%** |
+| learn_put tool description bytes | 4,370 | 1,272 | **70.89%** |
+| learn_prepare rich-account response bytes | 7,924 | 5,914 | **25.37%** |
+| learn_prepare fresh-account response bytes | 1,079 | 985 | **8.71%** |
+| Input schemas and annotation fingerprint characters | 33,400 | 33,400 | unchanged |
+
+**Functional behavior:** All 65 tool names, input schemas, and annotations were preserved. Alpha and Bravo remained isolated with 7 relevant memories each, Required Coverage complete, mandatory Flowly workflow and full coding style, and usage receipts. An empty account returned no memories or receipt with missing-required coverage correctly marked incomplete. The 30-sample benchmark and phase-change/loadedMemoryIds behavior passed.
+
+Default learn_prepare now caps **optional** content at 420 characters and reports contentTruncated. Required, coding_style, agent_context, canonical project_context and approved Shared Learn rules keep their previous limits. Explicit caller-provided limit keeps full optional text under its previous bounds. Repeated natural-language guidance was compacted while retaining usage report, authorization, security, policy, and scope instructions.
+
+**Resource and causation:** Local in-memory Learn p50 remained approximately 1.8-2.0 ms, so there is no verified CPU-speed benefit. No new Learning DO request was added; one candidate lookup and optional usage receipt remain. Payload-byte savings are a proxy for context/token reduction, not a measured decrease in ChatGPT model reasoning. Cloudflare production CPU and DO counters are not measured here.
+
+**Regression:** npm run test:hardening and npm run verify:publish passed in source at version 1.4.0. Existing Shared Learn ACL, cross-account isolation, Learn usage idempotence, 5-chat Soak and Worker dry-run passed. Full test:full live multi-user smoke was not completed: initial local fixture lacked .dev.vars, and a separate clean test Worker admin bootstrap was restricted by execution authorization. Do not label this specific live smoke PASS; no production user/agent records were changed.
+
+**Release scope:** When the Worker deploy completes, all accounts receive smaller MCP catalog and Learn responses. Already committed native Search changes require a separate upgrade of each npm Local Agent to obtain local search-handler improvements. Agent backward compatibility is tested by existing protocol/upgrade tests. No claim of complete model prompt-to-answer A/B speedup.

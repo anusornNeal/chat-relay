@@ -140,6 +140,10 @@ try {
       itemCount:counts[0],coverage:coverage[0],receipt:received[0],
     };
   }
+  const compactImplement=parseResult(await clients.alpha.callTool({name:"learn_prepare",arguments:{...query,phase:"implement"}}));
+  const compactCoding=compactImplement.preparedContext.items.find(v=>v.kind==="coding_style");
+  assert.ok(compactCoding && compactCoding.content.length>420 && !compactCoding.contentTruncated,"default implement must keep full coding standards");
+  assert.equal(compactImplement.preparedContext.coverage.status,"complete");
   const p=parseResult(await clients.alpha.callTool({name:"learn_prepare",arguments:{...query,phase:"implement",limit:14}}));
   assert.ok(p.preparedContext.items.some(v=>v.kind==="coding_style"));
   assert.ok(p.preparedContext.items.some(v=>v.key.startsWith("optional-") && v.content.length>420 && !v.contentTruncated),"explicit limit must retain full optional content");
