@@ -3,6 +3,7 @@ import { canonicalLearnProjectKey } from "./project-identity";
 import { SharedLearnGroups } from "./shared-learn";
 import { calculateLearnUsage, type LearnUsage } from "./learn-usage";
 import { LearnUsageStore } from "./learn-usage-store";
+import { LearnIndexStore } from "./learn-index-store";
 
 export type LearnScope = "global" | "project" | "agent";
 export type LearnKind =
@@ -334,6 +335,7 @@ function mergeProjectContextContent(
 export class Learning extends DurableObject {
   private sharedGroups?: SharedLearnGroups;
   private readonly usage: LearnUsageStore;
+  private readonly index: LearnIndexStore;
   private memoryCount: number | null = null;
 
   constructor(ctx: DurableObjectState, env: unknown) {
@@ -386,6 +388,9 @@ export class Learning extends DurableObject {
     this.usage = new LearnUsageStore(this.ctx.storage.sql,
       this.ctx.storage.transactionSync?.bind(this.ctx.storage));
     this.usage.initialize();
+    this.index = new LearnIndexStore(this.ctx.storage.sql,
+      this.ctx.storage.transactionSync?.bind(this.ctx.storage));
+    this.index.initialize();
     this.migrateProjectKeys();
 
   }
@@ -436,6 +441,9 @@ export class Learning extends DurableObject {
     if (url.pathname === "/usage/prepare" && request.method === "POST") return this.usagePrepare(request);
     if (url.pathname === "/usage/report" && request.method === "POST") return this.usageReport(request);
     if (url.pathname === "/get" && request.method === "POST") return this.get(request);
+    if (url.pathname === "/index" && request.method === "POST") return this.getIndex(request);
+    if (url.pathname === "/candidates" && request.method === "POST") return this.getCandidates(request);
+    if (url.pathname === "/index-rebuild" && request.method === "POST") return Response.json({ ok: true, indexed: this.index.rebuild() });
     if (url.pathname === "/profile" && request.method === "POST") return this.profile(request);
     if (url.pathname === "/put" && request.method === "POST") return this.put(request);
     if (url.pathname === "/delete" && request.method === "POST") return this.delete(request);
@@ -844,6 +852,78 @@ export class Learning extends DurableObject {
       at: now,
     });
     return Response.json({ ok: true, changed: true, item: targetItem, change, compaction });
+  }
+
+  private async getIndex(request: Request) {
+    const body = await request.json<any>().catch(() => null);
+    if (!body || !Array.isArray(body.scopes)) return Response.json({ error: "invalid_request" }, { status: 400 });
+    const selectors: Array<{ scope: LearnScope; scopeKey: string | null }> = [];
+    for (const entry of body.scopes.slice(0, 8)) {
+      const scope = parseScope(entry?.scope);
+      if (!scope) continue;
+      const scopeKey = scope === "global" ? null : scope === "project"
+        ? this.resolveProjectKey(entry?.scopeKey)
+        : cleanText(entry?.scopeKey, 200);
+      if (scope === "global" || scopeKey) selectors.push({ scope, scopeKey });
+    }
+    if (!selectors.length) return Response.json({ entries: [], count: 0 });
+    const entries = this.index.discover(selectors, MAX_MEMORIES);
+    return Response.json({ entries, count: entries.length, strategy: "metadata-index-v1" });
+  }
+
+  // One lazy prepare request per resolved scope: discover every memory via metadata,
+  // then hydrate a bounded ranked subset. Required rules get first claim on slots.
+  private async getCandidates(request: Request) {
+    const body = await request.json<any>().catch(() => null);
+    if (!body || !Array.isArray(body.scopes)) {
+      return Response.json({ error: "invalid_request" }, { status: 400 });
+    }
+    const selectors: Array<{ scope: LearnScope; scopeKey: string | null }> = [];
+    for (const entry of body.scopes.slice(0, 8)) {
+      const scope = parseScope(entry?.scope);
+      if (!scope) continue;
+      const scopeKey = scope === "global" ? null : scope === "project"
+        ? this.resolveProjectKey(entry?.scopeKey) : cleanText(entry?.scopeKey, 200);
+      if (scope === "global" || scopeKey) selectors.push({ scope, scopeKey });
+    }
+    const resolvedProjectKey = selectors.find(s => s.scope === "project")?.scopeKey ?? null;
+    if (!selectors.length) {
+      return Response.json({ items: [], entries: [], resolvedProjectKey, strategy: "indexed-candidates-v2" });
+    }
+    const phase = cleanText(body.phase, 20);
+    const bit = phase === "read" ? 1 : phase === "plan" ? 2 :
+      phase === "implement" ? 4 : phase === "review" ? 8 : phase === "test" ? 16 : 31;
+    const terms = [...new Set(String(body.query || "").toLowerCase()
+      .split(/[^a-z0-9\u0E00-\u0E7F]+/).filter(word => word.length > 2))].slice(0, 32);
+    const entries = this.index.discover(selectors, MAX_MEMORIES);
+    const cap = boundedInt(body.candidateLimit, 96, 8, 128);
+    const ranked = [...entries].sort((a, b) => {
+      const score = (entry: typeof a) => {
+        const text = (entry.memory_key + " " + entry.content_preview).toLowerCase();
+        const matches = terms.reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0);
+        const phaseMatch = (entry.phase_mask & bit) !== 0;
+        return entry.required_rule * (phaseMatch ? 10_000 : 0) +
+          ((phase === "plan" || phase === "read") && entry.kind === "workflow" ? 250 : 0) +
+          (["implement", "review", "test"].includes(phase) && entry.kind === "coding_style" ? 300 : 0) +
+          (entry.memory_key === "preferred-agent" || entry.memory_key.startsWith("project-root:") ? 230 : 0) +
+          (entry.scope === "project" ? 50 : entry.scope === "agent" ? 40 : 0) +
+          Math.min(240, matches * 30);
+      };
+      return score(b) - score(a) || b.updated_at.localeCompare(a.updated_at) || a.id.localeCompare(b.id);
+    });
+    const chosen = ranked.slice(0, cap);
+    const ids = chosen.map(entry => entry.id);
+    const rows = ids.length ? this.ctx.storage.sql.exec<any>(
+      `SELECT * FROM ${TABLE} WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids,
+    ).toArray() : [];
+    const records = new Map(rows.map(row => [String(row.id), rowToRecord(row)]));
+    const items = ids.map(id => records.get(id)).filter((item): item is LearnRecord => Boolean(item));
+    const requiredUnavailable = ranked.filter(entry => entry.required_rule && (entry.phase_mask & bit) !== 0)
+      .filter(entry => !ids.includes(entry.id)).map(entry => entry.id);
+    return Response.json({
+      items, entries, candidateTotal: entries.length, hydrated: items.length,
+      requiredUnavailable, resolvedProjectKey, strategy: "indexed-candidates-v2",
+    });
   }
 
   private async get(request: Request) {
