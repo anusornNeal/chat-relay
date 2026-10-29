@@ -98,6 +98,16 @@ const catalogBytes=Buffer.byteLength(JSON.stringify(catalog));
 const snapshot=Object.fromEntries(tools.map(t=>[t.name,{
   inputSchema:t.inputSchema,annotations:t.annotations,outputSchema:t.outputSchema,
 }]));
+assert.equal(tools.length,65,"MCP catalog must not silently lose tools");
+assert.equal(JSON.stringify(snapshot).length,33400,"MCP input schemas and annotations must remain unchanged");
+assert.ok(descBytes<=17326,"MCP description bytes should improve at least 20% over 21658 baseline");
+const prepareDescription=tools.find(t=>t.name==="learn_prepare")?.description||"";
+const putDescription=tools.find(t=>t.name==="learn_put")?.description||"";
+assert.match(prepareDescription,/Simulated \/ Not Executed/);
+assert.match(prepareDescription,/learn_usage_report/);
+assert.match(putDescription,/scannable Markdown/);
+assert.match(putDescription,/Never write memory merely because an ordinary MCP tool ran/);
+assert.match(putDescription,/Shared Learn requires group proposal and approval/);
 const metrics={};
 const query={query:"Review Flowly chat-relay performance and coding requirements",projectKey:"chat-relay",phase:"plan"};
 try {
@@ -132,6 +142,7 @@ try {
   }
   const p=parseResult(await clients.alpha.callTool({name:"learn_prepare",arguments:{...query,phase:"implement",limit:14}}));
   assert.ok(p.preparedContext.items.some(v=>v.kind==="coding_style"));
+  assert.ok(p.preparedContext.items.some(v=>v.key.startsWith("optional-") && v.content.length>420 && !v.contentTruncated),"explicit limit must retain full optional content");
   assert.equal(p.preparedContext.coverage.status,"complete");
   const loaded=p.preparedContext.items.map(x=>x.id);
   const next=parseResult(await clients.alpha.callTool({name:"learn_prepare",arguments:{...query,phase:"test",loadedMemoryIds:loaded}}));

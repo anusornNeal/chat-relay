@@ -19,7 +19,7 @@ import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, withRequiredLea
 import { resolveLearnPhase, requiresFlowlyPlanningCheckpoint } from "./learn-phase";
 import type { LearnIndexEntry } from "./learn-index-store";
 import type { LearnPhase } from "./learn-phase";
-import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT, LEARN_USAGE_REPORT_INSTRUCTION } from "./learning-policy";
+import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT, LEARN_USAGE_REPORT_INSTRUCTION, LEARN_WRITING_FORMAT } from "./learning-policy";
 import { LearnPreflightGuard, attachLearnPrepareAdvisory, attachLearnReflectionAdvisory, isLearningCheckpointTool, shouldEmitLearnAdvisory } from "./learn-preflight-guard.mjs";
 import { LearnGateCache, preflightIdentity, preflightScope, preflightPreparationScopes, isPreflightExempt, preflightRequired } from "./learn-preflight-gate.mjs";
 import type { AuthUser, Env } from "./env";
@@ -1504,7 +1504,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
     return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
   }));
 
-  registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory only when Chat decides durable learning is warranted. Never write memory merely because an ordinary MCP tool ran. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
+  registerTool("learn_put", { description: LEARN_WRITING_FORMAT + " Never expose private memories to other accounts, never store secrets or raw tool output. Shared Learn requires group proposal and approval. Store or materially update one compact structured memory only when Chat decides durable learning is warranted. Never write memory merely because an ordinary MCP tool ran. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_put", args, async () => {
       const { call, learnChange } = await learningMutationCall(env, user, "/put", args);
       return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode, learnChange };
