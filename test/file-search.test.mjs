@@ -104,3 +104,26 @@ test("search sessions are bounded, oldest is evicted, and expired sessions are r
   assert.throws(() => manager.getSearchResults(ids[1]), /search_not_found/);
   assert.equal(manager.searches.has(ids[1]), false);
 });
+
+test("concurrent content reads retain deterministic BFS order and result-limit flags", async () => {
+  const root = await fixture();
+  for (let i = 0; i < 21; i++) {
+    await fs.writeFile(path.join(root, "ordered-" + String(i).padStart(2, "0") + ".kt"),
+      "// target marker " + i + "\n" + "pad".repeat(i * 31));
+  }
+  const manager = new FileManager(root);
+  const search = await manager.startSearch(root, "target marker", "content", 50);
+  assert.equal(search.status, "COMPLETED");
+  assert.equal(search.incomplete, false);
+  assert.equal(search.totalResults, 21);
+  assert.deepEqual(search.results.map((item) => path.basename(item.path)),
+    Array.from({ length: 20 }, (_, i) => "ordered-" + String(i).padStart(2, "0") + ".kt"));
+  const end = manager.getSearchResults(search.sessionId, 20, 20);
+  assert.equal(end.results.length, 1);
+  assert.equal(end.results[0].line, 1);
+  const capped = await manager.startSearch(root, "target marker", "content", 1);
+  assert.equal(capped.totalResults, 1);
+  assert.equal(capped.incomplete, true);
+  assert.equal(capped.stopReason, "result_limit");
+  assert.equal(capped.scanned, 1);
+});

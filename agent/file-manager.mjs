@@ -46,6 +46,23 @@ function skipSearchDirectory(name) {
   return skipWalkDirectory(name) || GENERATED_SEARCH_DIRS.has(name.toLowerCase());
 }
 
+const SEARCH_CONTENT_CONCURRENCY = 8;
+
+async function matchSearchContent(fullPath, needle) {
+  const info = await fs.stat(fullPath).catch(() => null);
+  if (!info || info.size > 1024 * 1024) return null;
+  const bytes = await fs.readFile(fullPath).catch(() => null);
+  if (!bytes || bytes.subarray(0, 1024).includes(0)) return null;
+  const content = bytes.toString("utf8");
+  const index = content.toLowerCase().indexOf(needle);
+  if (index < 0) return null;
+  return {
+    path: fullPath,
+    line: content.slice(0, index).split(/\r?\n/).length,
+    preview: content.slice(index, index + 240),
+  };
+}
+
 function splitRoots(spec) {
   if (!spec) return [process.cwd()];
   return spec.split(";").map((value) => value.trim()).filter(Boolean).map((value) => path.resolve(value));
@@ -494,35 +511,37 @@ export class FileManager {
         const current = queue.shift();
         const items = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
         items.sort((a, b) => a.name.localeCompare(b.name));
-        for (const item of items) {
-          if (session.results.length >= limit || session.scanned >= MAX_SEARCH_FILES) {
-            session.incomplete = true;
-            session.stopReason = session.results.length >= limit ? "result_limit" : "scan_limit";
-            break;
-          }
-          if (item.isDirectory() && skipSearchDirectory(item.name)) continue;
-          const fullPath = path.join(current, item.name);
-          session.scanned++;
+        // Prefetch up to eight independent file reads without changing BFS result order.
+        // Speculative reads may exceed the logical result cap by at most one small window.
+        const windowSize = searchType === "content" ? SEARCH_CONTENT_CONCURRENCY : Math.max(items.length, 1);
+        for (let offset = 0; offset < items.length; offset += windowSize) {
+          const group = items.slice(offset, offset + windowSize);
+          const contentMatches = searchType === "content"
+            ? await Promise.all(group.map((item) =>
+              item.isFile() && !SEARCH_BINARY_EXTENSIONS.has(path.extname(item.name).toLowerCase())
+                ? matchSearchContent(path.join(current, item.name), needle)
+                : null))
+            : null;
 
-          if (searchType === "files" && item.name.toLowerCase().includes(needle)) {
-            session.results.push({ path: fullPath, name: item.name, type: item.isDirectory() ? "directory" : "file" });
-          } else if (searchType === "content" && item.isFile()
-            && !SEARCH_BINARY_EXTENSIONS.has(path.extname(item.name).toLowerCase())) {
-            const info = await fs.stat(fullPath).catch(() => null);
-            if (info && info.size <= 1024 * 1024) {
-              const bytes = await fs.readFile(fullPath).catch(() => null);
-              if (bytes && !bytes.subarray(0, 1024).includes(0)) {
-                const text = bytes.toString("utf8");
-                const index = text.toLowerCase().indexOf(needle);
-                if (index >= 0) {
-                  const before = text.slice(0, index);
-                  const line = before.split(/\r?\n/).length;
-                  session.results.push({ path: fullPath, line, preview: text.slice(index, index + 240) });
-                }
-              }
+          for (let index = 0; index < group.length; index++) {
+            if (session.results.length >= limit || session.scanned >= MAX_SEARCH_FILES) {
+              session.incomplete = true;
+              session.stopReason = session.results.length >= limit ? "result_limit" : "scan_limit";
+              break;
             }
+            const item = group[index];
+            if (item.isDirectory() && skipSearchDirectory(item.name)) continue;
+            const fullPath = path.join(current, item.name);
+            session.scanned++;
+
+            if (searchType === "files" && item.name.toLowerCase().includes(needle)) {
+              session.results.push({ path: fullPath, name: item.name, type: item.isDirectory() ? "directory" : "file" });
+            } else if (contentMatches?.[index]) {
+              session.results.push(contentMatches[index]);
+            }
+            if (item.isDirectory()) queue.push(fullPath);
           }
-          if (item.isDirectory()) queue.push(fullPath);
+          if (session.incomplete) break;
         }
         if (!session.incomplete && queue.length > 0
           && (session.results.length >= limit || session.scanned >= MAX_SEARCH_FILES)) {
