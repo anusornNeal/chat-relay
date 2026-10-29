@@ -18,3 +18,23 @@ export function resolveLearnPhase(explicit: LearnPhase | undefined, query: unkno
   if (/(?:test|verify)/i.test(tool)) return "test";
   return "general";
 }
+
+/** Core/Required are explicit authoring flags, never inferred from confidence or usage. */
+export function isRequiredLearnKey(key: string): boolean {
+  return key === "flowly-implementation-workflow" ||
+    /^(?:required|core)[-:]/i.test(key);
+}
+export function learnPhaseMask(phase: LearnPhase): number {
+  switch (phase) {
+    case "read": return 1;
+    case "plan": return 2;
+    case "implement": return 4;
+    case "review": return 8;
+    case "test": return 16;
+    default: return 31;
+  }
+}
+/** A Flowly planning checkpoint is expected when the user is planning board work. */
+export function requiresFlowlyPlanningCheckpoint(query: unknown, phase: LearnPhase): boolean {
+  return phase === "plan" && /\bflowly\b|\b(?:FLY|REL|BUD)-\d+\b|\b(?:medium|large|critical)\b|งาน(?:ขนาด)?(?:กลาง|ใหญ่)|งานที่ซับซ้อน/i.test(String(query ?? ""));
+}

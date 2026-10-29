@@ -15,7 +15,9 @@ import { readRelayResultMetadata } from "./relay-result";
 import type { LearnChange, LearnRecord } from "./learning";
 import { preferredAgentForContext, routingContext } from "./context-routing";
 import { canonicalLearnProjectKey } from "./project-identity";
-import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, type LearnScopeSelector } from "./learning-relevance";
+import { buildLearnRelevanceContext, buildRelevantLearnEnvelope, withRequiredLearnCoverage, type LearnScopeSelector } from "./learning-relevance";
+import { resolveLearnPhase, requiresFlowlyPlanningCheckpoint } from "./learn-phase";
+import type { LearnIndexEntry } from "./learn-index-store";
 import type { LearnPhase } from "./learn-phase";
 import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT, LEARN_USAGE_REPORT_INSTRUCTION } from "./learning-policy";
 import { LearnPreflightGuard, attachLearnPrepareAdvisory, attachLearnReflectionAdvisory, isLearningCheckpointTool } from "./learn-preflight-guard.mjs";
@@ -139,17 +141,19 @@ async function readLearnPrepareScopes(
   env: Env,
   user: AuthUser,
   scopes: LearnScopeSelector[],
-): Promise<{ ok: true; items: LearnRecord[]; projectKey?: string } | { ok: false; statusCode: number }> {
-  const call = await learningCall(env, user, "/get", {
+  hints: LearnPrepareArgs,
+): Promise<{ ok: true; items: LearnRecord[]; entries: LearnIndexEntry[]; projectKey?: string } | { ok: false; statusCode: number }> {
+  const call = await learningCall(env, user, "/candidates", {
     scopes,
-    limit: 64,
-    perKind: 4,
-    routingReserve: 24,
+    query: hints.query,
+    phase: resolveLearnPhase(hints.phase, hints.query, hints.toolHint),
+    candidateLimit: hints.projectKey && hints.agentId ? 64 : 48,
   });
   if (!call.ok) return { ok: false, statusCode: call.statusCode };
   try {
-    const data = JSON.parse(call.body) as { items?: LearnRecord[]; resolvedProjectKey?: string };
-    return { ok: true, items: Array.isArray(data.items) ? data.items.slice(0, 100) : [], projectKey: data.resolvedProjectKey };
+    const data = JSON.parse(call.body) as { items?: LearnRecord[]; entries?: LearnIndexEntry[]; resolvedProjectKey?: string };
+    return { ok: true, items: Array.isArray(data.items) ? data.items.slice(0, 128) : [],
+      entries: Array.isArray(data.entries) ? data.entries.slice(0, 512) : [], projectKey: data.resolvedProjectKey };
   } catch {
     return { ok: false, statusCode: 502 };
   }
@@ -160,22 +164,31 @@ async function prepareLearnContext(
   user: AuthUser,
   args: LearnPrepareArgs,
 ): Promise<{ ok: boolean; body: string; statusCode?: number }> {
+  const readScopes = (scopes: LearnScopeSelector[]) => readLearnPrepareScopes(env, user, scopes, args);
   const globalScope: LearnScopeSelector = { scope: "global" };
-  const globalRead = await readLearnPrepareScopes(env, user, [globalScope]);
+  const explicitProjectKey = normalizeLearnPrepareProjectKey(args.projectKey);
+  const explicitAgentId = normalizeLearnPrepareAgentId(args.agentId);
+  // Explicit project/agent scopes are known: query all via one DO request.
+  const initialScopes: LearnScopeSelector[] = [globalScope];
+  if (explicitProjectKey) initialScopes.push({ scope: "project", scopeKey: explicitProjectKey });
+  if (explicitAgentId) initialScopes.push({ scope: "agent", scopeKey: explicitAgentId });
+  const globalRead = await readScopes(initialScopes);
   if (!globalRead.ok) {
     return { ok: false, statusCode: globalRead.statusCode, body: JSON.stringify({ error: "learning_unavailable" }) };
   }
 
   const records: LearnRecord[] = [...globalRead.items];
-  const activeScopes: LearnScopeSelector[] = [globalScope];
+  const indexEntries: LearnIndexEntry[] = [...globalRead.entries];
+  const activeScopes: LearnScopeSelector[] = initialScopes.map(scope =>
+    scope.scope === "project" && globalRead.projectKey
+      ? { ...scope, scopeKey: globalRead.projectKey } : scope);
   let route = routingContext(args, records);
-  const explicitProjectKey = normalizeLearnPrepareProjectKey(args.projectKey);
   const requestedProjectKey = explicitProjectKey ?? canonicalLearnProjectKey(route.projectKey);
-  let projectKey = requestedProjectKey;
-  if (requestedProjectKey) {
+  let projectKey = globalRead.projectKey ?? requestedProjectKey;
+  if (requestedProjectKey && !explicitProjectKey) {
     // The existing project read resolves aliases and returns the canonical key:
     // no extra Learning DO subrequest during learn_prepare.
-    const projectRead = await readLearnPrepareScopes(env, user, [
+    const projectRead = await readScopes([
       { scope: "project", scopeKey: requestedProjectKey },
     ]);
     if (!projectRead.ok) {
@@ -184,19 +197,20 @@ async function prepareLearnContext(
     projectKey = projectRead.projectKey ?? requestedProjectKey;
     activeScopes.push({ scope: "project", scopeKey: projectKey });
     records.push(...projectRead.items);
+    indexEntries.push(...projectRead.entries);
   }
 
   const preferredAgent = preferredAgentForContext(records, projectKey);
-  const explicitAgentId = normalizeLearnPrepareAgentId(args.agentId);
   const agentId = explicitAgentId ?? preferredAgent?.agentId ?? null;
-  if (agentId) {
+  if (agentId && !explicitAgentId) {
     const agentScope: LearnScopeSelector = { scope: "agent", scopeKey: agentId };
-    const agentRead = await readLearnPrepareScopes(env, user, [agentScope]);
+    const agentRead = await readScopes([agentScope]);
     if (!agentRead.ok) {
       return { ok: false, statusCode: agentRead.statusCode, body: JSON.stringify({ error: "learning_unavailable" }) };
     }
     activeScopes.push(agentScope);
     records.push(...agentRead.items);
+    indexEntries.push(...agentRead.entries);
   }
 
   if (projectKey) {
@@ -226,8 +240,13 @@ async function prepareLearnContext(
     items: [],
   };
 
+  const enrichedContext = withRequiredLearnCoverage(preparedContext, indexEntries,
+    remainingRecords, activeScopes, relevance, [...loadedIds],
+    requiresFlowlyPlanningCheckpoint(args.query, relevance.phase)
+      ? ["flowly-implementation-workflow"] : []);
+
   let usageReceiptId: string | null = null;
-  const privateIds = preparedContext.items.filter(item => !item.origin).map(item => item.id);
+  const privateIds = enrichedContext.items.filter(item => !item.origin).map(item => item.id);
   if (privateIds.length) {
     // Exactly one additional Learning DO request per preparation, never per tool.
     // Retrieval counters only include records actually delivered in the envelope.
@@ -243,7 +262,7 @@ async function prepareLearnContext(
       mode: args.phase || loadedIds.size ? "lazy-phase" : "explicit-one-shot",
       phase: relevance.phase,
       retrieval: loadedIds.size ? "incremental" : "initial",
-      preparedContext,
+      preparedContext: enrichedContext,
       usageReceiptId,
       routingContext: {
         projectKey,
@@ -251,7 +270,11 @@ async function prepareLearnContext(
         agentId,
         agentSource: agentId ? (explicitAgentId ? "explicit" : preferredAgent?.source ?? "preferred") : null,
       },
-      guidance: "Reuse all prior prepared context. If the task phase materially changes (e.g. read card to implement, review, or test), call learn_prepare again with the new goal, phase and loadedMemoryIds from prior envelopes. Do not repeat for the same phase or before every tool. " + (usageReceiptId ? LEARN_USAGE_REPORT_INSTRUCTION : "No private Learn usage receipt was issued. Do not call learn_usage_report for this preparation."),
+      guidance: (enrichedContext.coverage?.status === "incomplete"
+        ? "REQUIRED LEARN COVERAGE INCOMPLETE. Before acting, explicitly resolve or report missing rules: " + enrichedContext.coverage.missingKeys.join(", ") + ". "
+        : enrichedContext.coverage?.status === "needs-review"
+          ? "LEARN NEEDS REVIEW. Evidence-backed stale rules require verification before relying on them: " + enrichedContext.coverage.needsReviewKeys.join(", ") + ". "
+          : "") + "Reuse all prior prepared context. If the task phase materially changes (e.g. read card to implement, review, or test), call learn_prepare again with the new goal, phase and loadedMemoryIds from prior envelopes. Do not repeat for the same phase or before every tool. " + (usageReceiptId ? LEARN_USAGE_REPORT_INSTRUCTION : "No private Learn usage receipt was issued. Do not call learn_usage_report for this preparation."),
     }),
   };
 }
@@ -411,13 +434,16 @@ type LearningMutationPayload = {
   change?: LearnChange | null;
 };
 
-type LearnActivityTool = "learn_prepare" | "learn_get" | "learn_put" | "learn_delete" | "learn_feedback" | "learn_usage_report";
+type LearnActivityTool = "learn_prepare" | "learn_get" | "learn_put" | "learn_delete" | "learn_feedback" | "learn_usage_report" | "learn_lifecycle_get" | "learn_lifecycle_review" | "learn_lifecycle_restore";
 
 const LEARN_ACTIVITY_TOOLS = new Set<LearnActivityTool>([
   "learn_prepare",
   "learn_get",
   "learn_put",
   "learn_usage_report",
+  "learn_lifecycle_get",
+  "learn_lifecycle_review",
+  "learn_lifecycle_restore",
   "learn_delete",
   "learn_feedback",
 ]);
@@ -1243,7 +1269,7 @@ const terminalSessionIdSchema = z.union([
 ]);
 
 const READ_ONLY_TOOLS = new Set([
-  "whoami", "list_agents", "learn_prepare", "learn_get", "learn_group_list", "learn_group_get", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
+  "whoami", "list_agents", "learn_prepare", "learn_get", "learn_lifecycle_get", "learn_group_list", "learn_group_get", "ping_agent", "get_config", "get_recent_tool_calls", "agent_lifecycle_status",
   "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch",
   "start_search", "get_more_search_results", "list_processes", "screenshot", "clipboard_read", "list_windows",
   "terminal_read", "terminal_list", "terminal_batch_status", "terminal_batch_read", "read_process_output", "list_sessions",
@@ -1431,6 +1457,45 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
       return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
     }),
   );
+
+  // Validity is separate from usage/retrieval. No automatic stale-data rewrites.
+  registerTool("learn_lifecycle_get", {
+    description: "Read evidence-backed validity, revision history and rollback snapshots of a private Learn memory.",
+    inputSchema: { id: z.string().regex(/^mem_[a-f0-9]{64}$/) },
+    annotations: annotationsForTool("learn_lifecycle_get"), ...oauthToolSecurity(),
+  } as any, async (args) => instrumentTool(env, user, "learn_lifecycle_get", args, async () => {
+    const call = await learningCall(env, user, "/lifecycle", args);
+    return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+  }));
+
+  registerTool("learn_lifecycle_review", {
+    description: "Explicitly mark a private Learn valid, needs-review or deprecated ONLY with a concrete evidence reference and reason. Usage ranking must not change factual validity.",
+    inputSchema: {
+      id: z.string().regex(/^mem_[a-f0-9]{64}$/),
+      status: z.enum(["valid", "needs-review", "deprecated"]),
+      reason: z.string().min(8).max(400),
+      evidenceRef: z.string().min(8).max(200),
+      sourceFingerprint: z.string().max(160).optional(),
+    },
+    annotations: annotationsForTool("learn_lifecycle_review", { destructiveHint: false }), ...oauthToolSecurity(),
+  } as any, async (args) => instrumentTool(env, user, "learn_lifecycle_review", args, async () => {
+    const call = await learningCall(env, user, "/lifecycle/status", args);
+    return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+  }));
+
+  registerTool("learn_lifecycle_restore", {
+    description: "Explicitly restore one retained prior Learn content revision with evidence; this is a reversible account-scoped write.",
+    inputSchema: {
+      id: z.string().regex(/^mem_[a-f0-9]{64}$/),
+      revision: z.number().int().min(1),
+      reason: z.string().min(8).max(400),
+      evidenceRef: z.string().min(8).max(200),
+    },
+    annotations: annotationsForTool("learn_lifecycle_restore", { destructiveHint: true }), ...oauthToolSecurity(),
+  } as any, async (args) => instrumentTool(env, user, "learn_lifecycle_restore", args, async () => {
+    const call = await learningCall(env, user, "/lifecycle/restore", args);
+    return { value: toolResult(call), ok: call.ok, statusCode: call.statusCode };
+  }));
 
   registerTool("learn_put", { description: LEARN_BASELINE_CONTEXT + " Store or materially update one compact structured memory only when Chat decides durable learning is warranted. Never write memory merely because an ordinary MCP tool ran. Project-scoped project_context is automatically canonicalized/compacted; prefer narrower Learn kinds for feature-specific behavior. This is adaptive memory, not model training.", inputSchema: { key: z.string().min(1).max(160), kind: learnKindSchema, scope: z.enum(["global", "project", "agent"]), scopeKey: z.string().min(1).max(200).optional(), content: z.string().min(1).max(4000), confidence: z.number().int().min(0).max(100).optional() }, annotations: annotationsForTool("learn_put", { destructiveHint: false }), ...oauthToolSecurity() } as any,
     async (args) => instrumentTool(env, user, "learn_put", args, async () => {

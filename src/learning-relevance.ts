@@ -1,7 +1,8 @@
 import type { LearnKind, LearnRecord, LearnScope } from "./learning";
 import { extractRoutingSignals } from "./context-routing";
 import { usageRoutingAdjustment } from "./learn-usage";
-import { resolveLearnPhase, type LearnPhase } from "./learn-phase";
+import { resolveLearnPhase, isRequiredLearnKey, learnPhaseMask, type LearnPhase } from "./learn-phase";
+import type { LearnIndexEntry } from "./learn-index-store";
 
 export type LearnScopeSelector = {
   scope: LearnScope;
@@ -10,16 +11,27 @@ export type LearnScopeSelector = {
 
 export type LearnedContextItem = Pick<
   LearnRecord,
-  "id" | "key" | "kind" | "scope" | "scopeKey" | "content" | "confidence" | "updatedAt" | "origin" | "groupId" | "approvedBy"
+  "id" | "key" | "kind" | "scope" | "scopeKey" | "content" | "confidence" | "updatedAt" | "origin" | "groupId" | "approvedBy" | "validity"
 >;
+
+type PreparedLearnContent = LearnedContextItem & { contentTruncated?: boolean };
 
 export type LearnedContextEnvelope = {
   version: 1;
   authority: "advisory";
   instructionPolicy: "non-authoritative";
   activated: LearnScopeSelector[];
-  items: LearnedContextItem[];
+  items: PreparedLearnContent[];
   conflicts?: Array<{ key: string; kind: string; groupId: string; personalId: string }>;
+  coverage?: {
+    status: "complete" | "incomplete" | "needs-review";
+    requiredKeys: string[];
+    missingKeys: string[];
+    needsReviewKeys: string[];
+    previouslyLoadedIds: string[];
+    discovered: number;
+    hydrated: number;
+  };
 };
 
 const DEFAULT_TOP_K = 16;
@@ -263,10 +275,17 @@ export function selectRelevantLearnRecords(
     if (key !== candidate.record.kind + "|") canonical.add(key);
   };
 
+  // Mandatory/core rules always outrank confidence, scope caps and deduplication.
+  // If the count exceeds the caller limit, the envelope reports missing coverage.
+  for (const candidate of ranked) {
+    if (selected.length >= boundedLimit) break;
+    if (isRequiredLearnKey(candidate.record.key)) add(candidate);
+  }
+
   // Reserve a slot for coding standards when the same chat moves into code work.
   if (ctx.phase === "implement" || ctx.phase === "review" || ctx.phase === "test") {
     const codingStandard = ranked.find((candidate) => candidate.record.kind === "coding_style");
-    if (codingStandard && canAdd(codingStandard, true)) add(codingStandard);
+    if (selected.length < boundedLimit && codingStandard && canAdd(codingStandard, true)) add(codingStandard);
   }
 
   for (const candidate of ranked) {
@@ -292,16 +311,21 @@ export function buildRelevantLearnEnvelope(
   const ranked = selectRelevantLearnRecords(records, ctx, limit);
   if (!ranked.length) return null;
 
-  const items: LearnedContextItem[] = [];
+  const items: PreparedLearnContent[] = [];
   let chars = 0;
+  const contentBudget = ["implement", "review", "test"].includes(ctx.phase) ? 16_000 : MAX_CONTENT_CHARS;
   for (const record of ranked) {
-    if (chars >= MAX_CONTENT_CHARS) break;
-    const itemLimit = record.kind === "project_context" && record.key.startsWith("project-context:")
+    if (chars >= contentBudget) break;
+    if (record.validity?.status === "deprecated") continue;
+    const itemLimit = isRequiredLearnKey(record.key) ? 4_000 : record.kind === "project_context" && record.key.startsWith("project-context:")
       ? MAX_CANONICAL_PROJECT_CONTEXT_CHARS
       : record.kind === "coding_style" && ["implement", "review", "test"].includes(ctx.phase)
         ? MAX_CODING_STYLE_CONTENT_CHARS
         : MAX_ITEM_CONTENT_CHARS;
-    const content = String(record.content || "").slice(0, Math.min(itemLimit, MAX_CONTENT_CHARS - chars));
+    const fullContent = String(record.content || "");
+    const content = fullContent.slice(0, Math.min(itemLimit, contentBudget - chars));
+    // Mandatory content is all-or-missing: never silently truncate a required rule.
+    if (isRequiredLearnKey(record.key) && content.length !== fullContent.length) continue;
     if (!content) continue;
     chars += content.length;
     items.push({
@@ -313,6 +337,8 @@ export function buildRelevantLearnEnvelope(
       content,
       confidence: record.confidence,
       updatedAt: record.updatedAt,
+      ...(record.validity ? { validity: record.validity } : {}),
+      ...(content.length < fullContent.length ? { contentTruncated: true } : {}),
       ...(record.origin === "shared" ? { origin: "shared" as const, groupId: record.groupId, approvedBy: record.approvedBy } : {}),
     });
   }
@@ -333,4 +359,91 @@ export function buildRelevantLearnEnvelope(
         ).slice(0, 8),
       }
     : null;
+}
+
+
+/**
+ * Explicit coverage contract. A ranking miss or content-budget cap is observable,
+ * never interpreted as a content-quality failure and never silently accepted.
+ */
+export function withRequiredLearnCoverage(
+  envelope: LearnedContextEnvelope | null,
+  indexEntries: LearnIndexEntry[],
+  availableRecords: LearnRecord[],
+  activated: LearnScopeSelector[],
+  ctx: LearnRelevanceContext,
+  loadedMemoryIds: string[] = [],
+  expectedKeys: string[] = [],
+): LearnedContextEnvelope {
+  const base: LearnedContextEnvelope = envelope ?? {
+    version: 1,
+    authority: "advisory",
+    instructionPolicy: "non-authoritative",
+    activated,
+    items: [],
+  };
+  const loaded = new Set(loadedMemoryIds);
+  const delivered = new Set(base.items.map(item => item.id));
+  const requiredKeys = new Set<string>(expectedKeys);
+  const missingKeys = new Set<string>();
+  const needsReviewKeys = new Set<string>();
+  const previouslyLoadedIds: string[] = [];
+
+  for (const entry of indexEntries) {
+    if (!entry.required_rule || !(entry.phase_mask & learnPhaseMask(ctx.phase))) continue;
+    requiredKeys.add(entry.memory_key);
+    if (entry.validity_status === "deprecated") {
+      missingKeys.add(entry.memory_key);
+      continue;
+    }
+    if (entry.validity_status === "needs-review") needsReviewKeys.add(entry.memory_key);
+    if (loaded.has(entry.id)) previouslyLoadedIds.push(entry.id);
+    else if (!delivered.has(entry.id)) missingKeys.add(entry.memory_key);
+  }
+
+  // Shared approved rules originate from the group service rather than the private index.
+  for (const record of availableRecords) {
+    if (!isRequiredLearnKey(record.key)) continue;
+    requiredKeys.add(record.key);
+    if (record.validity?.status === "needs-review") needsReviewKeys.add(record.key);
+    if (record.validity?.status === "deprecated") missingKeys.add(record.key);
+    else if (!delivered.has(record.id) && !loaded.has(record.id)) missingKeys.add(record.key);
+  }
+
+  for (const key of expectedKeys) {
+    const exists = indexEntries.some(entry => entry.memory_key === key &&
+      entry.validity_status !== "deprecated") ||
+      availableRecords.some(record => record.key === key && record.validity?.status !== "deprecated");
+    if (!exists) missingKeys.add(key);
+  }
+
+  if (["implement", "review", "test"].includes(ctx.phase)) {
+    const codingIds = indexEntries.filter(entry => entry.kind === "coding_style" &&
+      entry.validity_status !== "deprecated").map(entry => entry.id);
+    const sharedCoding = availableRecords.filter(record => record.kind === "coding_style");
+    if (codingIds.length || sharedCoding.length) {
+      requiredKeys.add("coding_style");
+      if (!base.items.some(item => item.kind === "coding_style") &&
+          !codingIds.some(id => loaded.has(id)) &&
+          !sharedCoding.some(record => loaded.has(record.id))) {
+        missingKeys.add("coding_style");
+      }
+    }
+  }
+
+  for (const item of base.items) {
+    if (item.validity?.status === "needs-review") needsReviewKeys.add(item.key);
+    if (item.validity?.status === "deprecated") missingKeys.add(item.key);
+  }
+
+  base.coverage = {
+    status: missingKeys.size ? "incomplete" : needsReviewKeys.size ? "needs-review" : "complete",
+    requiredKeys: [...requiredKeys].sort(),
+    missingKeys: [...missingKeys].sort(),
+    needsReviewKeys: [...needsReviewKeys].sort(),
+    previouslyLoadedIds,
+    discovered: indexEntries.length,
+    hydrated: availableRecords.length,
+  };
+  return base;
 }
