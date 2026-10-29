@@ -117,6 +117,8 @@ try {
         assert.ok(context.items.some(v=>v.key==="flowly-implementation-workflow"));
         assert.ok(context.items.every(v=>v.content.includes(name==="alpha"?"ALPHA":"BRAVO")));
         assert.ok(p.usageReceiptId);
+        assert.ok(context.items.every(v => v.key !== "flowly-implementation-workflow" || !v.contentTruncated), "required rules must not truncate");
+        assert.ok(context.items.every(v => v.kind !== "coding_style" || !v.contentTruncated), "coding style must be complete");
       }
       if(i>=3) {
         wall.push(elapsed);bytes.push(Buffer.byteLength(JSON.stringify(p)));

@@ -307,6 +307,7 @@ export function buildRelevantLearnEnvelope(
   activated: LearnScopeSelector[],
   ctx: LearnRelevanceContext,
   limit = DEFAULT_TOP_K,
+  optionalContentLimit?: number,
 ): LearnedContextEnvelope | null {
   const ranked = selectRelevantLearnRecords(records, ctx, limit);
   if (!ranked.length) return null;
@@ -323,7 +324,12 @@ export function buildRelevantLearnEnvelope(
         ? MAX_CODING_STYLE_CONTENT_CHARS
         : MAX_ITEM_CONTENT_CHARS;
     const fullContent = String(record.content || "");
-    const content = fullContent.slice(0, Math.min(itemLimit, contentBudget - chars));
+    // Compact only optional advisories; required/coding/agent/shared/project rules stay complete.
+    const canCompact = optionalContentLimit !== undefined && !isRequiredLearnKey(record.key) &&
+      record.kind !== "coding_style" && record.kind !== "agent_context" &&
+      record.kind !== "project_context" && record.origin !== "shared";
+    const boundedItemLimit = canCompact ? Math.min(itemLimit, optionalContentLimit) : itemLimit;
+    const content = fullContent.slice(0, Math.min(boundedItemLimit, contentBudget - chars));
     // Mandatory content is all-or-missing: never silently truncate a required rule.
     if (isRequiredLearnKey(record.key) && content.length !== fullContent.length) continue;
     if (!content) continue;

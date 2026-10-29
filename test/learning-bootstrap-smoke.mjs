@@ -221,8 +221,8 @@ const agentRecords = [
   assert.match(worker, /remainingRecords = deduped\.filter/);
   assert.match(worker, /REQUIRED LEARN COVERAGE INCOMPLETE/, "missing required rules must be surfaced before action");
   assert.match(worker, /withRequiredLearnCoverage\(/, "required rules need an explicit coverage contract");
-  assert.match(worker, /usageReceiptId \? LEARN_USAGE_REPORT_INSTRUCTION/, "prepared receipts must carry the task-completion rule");
-  assert.match(worker, /Do not repeat for the same phase or before every tool/);
+  assert.match(worker, /usageReceiptId \? "At completion call learn_usage_report exactly once/, "prepared receipts must carry the reporting rule");
+  assert.match(worker, /Never prepare for every tool/);
   assert.match(worker, /const globalRead = await readScopes\(initialScopes\)/);
   assert.match(worker, /initialScopes\.push\(\{ scope: "project"/, "explicit scopes should be batched");
   assert.match(worker, /"\/candidates"/, "prepare must read from the indexed candidate API");
