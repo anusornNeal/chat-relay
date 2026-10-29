@@ -275,7 +275,7 @@ async function prepareLearnContext(
         ? "REQUIRED LEARN COVERAGE INCOMPLETE. Before acting, explicitly resolve or report missing rules: " + enrichedContext.coverage.missingKeys.join(", ") + ". "
         : enrichedContext.coverage?.status === "needs-review"
           ? "LEARN NEEDS REVIEW. Evidence-backed stale rules require verification before relying on them: " + enrichedContext.coverage.needsReviewKeys.join(", ") + ". "
-          : "") + "Reuse previous context; on phase/project/agent change, call learn_prepare with loadedMemoryIds. Never prepare for every tool. Truncated optional content may be inspected with targeted learn_get. " + (usageReceiptId ? "At completion call learn_usage_report exactly once for this receipt. Report only materially applied IDs (or []), and attach genuine evidence to verified IDs." : "No private receipt; do not call learn_usage_report for this preparation."),
+          : "") + "Reuse previous context; on phase/project/agent change, call learn_prepare with loadedMemoryIds. Never prepare for every tool. Truncated optional content may be inspected with targeted learn_get. " + (usageReceiptId ? "At completion call learn_usage_report exactly once for this receipt. Report only materially applied IDs (or []), and attach genuine evidence to verified IDs." : "No private receipt. Do not call learn_usage_report for this preparation."),
     }),
   };
 }
