@@ -53,3 +53,38 @@ test("randomized jitter remains bounded at every reconnect attempt", () => {
     }
   }
 });
+
+test("in-flight failures explicitly forbid automatic retries of unknown side effects", async () => {
+  // Source contract: the Worker already dispatched the command; a disconnect,
+  // timeout or oversized response cannot prove whether it executed.
+  const { readFile } = await import("node:fs/promises");
+  const { fileURLToPath } = await import("node:url");
+  const source = await readFile(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
+  for (const code of ["agent_disconnected", "agent_timeout", "agent_response_too_large"]) {
+    const at = source.indexOf('"' + code + '"');
+    assert.ok(at >= 0, "missing error: " + code);
+    const snippet = source.slice(at, at + 160);
+    if (code !== "agent_disconnected") {
+      assert.ok(snippet.includes('executionStatus: "unknown"'), code + " must preserve uncertain execution");
+      assert.ok(snippet.includes("retrySafe: false"), code + " must forbid blind retry");
+    }
+  }
+  assert.ok(source.includes('pending.resolve(error(status, code, { executionStatus: "unknown", retrySafe: false }))'));
+  assert.ok(source.includes("isAuthoritativeAgentSocket(socket, this.resolveAgent())"));
+});
+
+test("transport close 1006 is categorized without exposing private payload", () => {
+  const state = new AgentConnectionState({baseReconnectMs:2000,maxReconnectMs:30000});
+  state.markConnected(1000);
+  state.markSocketError("Authorization: Bearer secret-data");
+  state.markDisconnected(1006, "socket_closed", 32000);
+  assert.equal(state.snapshot().lastCloseCode,1006);
+  assert.equal(state.snapshot().lastDisconnectCategory,"abnormal_transport");
+  assert.equal(state.snapshot().lastSocketError,"socket_error");
+  assert.ok(!JSON.stringify(state.snapshot()).includes("secret-data"));
+  state.scheduleReconnect(250,32000);
+  assert.equal(state.snapshot().nextReconnectDelayMs,250);
+  state.markConnected(33000);
+  assert.equal(state.snapshot().reconnectAttempt,0);
+  assert.equal(state.snapshot().reconnectCount,1);
+});

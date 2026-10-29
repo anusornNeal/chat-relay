@@ -516,7 +516,7 @@ export class Relay extends DurableObject {
       if (!requestIdHint || !pendingHint) return;
       clearTimeout(pendingHint.timeout);
       this.pending.delete(requestIdHint);
-      pendingHint.resolve(error(502, "agent_response_too_large", { maxBytes: maxResponseBytes }));
+      pendingHint.resolve(error(502, "agent_response_too_large", { maxBytes: maxResponseBytes, executionStatus: "unknown", retrySafe: false }));
       return;
     }
 
