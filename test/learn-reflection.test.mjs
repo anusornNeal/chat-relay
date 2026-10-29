@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { LearnPreflightGuard, attachLearnReflectionAdvisory, isLearningCheckpointTool, shouldEmitLearnAdvisory } from "../src/learn-preflight-guard.mjs";
 
-assert.equal(isLearningCheckpointTool("write_file", {}), true);
+assert.equal(isLearningCheckpointTool("write_file", {}), false);
+assert.equal(isLearningCheckpointTool("edit_block", {}), false);
+assert.equal(isLearningCheckpointTool("create_directory", {}), false);
 assert.equal(isLearningCheckpointTool("read_file", {}), false);
 assert.equal(isLearningCheckpointTool("terminal_exec", {command: "git commit -m test"}), true);
 assert.equal(isLearningCheckpointTool("terminal_exec", {command: "git status"}), false);

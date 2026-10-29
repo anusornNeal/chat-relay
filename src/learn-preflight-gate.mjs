@@ -3,7 +3,6 @@
 export const PREFLIGHT_TTL_MS = 4 * 60 * 60 * 1000;
 export const PREFLIGHT_SCOPE_GLOBAL = "global";
 const MAX_CACHE = 1024;
-const MAX_BLOCKS = 2;
 const FALLBACK_MS = 5 * 60 * 1000;
 const EXEMPT_TOOLS = new Set([
   "whoami", "list_agents", "learn_prepare", "learn_get", "learn_put",
@@ -96,12 +95,9 @@ export class LearnGateCache {
   blockedOrFallback(userId, activityId, scope) {
     const previous = this.get(userId, activityId, scope);
     if (previous?.prepared || previous?.bypass) return false;
-    const blocks = (previous?.blocks || 0) + 1;
-    if (blocks > MAX_BLOCKS) {
-      this.put(userId, activityId, scope, { bypass: true, blocks }, FALLBACK_MS);
-      return false;
-    }
-    this.put(userId, activityId, scope, { blocks }, FALLBACK_MS);
+    // Unprepared is an enforceable scope gate: repeated calls may not make
+    // themselves prepared. Outages alone can explicitly set the short bypass.
+    this.put(userId, activityId, scope, { blocks: Math.min(2, (previous?.blocks || 0) + 1) }, FALLBACK_MS);
     return true;
   }
   bypass(userId, activityId, scope) {

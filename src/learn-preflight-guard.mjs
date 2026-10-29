@@ -17,10 +17,10 @@ export const LEARN_REFLECTION_ADVISORY = Object.freeze({
 const LEARN_PREPARE_ADVISORY_TEXT = JSON.stringify({ relayAdvisory: LEARN_PREPARE_ADVISORY });
 const LEARN_REFLECTION_ADVISORY_TEXT = JSON.stringify({ relayAdvisory: LEARN_REFLECTION_ADVISORY });
 
-// An inexpensive checkpoint, not text mining of user messages or tool output.
-const CHANGE_TOOLS = new Set(["write_file", "edit_block", "move_path", "create_directory", "delete_path", "cleanup_worktree"]);
+// Reflection is a work checkpoint, not an ordinary filesystem operation.
+// Worker isolates can change between calls; per-isolate deduplication cannot
+// guarantee a once-per-chat reminder. Only explicit VCS completion is eligible.
 export function isLearningCheckpointTool(tool, args) {
-  if (CHANGE_TOOLS.has(tool)) return true;
   if (tool !== "terminal_exec") return false;
   const command = typeof args?.command === "string" ? args.command.slice(0, 4000) : "";
   return /(?:^|[\s;&|])git\s+(?:commit|push)\b/i.test(command);
