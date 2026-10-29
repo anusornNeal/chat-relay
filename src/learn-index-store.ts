@@ -22,6 +22,7 @@ export type LearnIndexEntry = {
   id:string; memory_key:string; kind:string; scope:string; scope_key:string|null;
   updated_at:string; content_length:number; content_preview:string;
   required_rule:number; core_rule:number; phase_mask:number;
+  validity_status?: "valid" | "needs-review" | "deprecated";
 };
 export class LearnIndexStore {
   constructor(private readonly sql:Sql,
@@ -111,8 +112,10 @@ export class LearnIndexStore {
       else{clauses.push("(scope=? AND scope_key=?)");args.push(s.scope,s.scopeKey!);}
     }
     return this.sql.exec<LearnIndexEntry>(
-      `SELECT * FROM ${INDEX} WHERE ${clauses.join(" OR ")}
-      ORDER BY required_rule DESC,core_rule DESC,updated_at DESC,id ASC LIMIT ?`,
+      `SELECT i.*,l.status AS validity_status FROM ${INDEX} i
+      LEFT JOIN learning_lifecycle_state_v1 l ON l.memory_id=i.id
+      WHERE ${clauses.join(" OR ")}
+      ORDER BY i.required_rule DESC,i.core_rule DESC,i.updated_at DESC,i.id ASC LIMIT ?`,
       ...args,Math.max(1,Math.min(512,Math.floor(max)))).toArray();
   }
 }

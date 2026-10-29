@@ -4,6 +4,7 @@ import { SharedLearnGroups } from "./shared-learn";
 import { calculateLearnUsage, type LearnUsage } from "./learn-usage";
 import { LearnUsageStore } from "./learn-usage-store";
 import { LearnIndexStore } from "./learn-index-store";
+import { LearnLifecycleStore, type LearnValidity } from "./learn-lifecycle";
 
 export type LearnScope = "global" | "project" | "agent";
 export type LearnKind =
@@ -30,6 +31,7 @@ export type LearnRecord = {
   confidence: number;
   positiveFeedback: number;
   usage?: LearnUsage;
+  validity?: { status: LearnValidity["status"]; revision: number };
   negativeFeedback: number;
   origin?: "shared";
   groupId?: string;
@@ -135,6 +137,7 @@ function rowToRecord(row: any): LearnRecord {
     confidence: Number(row.confidence),
     positiveFeedback: Number(row.positive_feedback),
     negativeFeedback: Number(row.negative_feedback),
+    ...(row.validity_status ? { validity: { status: row.validity_status, revision: Number(row.validity_revision || 1) } } : {}),
     usage: calculateLearnUsage({
       retrieved: Number(row.usage_retrieved || 0),
       evaluated: Number(row.usage_evaluated || 0),
@@ -336,6 +339,7 @@ export class Learning extends DurableObject {
   private sharedGroups?: SharedLearnGroups;
   private readonly usage: LearnUsageStore;
   private readonly index: LearnIndexStore;
+  private readonly lifecycle: LearnLifecycleStore;
   private memoryCount: number | null = null;
 
   constructor(ctx: DurableObjectState, env: unknown) {
@@ -391,6 +395,9 @@ export class Learning extends DurableObject {
     this.index = new LearnIndexStore(this.ctx.storage.sql,
       this.ctx.storage.transactionSync?.bind(this.ctx.storage));
     this.index.initialize();
+    this.lifecycle = new LearnLifecycleStore(this.ctx.storage.sql,
+      this.ctx.storage.transactionSync?.bind(this.ctx.storage));
+    this.lifecycle.initialize();
     this.migrateProjectKeys();
 
   }
@@ -444,6 +451,9 @@ export class Learning extends DurableObject {
     if (url.pathname === "/index" && request.method === "POST") return this.getIndex(request);
     if (url.pathname === "/candidates" && request.method === "POST") return this.getCandidates(request);
     if (url.pathname === "/index-rebuild" && request.method === "POST") return Response.json({ ok: true, indexed: this.index.rebuild() });
+    if (url.pathname === "/lifecycle" && request.method === "POST") return this.readLifecycle(request);
+    if (url.pathname === "/lifecycle/status" && request.method === "POST") return this.setLifecycleStatus(request);
+    if (url.pathname === "/lifecycle/restore" && request.method === "POST") return this.restoreLifecycleRevision(request);
     if (url.pathname === "/profile" && request.method === "POST") return this.profile(request);
     if (url.pathname === "/put" && request.method === "POST") return this.put(request);
     if (url.pathname === "/delete" && request.method === "POST") return this.delete(request);
@@ -914,7 +924,9 @@ export class Learning extends DurableObject {
     const chosen = ranked.slice(0, cap);
     const ids = chosen.map(entry => entry.id);
     const rows = ids.length ? this.ctx.storage.sql.exec<any>(
-      `SELECT * FROM ${TABLE} WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids,
+      `SELECT m.*,l.status AS validity_status,l.revision AS validity_revision
+       FROM ${TABLE} m LEFT JOIN learning_lifecycle_state_v1 l ON l.memory_id=m.id
+       WHERE m.id IN (${ids.map(() => "?").join(",")})`, ...ids,
     ).toArray() : [];
     const records = new Map(rows.map(row => [String(row.id), rowToRecord(row)]));
     const items = ids.map(id => records.get(id)).filter((item): item is LearnRecord => Boolean(item));
@@ -924,6 +936,39 @@ export class Learning extends DurableObject {
       items, entries, candidateTotal: entries.length, hydrated: items.length,
       requiredUnavailable, resolvedProjectKey, strategy: "indexed-candidates-v2",
     });
+  }
+
+  private async readLifecycle(request: Request) {
+    const body = await request.json<any>().catch(() => null);
+    const id = cleanText(body?.id, 160);
+    if (!/^mem_[a-f0-9]{64}$/.test(id)) {
+      return Response.json({ error: "invalid_memory_id" }, { status: 400 });
+    }
+    const history = this.lifecycle.history(id);
+    return history ? Response.json({ ok: true, ...history })
+      : Response.json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async setLifecycleStatus(request: Request) {
+    const body = await request.json<any>().catch(() => null);
+    const id = cleanText(body?.id, 160);
+    if (!/^mem_[a-f0-9]{64}$/.test(id)) {
+      return Response.json({ error: "invalid_memory_id" }, { status: 400 });
+    }
+    const result = this.lifecycle.changeStatus(id, body?.status,
+      body?.reason, body?.evidenceRef, body?.sourceFingerprint);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode });
+  }
+
+  private async restoreLifecycleRevision(request: Request) {
+    const body = await request.json<any>().catch(() => null);
+    const id = cleanText(body?.id, 160);
+    if (!/^mem_[a-f0-9]{64}$/.test(id)) {
+      return Response.json({ error: "invalid_memory_id" }, { status: 400 });
+    }
+    const result = this.lifecycle.restore(id, body?.revision,
+      body?.reason, body?.evidenceRef);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode });
   }
 
   private async get(request: Request) {
