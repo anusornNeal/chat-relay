@@ -20,7 +20,7 @@ import { resolveLearnPhase, requiresFlowlyPlanningCheckpoint } from "./learn-pha
 import type { LearnIndexEntry } from "./learn-index-store";
 import type { LearnPhase } from "./learn-phase";
 import { LEARN_BASELINE_CONTEXT, LEARN_DISCOVERY_HINT, LEARN_USAGE_REPORT_INSTRUCTION } from "./learning-policy";
-import { LearnPreflightGuard, attachLearnPrepareAdvisory, attachLearnReflectionAdvisory, isLearningCheckpointTool } from "./learn-preflight-guard.mjs";
+import { LearnPreflightGuard, attachLearnPrepareAdvisory, attachLearnReflectionAdvisory, isLearningCheckpointTool, shouldEmitLearnAdvisory } from "./learn-preflight-guard.mjs";
 import { LearnGateCache, preflightIdentity, preflightScope, preflightPreparationScopes, isPreflightExempt, preflightRequired } from "./learn-preflight-gate.mjs";
 import type { AuthUser, Env } from "./env";
 import packageMetadata from "../package.json";
@@ -849,9 +849,15 @@ async function instrumentTool<T>(
     }
 
     const canAttachLearnAdvisory = activityId
+      && shouldEmitLearnAdvisory(activity?.reliableIdentity)
       && !LEARN_ACTIVITY_TOOLS.has(tool as LearnActivityTool)
       && Array.isArray((outcome.value as any)?.content);
-    if (canAttachLearnAdvisory && learnPreflightGuard.claimReminder(user.id, activityId)) {
+    if (canAttachLearnAdvisory
+      && shouldEmitLearnAdvisory(
+        activity?.reliableIdentity,
+        learnGateCache.get(user.id, activityId, preflightScope(args))?.prepared,
+      )
+      && learnPreflightGuard.claimReminder(user.id, activityId)) {
       return attachLearnPrepareAdvisory(outcome.value).value as T;
     }
 
@@ -1701,7 +1707,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "start_search",
-    "Prefer this over shell Select-String/grep for file and content searches inside allowedRoots. Returns a search session ID.",
+    "Search files or content inside allowedRoots. Returns up to 20 matches and a sessionId; use get_more_search_results only if nextOffset. Narrow scope when incomplete. Skips generated dirs and binary content.",
     "read",
     {
       path: z.string().min(1).max(2048),

@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
-import { LearnPreflightGuard, attachLearnReflectionAdvisory, isLearningCheckpointTool } from "../src/learn-preflight-guard.mjs";
+import { LearnPreflightGuard, attachLearnReflectionAdvisory, isLearningCheckpointTool, shouldEmitLearnAdvisory } from "../src/learn-preflight-guard.mjs";
 
 assert.equal(isLearningCheckpointTool("write_file", {}), true);
 assert.equal(isLearningCheckpointTool("read_file", {}), false);
 assert.equal(isLearningCheckpointTool("terminal_exec", {command: "git commit -m test"}), true);
 assert.equal(isLearningCheckpointTool("terminal_exec", {command: "git status"}), false);
+// Without a reliable conversation ID, a Worker isolate cannot deduplicate advice.
+assert.equal(shouldEmitLearnAdvisory(false), false);
+assert.equal(shouldEmitLearnAdvisory(undefined), false);
+assert.equal(shouldEmitLearnAdvisory(true), true);
+assert.equal(shouldEmitLearnAdvisory(true, true), false);
+assert.equal(shouldEmitLearnAdvisory(true, false), true);
 const guard = new LearnPreflightGuard();
 assert.equal(guard.claimReflection("a", "chat"), true);
 assert.equal(guard.claimReflection("a", "chat"), false);

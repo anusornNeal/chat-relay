@@ -67,6 +67,31 @@ instead of adding SQL columns or Durable Object reads speculatively.
   Diagnostic changes should be checked against Worker CPU, DO requests and
   SQL rows written, not latency alone.
 
+## Local search budgets
+
+`start_search` returns the first bounded page of results (up to 20 matches /
+16 KiB) alongside the existing session ID. When `nextOffset` is non-null,
+use `get_more_search_results` to continue without re-scanning. Search status
+`COMPLETED` means the operation ended, not necessarily that the repository
+was exhausted: `incomplete: true` and `stopReason: result_limit|scan_limit`
+mean the requested search was capped. Narrow the path or query rather than
+assuming the missing result does not exist.
+
+Recursive search ignores generated directories (`build`, `dist`, `coverage`,
+`out`, `__pycache__`) and excludes common binary extensions / NUL-containing
+files from content matching. To search a generated directory explicitly, pass
+that directory as `path`. Filename searches can still match binary files.
+
+Completed search sessions are kept in local agent memory only, limited to 64
+entries with a 15-minute sliding inactivity TTL. Cleanup runs on subsequent
+search/page requests; no timers, Durable Objects, or periodic polling are added.
+
+Learn advice on tool responses requires a reliable conversation identity.
+Unreliable transport-session identifiers are not sufficient for once-per-chat
+deduplication, so reminders are omitted rather than repeatedly attached on
+Worker isolate changes. Explicit Learn tools and reliable-identity preflight
+enforcement remain available.
+
 ## Verification
 
 Run `npm run test:agent-state` for deterministic reconnect and classification

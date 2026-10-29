@@ -22,6 +22,16 @@ const MAX_READ_RESPONSE_BYTES = 48 * 1024;
 const MIN_READ_RESPONSE_BYTES = 1024;
 const MAX_WRITE_BYTES = 256 * 1024;
 const MAX_SEARCH_FILES = 5000;
+const MAX_SEARCH_FIRST_PAGE_RESULTS = 20;
+const MAX_SEARCH_FIRST_PAGE_BYTES = 16 * 1024;
+const MAX_SEARCH_SESSIONS = 64;
+const SEARCH_SESSION_TTL_MS = 15 * 60 * 1000;
+const GENERATED_SEARCH_DIRS = new Set(["build", "dist", "coverage", "out", "__pycache__"]);
+const SEARCH_BINARY_EXTENSIONS = new Set([
+  ".apk", ".aab", ".class", ".dex", ".jar", ".so", ".dll", ".exe", ".bin",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz",
+  ".mp3", ".mp4", ".woff", ".woff2", ".ttf", ".otf", ".db", ".sqlite",
+]);
 const DEFAULT_LIST_LIMIT = 200;
 const MAX_LIST_LIMIT = 500;
 const DEFAULT_LIST_RESPONSE_BYTES = 48 * 1024;
@@ -30,6 +40,10 @@ const ALLOWED_DOT_DIRS = new Set([".github"]);
 
 function skipWalkDirectory(name) {
   return SKIP_DIRS.has(name) || (name.startsWith(".") && !ALLOWED_DOT_DIRS.has(name));
+}
+
+function skipSearchDirectory(name) {
+  return skipWalkDirectory(name) || GENERATED_SEARCH_DIRS.has(name.toLowerCase());
 }
 
 function splitRoots(spec) {
@@ -442,6 +456,16 @@ export class FileManager {
     return { ok: true, path: target };
   }
 
+  #pruneSearchSessions(reserve = 0) {
+    const now = Date.now();
+    for (const [id, session] of this.searches) {
+      if (session.expiresAt <= now) this.searches.delete(id);
+    }
+    while (this.searches.size > MAX_SEARCH_SESSIONS - reserve) {
+      this.searches.delete(this.searches.keys().next().value);
+    }
+  }
+
   async startSearch(input, pattern, searchType = "files", maxResults = 100) {
     const target = await this.#resolveExisting(input);
     if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > 300) {
@@ -455,33 +479,40 @@ export class FileManager {
       status: "RUNNING",
       createdAt: Date.now(),
       results: [],
+      scanned: 0,
+      incomplete: false,
+      stopReason: null,
       error: null,
     };
-    this.searches.set(sessionId, session);
 
     try {
       const limit = Math.min(Math.max(Number(maxResults) || 100, 1), 500);
       const needle = pattern.toLowerCase();
-      let scanned = 0;
-
       const queue = [target];
-      while (queue.length > 0 && session.results.length < limit && scanned < MAX_SEARCH_FILES) {
+
+      while (queue.length > 0 && session.results.length < limit && session.scanned < MAX_SEARCH_FILES) {
         const current = queue.shift();
         const items = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
         items.sort((a, b) => a.name.localeCompare(b.name));
         for (const item of items) {
-          if (session.results.length >= limit || scanned >= MAX_SEARCH_FILES) break;
-          if (item.isDirectory() && skipWalkDirectory(item.name)) continue;
+          if (session.results.length >= limit || session.scanned >= MAX_SEARCH_FILES) {
+            session.incomplete = true;
+            session.stopReason = session.results.length >= limit ? "result_limit" : "scan_limit";
+            break;
+          }
+          if (item.isDirectory() && skipSearchDirectory(item.name)) continue;
           const fullPath = path.join(current, item.name);
-          scanned++;
+          session.scanned++;
 
           if (searchType === "files" && item.name.toLowerCase().includes(needle)) {
             session.results.push({ path: fullPath, name: item.name, type: item.isDirectory() ? "directory" : "file" });
-          } else if (searchType === "content" && item.isFile()) {
+          } else if (searchType === "content" && item.isFile()
+            && !SEARCH_BINARY_EXTENSIONS.has(path.extname(item.name).toLowerCase())) {
             const info = await fs.stat(fullPath).catch(() => null);
             if (info && info.size <= 1024 * 1024) {
-              const text = await fs.readFile(fullPath, "utf8").catch(() => null);
-              if (text != null) {
+              const bytes = await fs.readFile(fullPath).catch(() => null);
+              if (bytes && !bytes.subarray(0, 1024).includes(0)) {
+                const text = bytes.toString("utf8");
                 const index = text.toLowerCase().indexOf(needle);
                 if (index >= 0) {
                   const before = text.slice(0, index);
@@ -493,34 +524,71 @@ export class FileManager {
           }
           if (item.isDirectory()) queue.push(fullPath);
         }
+        if (!session.incomplete && queue.length > 0
+          && (session.results.length >= limit || session.scanned >= MAX_SEARCH_FILES)) {
+          session.incomplete = true;
+          session.stopReason = session.results.length >= limit ? "result_limit" : "scan_limit";
+        }
       }
       session.status = "COMPLETED";
-      session.scanned = scanned;
     } catch (error) {
       session.status = "ERROR";
+      session.incomplete = true;
+      session.stopReason = "error";
       session.error = error instanceof Error ? error.message : "search_failed";
     }
 
+    // The search is synchronous from the caller's perspective. Retain only finished sessions.
+    this.#pruneSearchSessions(1);
+    session.expiresAt = Date.now() + SEARCH_SESSION_TTL_MS;
+    this.searches.set(sessionId, session);
+
+    // Most callers only need the first few matches; avoid a second MCP round trip.
+    const firstPage = [];
+    let pageBytes = 0;
+    for (const item of session.results.slice(0, MAX_SEARCH_FIRST_PAGE_RESULTS)) {
+      const size = byteSize(item);
+      if (firstPage.length > 0 && pageBytes + size > MAX_SEARCH_FIRST_PAGE_BYTES) break;
+      firstPage.push(item);
+      pageBytes += size;
+    }
     return {
       sessionId,
       status: session.status,
       totalResults: session.results.length,
-      scanned: session.scanned ?? 0,
+      scanned: session.scanned,
+      incomplete: session.incomplete,
+      stopReason: session.stopReason,
       error: session.error,
+      offset: 0,
+      results: firstPage,
+      nextOffset: firstPage.length < session.results.length ? firstPage.length : null,
     };
   }
 
   getSearchResults(sessionId, offset = 0, length = 50) {
-    const session = this.searches.get(String(sessionId));
+    this.#pruneSearchSessions();
+    const key = String(sessionId);
+    const session = this.searches.get(key);
     if (!session) throw new Error("search_not_found");
+    session.expiresAt = Date.now() + SEARCH_SESSION_TTL_MS;
+    this.searches.delete(key);
+    this.searches.set(key, session);
+
     const start = Math.max(Number(offset) || 0, 0);
     const count = Math.min(Math.max(Number(length) || 50, 1), 100);
+    const results = session.results.slice(start, start + count);
+    const nextOffset = start + results.length;
     return {
       sessionId: session.id,
       status: session.status,
       totalResults: session.results.length,
+      scanned: session.scanned,
+      incomplete: session.incomplete,
+      stopReason: session.stopReason,
       offset: start,
-      results: session.results.slice(start, start + count),
+      results,
+      nextOffset: nextOffset < session.results.length ? nextOffset : null,
       error: session.error,
     };
   }

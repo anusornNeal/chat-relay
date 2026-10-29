@@ -108,6 +108,12 @@ export function attachLearnReflectionAdvisory(value) {
     attached: true,
   };
 }
+// A transport session ID is not a stable conversation identity. Avoid repeat
+// advisories on Worker isolate changes when the caller has no reliable ID.
+export function shouldEmitLearnAdvisory(reliableIdentity, prepared = false) {
+  return reliableIdentity === true && prepared !== true;
+}
+
 export function attachLearnPrepareAdvisory(value) {
   if (!value || typeof value !== "object" || !Array.isArray(value.content)) {
     return { value, attached: false };
