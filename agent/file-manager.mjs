@@ -7,6 +7,7 @@ const DEFAULT_READ_RESPONSE_BYTES = 32 * 1024;
 const DEFAULT_MULTI_READ_RESPONSE_BYTES = 48 * 1024;
 const DEFAULT_BATCH_RESPONSE_BYTES = 48 * 1024;
 const MAX_BATCH_OPERATIONS = 20;
+const MAX_BATCH_SEARCHES = 8;
 const MAX_ARTIFACT_BYTES = 40 * 1024;
 const ARTIFACT_MIME_TYPES = new Map([
   [".txt", "text/plain; charset=utf-8"],
@@ -305,6 +306,9 @@ export class FileManager {
       throw new Error("invalid_batch");
     }
 
+    if (operations.filter((item) => item?.op === "search").length > MAX_BATCH_SEARCHES) {
+      throw new Error("too_many_batch_searches");
+    }
     const totalBudget = boundedReadBytes(maxTotalBytes, DEFAULT_BATCH_RESPONSE_BYTES, 4 * 1024);
     const results = [];
     let nextIndex = null;
@@ -336,6 +340,8 @@ export class FileManager {
             result = await this.read(operation.path, operation.offset, operation.length, operationBudget);
           } else if (op === "list") {
             result = await this.list(operation.path, operation.depth, operation.offset, operation.limit, operationBudget);
+          } else if (op === "search") {
+            result = await this.startSearch(operation.path, operation.pattern, operation.searchType, operation.maxResults ?? 10, operation.previewLines);
           } else {
             throw new Error("invalid_batch_operation");
           }
@@ -349,7 +355,7 @@ export class FileManager {
             maxTotalBytes: totalBudget,
           };
           if (byteSize(projected) <= totalBudget) break;
-          if (op === "stat") {
+          if (op === "stat" || op === "search") {
             candidate = undefined;
             break;
           }
@@ -568,23 +574,10 @@ export class FileManager {
     for (const item of session.results.slice(0, MAX_SEARCH_FIRST_PAGE_RESULTS)) {
       const size = byteSize(item);
       if (firstPage.length > 0 && pageBytes + size > MAX_SEARCH_FIRST_PAGE_BYTES) break;
-      firstPage.push(item);
+      firstPage.push({ ...item });
       pageBytes += size;
     }
-    // Optional bounded snippets reduce follow-up reads.
-    const count = Math.min(60, Math.max(0, Number(previewLines) || 0));
-    if (count > 0) {
-      let remaining = 16384;
-      for (const item of firstPage) {
-        if (remaining < 1024) break;
-        if (item.type === "directory" || !item.path) continue;
-        try {
-          const preview = await this.read(item.path, 0, count, Math.min(4096, remaining));
-          item.preview = { content: preview.content, nextOffset: preview.nextOffset };
-          remaining -= byteSize(item.preview);
-        } catch { item.preview = { unavailable: true }; }
-      }
-    }
+    await this.#addSearchPreviews(firstPage, previewLines);
     return {
       sessionId,
       status: session.status,
@@ -597,6 +590,35 @@ export class FileManager {
       results: firstPage,
       nextOffset: firstPage.length < session.results.length ? firstPage.length : null,
     };
+  }
+
+  // A page of matches can be expanded without repeating the original search.
+  async getSearchResultsWithPreview(sessionId, offset = 0, length = 50, previewLines = 0) {
+    const requested = Number(previewLines) > 0 ? Math.min(Math.max(Number(length) || 50, 1), 20) : length;
+    const page = this.getSearchResults(sessionId, offset, requested);
+    page.results = page.results.map((item) => ({ ...item }));
+    await this.#addSearchPreviews(page.results, previewLines);
+    return page;
+  }
+
+  async #addSearchPreviews(results, requestedLines) {
+    const count = Math.min(60, Math.max(0, Math.trunc(Number(requestedLines) || 0)));
+    if (count === 0) return;
+    let remaining = 16 * 1024;
+    for (const item of results) {
+      if (remaining < 1024) break;
+      if (!item.path || item.type === "directory") continue;
+      const start = Number.isInteger(item.line)
+        ? Math.max(0, item.line - 1 - Math.floor(count / 2)) : 0;
+      try {
+        const read = await this.read(item.path, start, count, Math.min(4096, remaining));
+        const context = { offset: read.offset, length: read.length, totalLines: read.totalLines,
+          content: read.content, truncated: read.truncated, nextOffset: read.nextOffset };
+        if (byteSize(context) > remaining) break;
+        item.preview = context;
+        remaining -= byteSize(context);
+      } catch { item.preview = { unavailable: true }; }
+    }
   }
 
   getSearchResults(sessionId, offset = 0, length = 50) {

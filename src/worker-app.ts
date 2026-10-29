@@ -1688,18 +1688,22 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "fs_batch",
-    "Prefer fs_batch for 2-20 independent stat/read/list operations: one MCP call, bounded 48KiB response, ordered results. Per-item errors isolated; use nextIndex and nested continuations.",
+    "Batch 2-20 independent stat/read/list/search operations (up to eight searches with distinct patterns) in one MCP call. Per-item errors isolated, ordered results, bounded 48KiB; continue via nextIndex or search sessionId/nextOffset.",
     "read",
     {
       operations: z.array(z.object({
         id: z.string().min(1).max(128).optional(),
-        op: z.enum(["stat", "read", "list"]),
+        op: z.enum(["stat", "read", "list", "search"]),
         path: z.string().min(1).max(2048),
         depth: z.number().int().min(0).max(3).optional(),
         offset: z.number().int().min(0).optional(),
         length: z.number().int().min(1).max(1000).optional(),
         limit: z.number().int().min(1).max(500).optional(),
         maxBytes: z.number().int().min(1024).max(49152).optional(),
+        pattern: z.string().min(1).max(300).optional(),
+        searchType: z.enum(["files", "content"]).optional(),
+        maxResults: z.number().int().min(1).max(20).optional(),
+        previewLines: z.number().int().min(0).max(60).optional(),
       })).min(1).max(20),
       maxTotalBytes: z.number().int().min(4096).max(49152).optional(),
     },
@@ -1708,7 +1712,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "start_search",
-    "Search files/content inside allowedRoots. For code exploration set previewLines (up to 60) to receive bounded first-page file snippets in the SAME call; expand only relevant matches. Use nextOffset for more matches. Skips generated dirs and binary content.",
+    "Search files/content within allowedRoots. Optional previewLines<=60 includes context around content-match line (filename matches show file start). Batch different patterns via fs_batch search; continue matches with get_more_search_results and previewLines. Skips generated/binary.",
     "read",
     {
       path: z.string().min(1).max(2048),
@@ -1724,15 +1728,16 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "get_more_search_results",
-    "Read a page of results from a search session.",
+    "Continue prior search by sessionId/nextOffset without rescanning. Optional previewLines<=60 includes bounded context near content match for this page; file preview.nextOffset continues via read_file.",
     "read",
     {
       sessionId: z.string().uuid(),
       offset: z.number().int().min(0).optional(),
       length: z.number().int().min(1).max(100).optional(),
+      previewLines: z.number().int().min(0).max(60).optional(),
     },
-    ({ sessionId, offset, length }) => ({
-      action: "fs.search.results", sessionId, offset, length,
+    ({ sessionId, offset, length, previewLines }) => ({
+      action: "fs.search.results", sessionId, offset, length, previewLines,
     }),
   );
 
@@ -2062,7 +2067,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_batch_start",
-    "Start 2-20 INDEPENDENT short PowerShell jobs per MCP call, bounded concurrency and 20s per job. For long builds use terminal_start. Backups/worktrees only when necessary under the owning project's .workspace/.",
+    "Batch Verify: run 2-20 INDEPENDENT test/lint/check jobs in one MCP call, bounded concurrency and 20s/job; inspect completion/results with terminal_batch_read. Never parallelize dependent build steps; use terminal_start for long builds. Workspaces belong under project .workspace/.",
     "terminal",
     {
       jobs: z.array(z.union([

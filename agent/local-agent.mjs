@@ -238,7 +238,7 @@ async function handlePayload(payload) {
     case "fs.search.start":
       return files.startSearch(payload.path, payload.pattern, payload.searchType, payload.maxResults, payload.previewLines);
     case "fs.search.results":
-      return files.getSearchResults(payload.sessionId, payload.offset, payload.length);
+      return files.getSearchResultsWithPreview(payload.sessionId, payload.offset, payload.length, payload.previewLines);
 
     case "git.worktree.cleanup":
       return gitWorktrees.cleanup(payload.repoPath, payload.worktreePath);
