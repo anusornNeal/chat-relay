@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { provisionOperatorFixture } from "./operator-fixture.mjs";
 
 import WebSocket from "ws";
 import { AGENT_PROTOCOL_VERSION, buildAgentHello } from "../agent/protocol.mjs";
@@ -122,18 +125,48 @@ async function allowedRootBoundaryTests() {
 await fsBatchBoundaryTests();
 await allowedRootBoundaryTests();
 
-const vars = Object.fromEntries(
-  fs.readFileSync(".dev.vars", "utf8").split(/\r?\n/)
-    .filter((line) => line && line.includes("="))
-    .map((line) => {
-      const i = line.indexOf("=");
-      return [line.slice(0, i), line.slice(i + 1)];
-    }),
-);
-
-const base = process.env.TEST_RELAY_URL || "http://127.0.0.1:8795";
-const ownerToken = vars.CALLER_TOKEN;
-const adminToken = vars.ADMIN_TOKEN;
+const base = (process.env.TEST_RELAY_URL || "http://127.0.0.1:8795").replace(/\/$/, "");
+if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(base)) {
+  throw new Error("Multiuser smoke requires a local Worker URL");
+}
+const adminToken = process.env.TEST_ADMIN_TOKEN || "test-admin";
+const fixtureSuffix = randomUUID().slice(0, 8);
+const credentials = await provisionOperatorFixture(base, {
+  userId: "multiuser-" + fixtureSuffix,
+  name: "Multiuser Smoke Owner",
+  agentId: "multiuser-" + fixtureSuffix,
+  agentName: "Multiuser Fixture Agent",
+});
+const ownerToken = credentials.userToken;
+const primaryAgentId = credentials.agent.id;
+const localAgent = spawn(process.execPath, ["agent/local-agent.mjs"], {
+  cwd: process.cwd(),
+  env: {
+    ...process.env,
+    RELAY_URL: base,
+    AGENT_ID: primaryAgentId,
+    AGENT_NAME: credentials.agent.name,
+    AGENT_TOKEN: credentials.agentToken,
+    ALLOWED_ROOTS: process.cwd(),
+    TERMINAL_ENABLED: "1",
+    DESKTOP_ENABLED: "0",
+    CHAT_RELAY_UI: "plain",
+  },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+let agentOutput = "";
+for (const stream of [localAgent.stdout, localAgent.stderr]) {
+  stream.on("data", (chunk) => { agentOutput = (agentOutput + String(chunk)).slice(-3000); });
+}
+process.once("exit", () => { try { localAgent.kill(); } catch {} });
+for (let attempt = 0; attempt < 100 && !agentOutput.includes("Agent connected"); attempt++) {
+  if (localAgent.exitCode !== null) break;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+if (!agentOutput.includes("Agent connected")) {
+  localAgent.kill();
+  throw new Error("Multiuser fixture agent did not connect: " + agentOutput.slice(-600));
+}
 
 async function admin(route, method = "GET", body) {
   const response = await fetch(base + route, {
@@ -240,10 +273,10 @@ for (const required of [
 console.log("tool surface ok:", names.size);
 
 const agents = await tool(ownerToken, 2, "list_agents");
-if (!agents.agents?.some((agent) => agent.id === "default" && agent.online)) {
-  throw new Error(`default agent not online: ${JSON.stringify(agents)}`);
+if (!agents.agents?.some((agent) => agent.id === primaryAgentId && agent.online)) {
+  throw new Error(`fixture agent not online: ${JSON.stringify(agents)}`);
 }
-const negotiatedAgent = agents.agents.find((agent) => agent.id === "default");
+const negotiatedAgent = agents.agents.find((agent) => agent.id === primaryAgentId);
 if (negotiatedAgent?.connection?.protocolVersion !== AGENT_PROTOCOL_VERSION) {
   throw new Error(`negotiated protocol missing from list_agents: ${JSON.stringify(negotiatedAgent)}`);
 }
@@ -529,12 +562,29 @@ const readerUser = await admin("/admin/users", "POST", {
 });
 await admin("/admin/grants", "POST", {
   userId: readerUser.user.id,
-  agentId: "default",
+  agentId: primaryAgentId,
   scopes: ["read"],
 });
 
 const readerRead = await tool(readerUser.token, 20, "read_file", { path: "README.md" });
 if (!readerRead.payload.content.includes("chat-relay")) throw new Error("reader grant failed");
+const readerSearch = await tool(readerUser.token, 650, "start_search", {
+  path: process.cwd(), pattern: "README.md", searchType: "files", maxResults: 3, previewLines: 3,
+});
+if (!readerSearch.payload.results.some((entry) => entry.name === "README.md" && entry.preview?.content)) {
+  throw new Error("reader search preview failed");
+}
+const readerBatch = await tool(readerUser.token, 651, "fs_batch", {
+  operations: [
+    { id: "allowed", op: "search", path: process.cwd(), pattern: "README.md", searchType: "files", previewLines: 3 },
+    { id: "denied", op: "search", path: path.dirname(process.cwd()), pattern: "README.md", searchType: "files" },
+  ],
+});
+if (readerBatch.payload.results?.[0]?.ok !== true ||
+    readerBatch.payload.results?.[1]?.error !== "path_not_allowed") {
+  throw new Error("reader batched search access isolation failed");
+}
+await tool(readerUser.token, 652, "write_file", { path: fileB, content: "denied" }, true);
 await tool(readerUser.token, 21, "terminal_exec", { command: "Get-Location" }, true);
 console.log("scope enforcement ok");
 
@@ -557,7 +607,7 @@ await admin("/admin/grants", "POST", {
 const readerAgents = await tool(readerUser.token, 22, "list_agents");
 if (readerAgents.agents?.length !== 2) throw new Error("multi-agent grant failed");
 await tool(readerUser.token, 23, "ping_agent", {}, true);
-const explicitPing = await tool(readerUser.token, 24, "ping_agent", { agentId: "default" });
+const explicitPing = await tool(readerUser.token, 24, "ping_agent", { agentId: primaryAgentId });
 if (explicitPing.payload.action !== "pong") throw new Error("explicit agent routing failed");
 console.log("multi-agent selection ok");
 
@@ -575,4 +625,5 @@ console.log("token rotation ok");
 
 await tool(ownerToken, 27, "delete_path", { path: root, recursive: true });
 console.log("cleanup ok");
+localAgent.kill("SIGTERM");
 console.log("multi-user/full tool smoke test passed");
