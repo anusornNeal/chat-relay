@@ -85,5 +85,12 @@ test("batch verify guidance routes independent checks to existing terminal batch
   assert(at > 0);
   assert.match(worker.slice(at, at + 430), /Batch Verify/);
   assert.match(worker.slice(at, at + 430), /INDEPENDENT/);
-  assert.match(worker.slice(at, at + 430), /terminal_batch_read/);
+  assert.match(worker.slice(at, at + 640), /terminal_batch_read/);
+  assert.match(worker.slice(at, at + 640), /not frequent polling/);
+  assert.match(worker.slice(at, at + 640), /Prefer terminal_exec for tiny checks/);
+  assert.match(worker.slice(at, at + 640), /Never parallelize dependent steps/);
+  const status = worker.indexOf('    "terminal_batch_status",', at);
+  const read = worker.indexOf('    "terminal_batch_read",', status);
+  assert.match(worker.slice(status, status + 350), /Avoid tight polling loops/);
+  assert.match(worker.slice(read, read + 330), /Prefer this over separate status polling/);
 });

@@ -2054,7 +2054,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_exec",
-    "For short commands only (max 20s). Use terminal_start + terminal_read for builds/tests or unknown duration; batch independent short commands via terminal_batch_start. Prefer filesystem/process tools over shell. Do not retry blocked or executionStatus=unknown commands blindly; project backups/worktrees belong under .workspace/.",
+    "Short commands <=20s: prefer terminal_exec. For INDEPENDENT medium-duration checks use terminal_batch_start; for long/unknown builds use terminal_start + terminal_read. Never retry blocked or executionStatus=unknown commands blindly; keep project backups/worktrees under .workspace/.",
     "terminal",
     {
       command: z.string().min(1).max(4000),
@@ -2067,7 +2067,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_batch_start",
-    "Batch Verify: run 2-20 INDEPENDENT test/lint/check jobs in one MCP call, bounded concurrency and 20s/job; inspect completion/results with terminal_batch_read. Never parallelize dependent build steps; use terminal_start for long builds. Workspaces belong under project .workspace/.",
+    "Batch Verify: 2-20 INDEPENDENT test/lint jobs, max 20s/job. Prefer terminal_exec for tiny checks; terminal_start for >20s builds. Use terminal_batch_read after useful work for output/status, not frequent polling. Never parallelize dependent steps.",
     "terminal",
     {
       jobs: z.array(z.union([
@@ -2084,7 +2084,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_batch_status",
-    "Read bounded status for a terminal batch without command output.",
+    "Read batch progress without output. Avoid tight polling loops (each costs an MCP call); prefer terminal_batch_read later.",
     "terminal",
     { batchId: z.string().uuid() },
     ({ batchId }) => ({ action: "terminal.batch.status", batchId }),
@@ -2092,7 +2092,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_batch_read",
-    "Read bounded stdout/stderr and status for a terminal batch.",
+    "Read bounded batch output, status and exit codes. Prefer this over separate status polling; read again later if still running.",
     "terminal",
     { batchId: z.string().uuid(), maxChars: z.number().int().min(1024).max(24576).optional() },
     ({ batchId, maxChars }) => ({ action: "terminal.batch.read", batchId, maxChars }),
