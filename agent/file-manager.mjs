@@ -355,7 +355,26 @@ export class FileManager {
             maxTotalBytes: totalBudget,
           };
           if (byteSize(projected) <= totalBudget) break;
-          if (op === "stat" || op === "search") {
+          if (op === "search") {
+            // Keep the session usable even when first-page previews exceed
+            // the aggregate response budget. The caller can continue from
+            // sessionId + nextOffset without repeating the scan.
+            candidate = undefined;
+            for (let keep = result.results.length - 1; keep >= 0; keep--) {
+              const page = {
+                ...result,
+                results: result.results.slice(0, keep),
+                nextOffset: keep < result.totalResults ? keep : null,
+              };
+              const reduced = { ...base, ok: true, result: page };
+              if (byteSize({ ...projected, results: [...results, reduced] }) <= totalBudget) {
+                candidate = reduced;
+                break;
+              }
+            }
+            break;
+          }
+          if (op === "stat") {
             candidate = undefined;
             break;
           }
@@ -391,7 +410,9 @@ export class FileManager {
       results.push(candidate);
     }
 
-    const nestedTruncated = results.some((entry) => entry.ok && entry.result?.truncated === true);
+    const nestedTruncated = results.some((entry) => entry.ok && (
+      entry.result?.truncated === true || (entry.op === "search" && entry.result?.nextOffset !== null)
+    ));
     return {
       results,
       totalOperations: operations.length,
@@ -608,16 +629,20 @@ export class FileManager {
     for (const item of results) {
       if (remaining < 1024) break;
       if (!item.path || item.type === "directory") continue;
+      const matchSnippet = typeof item.preview === "string" ? item.preview : undefined;
       const start = Number.isInteger(item.line)
         ? Math.max(0, item.line - 1 - Math.floor(count / 2)) : 0;
       try {
         const read = await this.read(item.path, start, count, Math.min(4096, remaining));
         const context = { offset: read.offset, length: read.length, totalLines: read.totalLines,
           content: read.content, truncated: read.truncated, nextOffset: read.nextOffset };
+        if (matchSnippet && read.offset + read.length < item.line) context.matchSnippet = matchSnippet;
         if (byteSize(context) > remaining) break;
         item.preview = context;
         remaining -= byteSize(context);
-      } catch { item.preview = { unavailable: true }; }
+      } catch {
+        item.preview = { unavailable: true, ...(matchSnippet ? { matchSnippet } : {}) };
+      }
     }
   }
 

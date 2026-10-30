@@ -94,3 +94,45 @@ test("batch verify guidance routes independent checks to existing terminal batch
   assert.match(worker.slice(status, status + 350), /Avoid tight polling loops/);
   assert.match(worker.slice(read, read + 330), /Prefer this over separate status polling/);
 });
+
+
+test("small batch response budget returns a usable search session instead of forcing a re-scan", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "relay-batch-budget-"));
+  try {
+    for (let i = 0; i < 8; i++) {
+      const source = Array.from({ length: 35 }, (_, line) => "source line " + line + " content ".repeat(5)).join("\n");
+      await fs.writeFile(path.join(root, "batch-file-" + i + ".kt"), source);
+    }
+    const manager = new FileManager(root);
+    const result = await manager.batch([
+      { id: "match", op: "search", path: root, pattern: "batch-file", searchType: "files", maxResults: 8, previewLines: 30 },
+    ], 4096);
+    assert.equal(result.results.length, 1, "search result should not disappear when previews exceed the aggregate budget");
+    assert.equal(result.truncated, true, "nested search continuation must be visible on the batch");
+    assert.equal(result.results[0].ok, true);
+    const search = result.results[0].result;
+    assert.equal(search.totalResults, 8);
+    assert.equal(typeof search.sessionId, "string");
+    assert(Buffer.byteLength(JSON.stringify(result)) <= 4096);
+    assert(search.results.length < search.totalResults);
+    assert.equal(search.nextOffset, search.results.length);
+    const followUp = manager.getSearchResults(search.sessionId, search.nextOffset, 1);
+    assert.equal(followUp.results.length, 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("oversized content-match line keeps the original match snippet if context cannot be read", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "relay-preview-overflow-"));
+  try {
+    await fs.writeFile(path.join(root, "long-line.kt"), "prefix".repeat(1200) + "MATCH_UNIQUE_123" + "tail".repeat(3));
+    const manager = new FileManager(root);
+    const result = await manager.startSearch(root, "MATCH_UNIQUE_123", "content", 2, 5);
+    assert.equal(result.results.length, 1);
+    assert.equal(result.results[0].line, 1);
+    assert.match(result.results[0].preview.matchSnippet, /MATCH_UNIQUE_123/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

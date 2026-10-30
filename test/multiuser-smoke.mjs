@@ -311,7 +311,7 @@ if (privacyText.includes(secretMarker) || privacyText.includes("23456") || priva
 console.log("desktop opt-in/privacy gate ok");
 console.log("config ok");
 
-const root = path.join(process.cwd(), ".relay-test");
+const root = path.join(process.cwd(), ".relay-test-" + fixtureSuffix);
 const fileA = path.join(root, "a.txt");
 const fileB = path.join(root, "b.txt");
 const largeA = path.join(root, "large-a.txt");
