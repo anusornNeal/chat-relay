@@ -1982,7 +1982,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
   registerTool(
     "desktop_step",
     {
-      description: "Run 1-20 desktop actions in one local round trip and optionally capture the target monitor afterward. Use this for fast computer-use loops. captureAfter defaults to false; set captureAfter=true when you need a screenshot afterward. Capturing requires both desktop_control and desktop_read permission.",
+      description: "Run 1-20 desktop actions and optionally capture a screenshot. Optional single headless accessibility action: {type:'accessibility',operation:'snapshot|click|set-value|status'}; requires an enabled local backend. Snapshot/status need desktop_read plus desktop_control. No automatic physical-input fallback.",
       inputSchema: {
         agentId: agentIdSchema,
         actions: z.array(z.union([
@@ -2014,6 +2014,17 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
             win: z.boolean().optional(),
           }),
           z.object({
+            type: z.literal("accessibility"),
+            operation: z.enum(["snapshot", "click", "set-value", "status"]),
+            app: z.string().min(1).max(100).optional(),
+            ref: z.string().regex(/^@[A-Za-z0-9_-]{2,80}:e[1-9][0-9]{0,7}$/).optional(),
+            root: z.string().regex(/^@[A-Za-z0-9_-]{2,80}:e[1-9][0-9]{0,7}$/).optional(),
+            value: z.string().max(8192).optional(),
+            interactive: z.boolean().optional(),
+            skeleton: z.boolean().optional(),
+            maxDepth: z.number().int().min(1).max(8).optional(),
+          }),
+          z.object({
             type: z.literal("wait"),
             ms: z.number().int().min(0).max(5000),
           }),
@@ -2034,10 +2045,12 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
       { agentId, actions, captureAfter, settleMs, monitor, maxWidth, quality },
       async () => {
         const wantsCapture = captureAfter === true;
+        const needsRead = wantsCapture || actions.some((action: any) =>
+          action?.type === "accessibility" && (action.operation === "snapshot" || action.operation === "status"));
         const call = await callAgent(
           env,
           user,
-          wantsCapture ? ["desktop_control", "desktop_read"] : "desktop_control",
+          needsRead ? ["desktop_control", "desktop_read"] : "desktop_control",
           agentId,
           { action: "desktop.step", actions, captureAfter, settleMs, monitor, maxWidth, quality },
         );
@@ -2250,7 +2263,13 @@ async function handleDirectRelay(request: Request, env: Env, user: AuthUser): Pr
   const action = typeof body.payload === "object" && body.payload !== null
     ? String((body.payload as any).action ?? "")
     : "";
-  const requestedScopes: Scope[] = action === "desktop.step" && (body.payload as any)?.captureAfter === true
+  const step = (body.payload as any);
+  const readsDesktop = action === "desktop.step" && (
+    step?.captureAfter === true ||
+    (Array.isArray(step?.actions) && step.actions.some((item: any) =>
+      item?.type === "accessibility" && (item.operation === "snapshot" || item.operation === "status")))
+  );
+  const requestedScopes: Scope[] = readsDesktop
     ? ["desktop_control", "desktop_read"]
     : [scopeForAction(action)];
   const resolved = await resolveAgentForScopes(env, user.id, requestedScopes, agentId);

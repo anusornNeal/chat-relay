@@ -1,4 +1,5 @@
 import { BoundedLane } from "./capability-scheduler.mjs";
+import { AgentDesktopAdapter } from "./agent-desktop-adapter.mjs";
 import { PersistentDesktopRunner } from "./windows-desktop-runner.mjs";
 import { MacOSDesktopRunner } from "./macos-desktop-runner.mjs";
 
@@ -160,6 +161,9 @@ export class DesktopManager {
     });
     this.platform = this.adapter.platform;
     this.runner = (operation, args) => this.adapter.run(operation, args);
+    this.accessibilityEnabled = options.accessibilityEnabled ?? process.env.DESKTOP_ACCESSIBILITY_ENABLED === "1";
+    this.accessibilityAdapter = this.accessibilityEnabled
+      ? (options.accessibilityAdapter ?? new AgentDesktopAdapter()) : null;
     this.controlLane = options.controlLane ?? new BoundedLane({
       name: "desktop_control",
       concurrency: 1,
@@ -174,6 +178,7 @@ export class DesktopManager {
       supported: this.adapter.supported,
       platform: this.adapter.platform,
       transport: this.adapter.transport,
+      accessibilityEnabled: this.accessibilityEnabled,
       controlQueue: this.controlLane.snapshot(),
     };
   }
@@ -353,6 +358,23 @@ export class DesktopManager {
 
     const actions = Array.isArray(input.actions) ? input.actions : [];
     if (actions.length < 1 || actions.length > 20) return { ok: false, error: "invalid_step_actions" };
+
+    // Keep semantic operations isolated from physical input and screenshot capture.
+    // Accessibility observation requires the desktop_read grant at the Worker.
+    if (actions.some((action) => action?.type === "accessibility")) {
+      if (actions.length !== 1 || input.captureAfter === true ||
+          input.settleMs !== undefined || input.monitor !== undefined ||
+          input.maxWidth !== undefined || input.quality !== undefined) {
+        return { ok: false, error: "invalid_accessibility_step" };
+      }
+      if (!this.accessibilityEnabled) return { ok: false, error: "accessibility_disabled" };
+      const startedAt = Date.now();
+      const result = await this.runControl(() => this.accessibilityAdapter.executeAction(actions[0]));
+      return {
+        ...result,
+        timing: { totalMs: Math.max(0, Date.now() - startedAt), requestedActions: 1, executedActions: 1 },
+      };
+    }
 
     const normalizedActions = [];
     for (const action of actions) {

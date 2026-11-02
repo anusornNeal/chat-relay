@@ -117,6 +117,9 @@ Depending on the device grants and local configuration, Chat Relay can expose:
 - Batched filesystem, terminal, and desktop operations to reduce remote round trips.
 
 Desktop access is opt-in. Linux desktop control is not currently implemented.
+An optional headless accessibility adapter is described in
+[Desktop Accessibility](docs/DESKTOP_ACCESSIBILITY.md). It is disabled by
+default and requires a separately installed native CLI.
 
 ## How it works
 

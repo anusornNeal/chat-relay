@@ -50,7 +50,7 @@
         "test:dashboard": "node test/dashboard-smoke.mjs",
         "test:dashboard-timers": "node test/dashboard-timers.test.mjs",
         "test:ops": "node test/ops-smoke.mjs",
-        "test:desktop": "node test/mcp-desktop-smoke.mjs",
+        "test:desktop": "node --test test/agent-desktop-adapter.test.mjs && node test/mcp-desktop-smoke.mjs",
         "test:device-management": "node test/device-management-smoke.mjs",
         "test:submission": "node test/submission-smoke.mjs",
         "test:agent-state": "node --experimental-strip-types --test test/agent-state.test.mjs test/reconnect-chaos.test.mjs",

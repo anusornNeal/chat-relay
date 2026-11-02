@@ -265,7 +265,16 @@ async function mcpTests() {
         native,
       };
     } else if (action === "desktop.step") {
-      if (message.payload?.captureAfter !== true) {
+      const semantic = message.payload?.actions?.[0]?.type === "accessibility"
+        ? message.payload.actions[0] : null;
+      if (semantic) {
+        payload = {
+          ok: true, backend: "agent-desktop",
+          data: semantic.operation === "snapshot"
+            ? { app: semantic.app, ref_count: 1, tree: { role: "button", ref_id: "@smock:e1" } }
+            : { action: semantic.operation },
+        };
+      } else if (message.payload?.captureAfter !== true) {
         payload = { ok: true, action, actionsCompleted: message.payload?.actions?.length || 0 };
       } else {
         payload = {
@@ -381,6 +390,12 @@ async function mcpTests() {
   });
   assert(readerClick.result?.isError === true, "desktop_read unexpectedly gained control permission");
 
+  const readerSemantic = await rpc(reader.token, 100, "tools/call", {
+    name: "desktop_step",
+    arguments: { agentId, actions: [{ type: "accessibility", operation: "snapshot", app: "Notepad" }] },
+  });
+  assert(readerSemantic.result?.isError === true, "desktop_read gained semantic control without desktop_control");
+
   const controllerShot = await rpc(controller.token, 4, "tools/call", {
     name: "screenshot",
     arguments: { agentId },
@@ -418,6 +433,18 @@ async function mcpTests() {
   });
   assert(!controllerStepNoCapture.result?.isError, "desktop_control default no-capture step failed");
 
+  const controllerSemanticRead = await rpc(controller.token, 101, "tools/call", {
+    name: "desktop_step",
+    arguments: { agentId, actions: [{ type: "accessibility", operation: "snapshot", app: "Notepad" }] },
+  });
+  assert(controllerSemanticRead.result?.isError === true, "desktop_control gained accessibility read without desktop_read");
+
+  const controllerSemanticClick = await rpc(controller.token, 102, "tools/call", {
+    name: "desktop_step",
+    arguments: { agentId, actions: [{ type: "accessibility", operation: "click", ref: "@smock:e1" }] },
+  });
+  assert(!controllerSemanticClick.result?.isError, "desktop_control semantic click was incorrectly denied");
+
   const controllerStepWithCapture = await rpc(controller.token, 8, "tools/call", {
     name: "desktop_step",
     arguments: {
@@ -427,6 +454,38 @@ async function mcpTests() {
     },
   });
   assert(controllerStepWithCapture.result?.isError === true, "desktop_control gained screenshot through desktop_step");
+
+  const operatorSemantic = await rpc(operator.token, 103, "tools/call", {
+    name: "desktop_step",
+    arguments: { agentId, actions: [{ type: "accessibility", operation: "snapshot", app: "Notepad" }] },
+  });
+  assert(!operatorSemantic.result?.isError, "combined grants failed semantic snapshot");
+  const semanticOutput = JSON.parse(operatorSemantic.result?.content?.[0]?.text || "{}");
+  assert(semanticOutput.payload?.data?.tree?.ref_id === "@smock:e1", "semantic snapshot response missing");
+
+  const controllerSemanticStatus = await rpc(controller.token, 104, "tools/call", {
+    name: "desktop_step",
+    arguments: { agentId, actions: [{ type: "accessibility", operation: "status" }] },
+  });
+  assert(controllerSemanticStatus.result?.isError === true, "desktop_control gained semantic status without desktop_read");
+
+  // The legacy direct /relay entrypoint must enforce the same read grant.
+  const directPayload = { payload: { action: "desktop.step", actions: [
+    { type: "accessibility", operation: "snapshot", app: "Notepad" },
+  ] } };
+  const directHeaders = (token) => ({
+    authorization: "Bearer " + token, "content-type": "application/json",
+  });
+  const deniedDirect = await fetch(base + "/relay?agentId=" + agentId, {
+    method: "POST", headers: directHeaders(controller.token),
+    body: JSON.stringify(directPayload),
+  });
+  assert(deniedDirect.status === 403, "direct relay bypassed semantic desktop_read permission");
+  const allowedDirect = await fetch(base + "/relay?agentId=" + agentId, {
+    method: "POST", headers: directHeaders(operator.token),
+    body: JSON.stringify(directPayload),
+  });
+  assert(allowedDirect.ok, "direct relay denied authorized semantic snapshot");
 
   const operatorStep = await rpc(operator.token, 9, "tools/call", {
     name: "desktop_step",
