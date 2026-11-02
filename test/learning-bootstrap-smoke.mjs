@@ -267,6 +267,55 @@ const agentRecords = [
   console.log("PASS lazy phase-aware Learn MCP architecture contract");
 }
 
+{
+  // Statement-level overlap is applied after ranking, without changing source
+  // memories or usage attribution. It can backfill a redundant candidate.
+  const repeated = "For every implementation, inspect the real source and verify error handling before claiming completion";
+  const required = memory("overlap-required", "flowly-implementation-workflow", "workflow",
+    "project", "chat-relay", "## Required\n- " + repeated);
+  const copy = memory("overlap-copy", "terminal-review-notes", "tool_pattern",
+    "global", null, "## Repeated\n- " + repeated);
+  const fallback = memory("overlap-fallback", "concise-explanations", "response_style",
+    "global", null, "Present the result clearly, with test evidence and no invented claims");
+  const ctx = buildLearnRelevanceContext("terminal_exec", { phase: "implement" },
+    "chat-relay", null, "implement review terminal");
+  const scopes = [{ scope: "global" }, { scope: "project", scopeKey: "chat-relay" }];
+  const result = buildRelevantLearnEnvelope([required, copy, fallback], scopes, ctx, 2);
+  assert.deepEqual(new Set(result.items.map(item => item.id)),
+    new Set(["overlap-required", "overlap-fallback"]),
+    "an entirely repeated optional memory should be replaced by a new candidate");
+  assert.equal(result.items[0].content, required.content, "required content remains complete");
+
+  const extra = "Keep the authentication and authorization boundary unchanged during this code change";
+  const partial = memory("overlap-partial", "terminal-review-notes", "tool_pattern",
+    "global", null, "## Repeated\n- " + repeated + "\n- " + extra);
+  const trimmed = buildRelevantLearnEnvelope([required, partial], scopes, ctx, 2);
+  assert.ok(trimmed.items.some(item => item.id === "overlap-partial"));
+  assert.ok(!trimmed.items.find(item => item.id === "overlap-partial").content.includes(repeated),
+    "duplicate bullet is removed without losing the unique bullet");
+  assert.ok(trimmed.items.find(item => item.id === "overlap-partial").content.includes(extra));
+  assert.equal(trimmed.items.find(item => item.id === "overlap-partial").contentTruncated, true);
+
+  const opposite = memory("overlap-opposite", "different-condition", "tool_pattern",
+    "global", null, "Never " + repeated.toLowerCase());
+  const different = buildRelevantLearnEnvelope([required, opposite], scopes, ctx, 2);
+  assert.ok(different.items.some(item => item.id === "overlap-opposite"),
+    "different meaning, including negation, must not be collapsed");
+
+  const code = memory("overlap-code", "code-example", "coding_style", "global",
+    null, "## Code\n" + "\x60\x60\x60text\n- " + repeated + "\n\x60\x60\x60");
+  const protectedEnvelope = buildRelevantLearnEnvelope([required, code], scopes, ctx, 2);
+  assert.ok(protectedEnvelope.items.find(item => item.id === "overlap-code").content.includes(repeated),
+    "code fences and coding style must never be compacted");
+
+  const wrapped = memory("overlap-wrapped", "nested-guidance", "tool_pattern",
+    "global", null, "- " + repeated + "\n  - And preserve this subordinate exception");
+  const wrappedEnvelope = buildRelevantLearnEnvelope([required, wrapped], scopes, ctx, 2);
+  assert.ok(wrappedEnvelope.items.find(item => item.id === "overlap-wrapped").content.includes(repeated),
+    "a list item with children cannot be deleted as an isolated duplicate");
+  console.log("PASS overlap compaction: backfill, unique content, protected rules, negation and Markdown");
+}
+
 console.log("learning prepare/routing tests passed");
 
 

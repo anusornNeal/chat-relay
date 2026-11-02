@@ -140,6 +140,55 @@ function normalizedKey(record: LearnRecord) {
   return tokenize(record.key, 20).join("-");
 }
 
+// Compact only effectively identical standalone statements. Related rules may
+// have different conditions or negations, so fuzzy matching is unsafe here.
+function statementFingerprint(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed || /^(?:#{1,6}\s|\x60{3}|~~~)/.test(trimmed) || /^\s{4}/.test(line)) return null;
+  const prose = trimmed.replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, "");
+  if (prose.length < 64) return null;
+  return prose.replace(/\*\*|\x60/g, "").replace(/\s+/g, " ")
+    .replace(/[.!?。]+$/, "").trim().toLowerCase();
+}
+
+function compactRepeatedStatements(content: string, seen: Set<string>, protectedRule: boolean) {
+  const lines = content.split("\n");
+  const kept: string[] = [];
+  const fingerprints: string[] = [];
+  let inCode = false;
+  let removed = 0;
+  const boundary = (value: string) => !value || /^(?:#{1,6}\s|[-*+]\s+|\d+[.)]\s+)/.test(value);
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (/^(?:\x60{3}|~~~)/.test(trimmed)) {
+      inCode = !inCode;
+      kept.push(line);
+      continue;
+    }
+    const next = (lines[index + 1] || "").trim();
+    const previous = (lines[index - 1] || "").trim();
+    const isListItem = /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line);
+    // Never orphan wrapped paragraphs or nested bullets.
+    const standalone = !/^\s{2,}\S/.test(lines[index + 1] || "") &&
+      boundary(next) && (isListItem || boundary(previous));
+    const fingerprint = !inCode && standalone ? statementFingerprint(line) : null;
+    if (fingerprint && !protectedRule && seen.has(fingerprint)) {
+      removed++;
+      continue;
+    }
+    kept.push(line);
+    if (fingerprint) fingerprints.push(fingerprint);
+  }
+  if (!removed) return { content, fingerprints };
+  const compacted = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  const hasStatement = kept.some(line => {
+    const trimmed = line.trim();
+    return trimmed && !/^(?:#{1,6}\s|\x60{3}|~~~)/.test(trimmed);
+  });
+  return { content: hasStatement ? compacted : "", fingerprints };
+}
+
 function tokenOverlap(a: Set<string>, b: Set<string>) {
   if (!a.size || !b.size) return 0;
   let same = 0;
@@ -309,14 +358,18 @@ export function buildRelevantLearnEnvelope(
   limit = DEFAULT_TOP_K,
   optionalContentLimit?: number,
 ): LearnedContextEnvelope | null {
-  const ranked = selectRelevantLearnRecords(records, ctx, limit);
+  const boundedLimit = Math.max(1, Math.min(32, Math.floor(limit) || DEFAULT_TOP_K));
+  // Allow a few replacements when an optional memory contributes no new statements.
+  // Ranking/hydration remain unchanged; this does not add Learning DO requests.
+  const ranked = selectRelevantLearnRecords(records, ctx, Math.min(32, boundedLimit + 8));
   if (!ranked.length) return null;
 
   const items: PreparedLearnContent[] = [];
   let chars = 0;
+  const seenStatements = new Set<string>();
   const contentBudget = ["implement", "review", "test"].includes(ctx.phase) ? 16_000 : MAX_CONTENT_CHARS;
   for (const record of ranked) {
-    if (chars >= contentBudget) break;
+    if (items.length >= boundedLimit || chars >= contentBudget) break;
     if (record.validity?.status === "deprecated") continue;
     const itemLimit = isRequiredLearnKey(record.key) ? 4_000 : record.kind === "project_context" && record.key.startsWith("project-context:")
       ? MAX_CANONICAL_PROJECT_CONTEXT_CHARS
@@ -329,11 +382,19 @@ export function buildRelevantLearnEnvelope(
       record.kind !== "coding_style" && record.kind !== "agent_context" &&
       record.kind !== "project_context" && record.origin !== "shared";
     const boundedItemLimit = canCompact ? Math.min(itemLimit, optionalContentLimit) : itemLimit;
-    const content = fullContent.slice(0, Math.min(boundedItemLimit, contentBudget - chars));
+    let content = fullContent.slice(0, Math.min(boundedItemLimit, contentBudget - chars));
     // Mandatory content is all-or-missing: never silently truncate a required rule.
     if (isRequiredLearnKey(record.key) && content.length !== fullContent.length) continue;
+    const overlapProtected = isRequiredLearnKey(record.key) || record.origin === "shared" ||
+      record.kind === "coding_style" || record.kind === "agent_context" ||
+      record.kind === "project_context" || record.validity?.status === "needs-review";
+    const dedup = compactRepeatedStatements(content, seenStatements, overlapProtected);
+    content = dedup.content;
     if (!content) continue;
     chars += content.length;
+    for (const fingerprint of dedup.fingerprints) {
+      if (seenStatements.size < 512) seenStatements.add(fingerprint);
+    }
     items.push({
       id: record.id,
       key: record.key,
@@ -344,7 +405,7 @@ export function buildRelevantLearnEnvelope(
       confidence: record.confidence,
       updatedAt: record.updatedAt,
       ...(record.validity ? { validity: record.validity } : {}),
-      ...(content.length < fullContent.length ? { contentTruncated: true } : {}),
+      ...(content !== fullContent ? { contentTruncated: true } : {}),
       ...(record.origin === "shared" ? { origin: "shared" as const, groupId: record.groupId, approvedBy: record.approvedBy } : {}),
     });
   }
