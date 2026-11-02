@@ -102,8 +102,8 @@ const score = calculateLearnUsage({
   lastVerifiedAt: f.get(a).usage_last_verified,
 }, now + 10);
 assert.equal(score.status, "rated");
-assert.equal(score.score, 66, "Bayesian smoothing prevents one success = 100");
-assert.equal(usageRoutingAdjustment(score), 0, "one sample has minimal routing influence");
+assert.equal(score.score, 63, "one positive observation must not produce a perfect score");
+assert.equal(usageRoutingAdjustment(score), 1, "one sample has only a tiny routing influence");
 assert.equal(calculateLearnUsage({
   retrieved: 1, evaluated: 0, applied: 0, verified: 0,
   lastRetrievedAt: null, lastAppliedAt: null, lastVerifiedAt: null,
@@ -111,10 +111,54 @@ assert.equal(calculateLearnUsage({
 assert.equal(calculateLearnUsage({
   retrieved: 2, evaluated: 1, applied: 0, verified: 0,
   lastRetrievedAt: null, lastAppliedAt: null, lastVerifiedAt: null,
-}).score, 24, "reported-but-unused is distinct from unrated");
+}).score, 50, "evaluated-but-unused is neutral rather than negative");
+
+// Passive retrieval, empty reports and elapsed time must never decay usage.
+const evidence = {
+  retrieved: 3, evaluated: 2, applied: 1, verified: 1,
+  lastRetrievedAt: new Date(now).toISOString(),
+  lastAppliedAt: new Date(now).toISOString(),
+  lastVerifiedAt: new Date(now).toISOString(),
+};
+const stable = calculateLearnUsage(evidence, now).score;
+assert.equal(calculateLearnUsage(evidence, now + 365 * 86_400_000).score, stable,
+  "time alone must not decay a positive usage score");
+assert.equal(calculateLearnUsage({
+  ...evidence, retrieved: 300, evaluated: 299,
+}, now + 365 * 86_400_000).score, stable,
+  "many subsequent retrievals and unused reports must not decrease the score");
+assert.equal(calculateLearnUsage({
+  ...evidence, retrieved: 301, evaluated: 300, applied: 2,
+}).score > stable, true, "additional applied evidence increases the score");
+assert.equal(calculateLearnUsage({
+  ...evidence, retrieved: 301, evaluated: 300, applied: 2, verified: 2,
+}).score > stable, true, "additional verified evidence increases the score");
+const neverApplied = calculateLearnUsage({
+  retrieved: 1000, evaluated: 900, applied: 0, verified: 0,
+  lastRetrievedAt: null, lastAppliedAt: null, lastVerifiedAt: null,
+});
+assert.equal(neverApplied.score, 50, "irrelevant usage is neutral at any volume");
+assert.equal(usageRoutingAdjustment(neverApplied), 0,
+  "unused memory is not punished in routing");
+assert.equal(calculateLearnUsage({
+  ...evidence, retrieved: 400, evaluated: 300, applied: 300, verified: 300,
+}).score <= 100, true, "large positive counts never exceed 100");
 
 const stale = f.store.createReceipt([a], now);
 assert.equal(f.store.report(stale.receiptId, [], [], now + 24 * 3600 * 1000 + 1).status, 410);
+// Multiple phase receipts remain independently reportable even out of order.
+const phaseRead = f.store.createReceipt([b], now + 30);
+const phaseReview = f.store.createReceipt([b], now + 31);
+assert.ok(phaseRead.receiptId && phaseReview.receiptId);
+assert.notEqual(phaseRead.receiptId, phaseReview.receiptId);
+assert.equal(f.store.report(phaseReview.receiptId, [], [], now + 40).changed, true);
+assert.equal(f.get(b).usage_evaluated, 2);
+assert.equal(f.store.report(phaseRead.receiptId, [b], [], now + 41).changed, true);
+assert.equal(f.get(b).usage_evaluated, 3, "both completed phases are counted");
+assert.equal(f.get(b).usage_applied, 1);
+assert.equal(f.store.report(phaseRead.receiptId, [], [], now + 42).changed, false,
+  "a later retry cannot reapply an older phase report");
+
 const another = fixture();
 assert.equal(another.store.report(created.receiptId, [a], [], now + 10).status, 404,
   "receipts are account isolated");

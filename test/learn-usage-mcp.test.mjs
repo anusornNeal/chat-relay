@@ -173,6 +173,7 @@ try {
   const final = (await post("/profile", { limit: 10 })).items[0].usage;
   assert.deepEqual([final.retrieved, final.evaluated, final.applied, final.verified],
     [2, 2, 1, 1]);
+  assert.equal(final.score, profile.score, "an evaluated-but-unused receipt cannot reduce score");
   assert.equal(calls.filter((path) => path === "/usage/prepare").length, 2);
   assert.equal(calls.filter((path) => path === "/usage/report").length, 3);
 

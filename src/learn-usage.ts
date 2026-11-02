@@ -18,9 +18,16 @@ function count(value: unknown): number {
   return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 }
 
+/**
+ * Usage measures positive evidence, not the frequency of a memory being needed.
+ * A memory is not wrong merely because a different task did not use it.
+ * Stable cumulative applied/verified counts make the score non-decreasing
+ * under passive retrieval, completed empty reports, and elapsed time.
+ * Explicit negative feedback and factual validity remain separate signals.
+ */
 export function calculateLearnUsage(
   counters: LearnUsageCounters,
-  nowMs = Date.now(),
+  _nowMs = Date.now(),
 ): LearnUsage {
   const retrieved = count(counters.retrieved);
   const evaluated = Math.min(retrieved, count(counters.evaluated));
@@ -36,25 +43,20 @@ export function calculateLearnUsage(
     ...base, score: null, status: retrieved ? "unrated" : "new",
   };
 
-  // Bayesian priors prevent one positive report from producing a perfect score.
-  // Unreported retrievals are not evidence that a memory was unhelpful.
-  const applicationRate = (applied + 2) / (evaluated + 4);
-  const verifiedRate = applied ? (verified + 1) / (applied + 2) : 0;
-  const age = Date.parse(base.lastAppliedAt || "");
-  const recency = Number.isFinite(age)
-    ? Math.exp(-Math.max(0, nowMs - age) / (30 * 86_400_000))
-    : 0;
+  // Neutral until useful evidence arrives; saturating bonuses avoid a single
+  // applied/verified observation generating an unrealistically perfect score.
+  const applicationBonus = 30 * applied / (applied + 3);
+  const verificationBonus = 20 * verified / (verified + 3);
   return {
     ...base,
-    score: Math.max(0, Math.min(100,
-      Math.round(60 * applicationRate + 30 * verifiedRate + 10 * recency))),
+    score: Math.round(50 + applicationBonus + verificationBonus),
     status: "rated",
   };
 }
 
-/** Keep usage as a modest relevance tie-breaker, not a replacement for context. */
+/** Positive usage is a modest relevance tie-breaker, never a penalty for being unused. */
 export function usageRoutingAdjustment(usage?: LearnUsage | null): number {
   if (!usage || usage.status !== "rated" || usage.score === null) return 0;
-  const sampleWeight = Math.min(1, usage.evaluated / 10);
+  const sampleWeight = Math.min(1, usage.applied / 3);
   return Math.round(((usage.score - 50) / 50) * 12 * sampleWeight);
 }

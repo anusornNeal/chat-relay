@@ -19,17 +19,22 @@ Receipts are account-local, unguessable UUIDs, accepted exactly once, and expire
 after 24 hours. The report may include an empty applied list to indicate
 evaluated-but-not-used. No report means **unrated**, not failed.
 
-After `learn_prepare` returns `usageReceiptId`, report once at the end of the
-task with `learn_usage_report({receiptId, appliedMemoryIds, verified})`.
-Use only selected memory IDs from that preparation. Do not report raw logs or
-private credentials. A task may leave receipt unused if it was interrupted.
+After `learn_prepare` returns `usageReceiptId`, retain that receipt until it is
+reported. At a completed phase handoff, report before the next phase prepare;
+otherwise report every outstanding non-null receipt at final task completion.
+Each receipt must use only the private memory IDs returned by its matching
+preparation. A task interrupted before completion may leave an unused receipt;
+never fabricate a report or treat missing reports as negative feedback.
+Relay cannot detect when ChatGPT finishes a response, so this is a caller-side
+checkpoint contract, not a per-tool background reporting mechanism.
 
 ## Task-completion reporting and troubleshooting
 
 1. Call `learn_prepare` once for a context-sensitive task, keeping the returned
    `usageReceiptId` and the exact private memory IDs from `preparedContext`.
-2. Immediately before the final answer for a completed task, when a receipt
-   exists and the tool is available, call `learn_usage_report` **once**.
+2. On a completed phase handoff, report that phase's receipt before the next
+   `learn_prepare`; also report every outstanding receipt before the final
+   answer of a completed task. Call `learn_usage_report` **once per receipt**.
    Use `appliedMemoryIds: []` if none of the prepared memories materially
    influenced the task. Attach `verified: [{ memoryId, evidenceRef }]` only
    for an applied memory with a real checkable test, result, commit, or explicit
@@ -54,17 +59,21 @@ path; it does not prove the user-facing ChatGPT tool catalog is refreshed.
 
 ## Score
 
-For evaluated memories:
+For evaluated memories, the score starts at a neutral **50** and receives
+positive-only, saturating bonuses:
 
-- Application: 60% × `(applied + 2)/(evaluated + 4)` (Bayesian smoothing).
-- Verified: 30% × `(verified + 1)/(applied + 2)`; zero if nothing applied.
-- Recency: 10% × `exp(-daysSinceLastApplied/30)`.
+- Applied evidence: `30 * applied / (applied + 3)`.
+- Verified evidence: `20 * verified / (verified + 3)`.
 
-The score is rounded to a 0–100 integer. A single positive report cannot
-yield a perfect score. Without evaluated usage there is no score, only
-`New` or `Unrated`. The existing Learn relevance scorer treats usage as a
-bounded ±12-point signal, weighted by at least 10 evaluated observations,
-so new memories are not locked out by a low sample size.
+The rounded score stays within 50-100. One success cannot give a perfect score.
+Retrieved, Evaluated, empty-applied reports, and elapsed time **never reduce it**.
+Not needing a memory for one task is not evidence that the memory is wrong.
+Without evaluated usage, the status remains `New` or `Unrated` (null score).
+Usage adds a modest **0 to +12** relevance bonus weighted by applied evidence,
+never a penalty for being unused. Explicit Not useful feedback and factual
+validity are independent signals and may still reduce relevance.
+Existing counters are preserved: no schema migration, historical backfill,
+or added Learning DO calls on the ordinary-tool path.
 
 ## Storage and Cloudflare costs
 

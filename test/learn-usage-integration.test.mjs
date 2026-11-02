@@ -116,7 +116,7 @@ assert.equal(updated.usage.evaluated, 1);
 assert.equal(updated.usage.applied, 1);
 assert.equal(updated.usage.verified, 1);
 assert.equal(updated.usage.status, "rated");
-assert.equal(updated.usage.score, 66);
+assert.equal(updated.usage.score, 63);
 assert.equal(updated.confidence, 100, "underlying confidence remains for internal use");
 assert.equal((await second.call("/profile", { limit: 10 })).summary.total, 0);
 

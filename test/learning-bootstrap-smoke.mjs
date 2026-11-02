@@ -222,6 +222,7 @@ const agentRecords = [
   assert.match(worker, /REQUIRED LEARN COVERAGE INCOMPLETE/, "missing required rules must be surfaced before action");
   assert.match(worker, /withRequiredLearnCoverage\(/, "required rules need an explicit coverage contract");
   assert.match(worker, /usageReceiptId \? "At completion call learn_usage_report exactly once/, "prepared receipts must carry the reporting rule");
+  assert.match(worker, /Keep every non-null receipt from earlier phases until reported/, "incremental prepares must not discard earlier reporting obligations");
   assert.match(worker, /Never prepare for every tool/);
   assert.match(worker, /const globalRead = await readScopes\(initialScopes\)/);
   assert.match(worker, /initialScopes\.push\(\{ scope: "project"/, "explicit scopes should be batched");
@@ -236,7 +237,7 @@ const agentRecords = [
   assert.match(worker, /automatically canonicalized\/compacted/);
 
   const policy = fs.readFileSync("src/learning-policy.ts", "utf8");
-  assert.match(policy, /LEARN_BASELINE_VERSION = 10/);
+  assert.match(policy, /LEARN_BASELINE_VERSION = 11/);
   assert.match(policy, /call learn_prepare again/);
   assert.match(policy, /Ordinary Relay tools do not read or write Learn automatically/);
   assert.match(policy, /direct user correction or explicit enduring preference/);
@@ -245,14 +246,16 @@ const agentRecords = [
   assert.match(policy, /Do not learn one-off situational details/);
   assert.match(policy, /Keep project_context project-level and canonical/);
   assert.match(policy, /compacted into bounded canonical buckets/);
-  assert.equal(LEARN_BASELINE_VERSION, 10);
-  assert.equal(LEARN_BASELINE_POLICY.version, 10);
+  assert.equal(LEARN_BASELINE_VERSION, 11);
+  assert.equal(LEARN_BASELINE_POLICY.version, 11);
   assert.ok(LEARN_BASELINE_POLICY.rules.includes(LEARN_WRITING_FORMAT));
   assert.ok(LEARN_BASELINE_POLICY.rules.includes(LEARN_USAGE_REPORT_INSTRUCTION));
   assert.ok(LEARN_BASELINE_CONTEXT.includes(LEARN_USAGE_REPORT_INSTRUCTION));
   assert.doesNotMatch(LEARN_BASELINE_CONTEXT, /Call learn_prepare once/, "baseline must not tell chat to skip new phases");
   assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /learn_usage_report exactly once/);
   assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /Evaluates every prepared private memory/);
+  assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /At a completed phase handoff/);
+  assert.match(policy, /Keep each non-null usageReceiptId/);
   assert.match(LEARN_USAGE_REPORT_INSTRUCTION, /If the receipt or reporting tool is unavailable/);
   assert.ok(LEARN_BASELINE_CONTEXT.includes(LEARN_WRITING_FORMAT), "tool descriptions must expose writing guidelines to all accounts");
   assert.match(LEARN_WRITING_FORMAT, /kebab-case key/);
