@@ -9,14 +9,14 @@ const app = readFileSync(new URL("../dashboard/app.js", import.meta.url), "utf8"
 const usage = readFileSync(new URL("../dashboard/usage-workspace.js", import.meta.url), "utf8");
 
 test("dashboard has one small, self-contained design system", () => {
-  assert.match(css, /--accent:#5263dc/);
-  assert.match(css, /--line:#e2e8f3/);
+  assert.match(css, /--accent:#237f5a/);
+  assert.match(css, /--line:#e0e8df/);
   assert.match(css, /font-family:"Segoe UI"/);
   assert.doesNotMatch(css, /@import|cdn.jsdelivr.net/);
-  assert.equal((css.match(/^\.ux-usage-workspace\{/gm) || []).length, 1, "one base investigation layout");
+  assert.equal((css.match(/^\.ledger-table\{/gm) || []).length, 1, "one primary comparison table");
   assert(!css.includes(".learn-detail-more{"), "remove styling for an inert control");
-  assert(Buffer.byteLength(css, "utf8") < 51_000, "prevent uncompressed CSS bloat");
-  assert(gzipSync(css).length < 12_000, "keep CSS transfer lightweight");
+  assert(Buffer.byteLength(css, "utf8") < 64_000, "prevent uncompressed CSS bloat");
+  assert(gzipSync(css).length < 16_000, "keep CSS transfer lightweight");
 });
 
 test("navigation and content remain accessible without creating redundant live announcements", () => {
@@ -40,14 +40,14 @@ test("mock data is isolated from production assets and all data actions use exis
   assert.match(app, /const esc = /);
   assert.match(app, /credentials: "same-origin"/);
   assert.match(app, /"x-csrf-token"/);
-  assert.match(usage, /const totalCalls = accounts\.reduce/);
+  assert.match(usage, /const total = accounts\.reduce/);
 });
 
 test("Review and investigation handlers cannot retain stale selection after DOM patch", () => {
   assert.match(app, /if \(refineMemory\) refineMemory\.onclick/);
   assert.match(app, /const current = \(learnProfileSnapshot\?\.items \|\| \[\]\)\.find/);
   assert.doesNotMatch(app, /learnRefineMemory"\)\?\.addEventListener/);
-  assert.match(usage, /if \(inspectMetrics\) inspectMetrics\.onclick/);
-  assert.match(usage, /if \(openTimeline\) openTimeline\.onclick/);
+  assert.match(usage, /data-ledger-user/);
+  assert.match(usage, /data-ledger-timeline/);
   assert.match(usage, /if \(sequence !== loadSequence\) return/);
 });

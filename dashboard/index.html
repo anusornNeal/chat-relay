@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#151e35">
-  <title>Chat Relay · Operations</title>
+  <meta name="theme-color" content="#18251e">
+  <title>Chat Relay · Workspace</title>
   <link rel="stylesheet" href="/dashboard/styles.css">
   <link rel="stylesheet" href="/dashboard/shared-learn.css">
 </head>
@@ -13,11 +13,11 @@
     <div class="auth-card">
       <div class="brand-row">
         <span class="brand-mark">CR</span>
-        <div><strong>Chat Relay</strong><small>Operations dashboard</small></div>
+        <div><strong>Chat Relay</strong><small>Operations workspace</small></div>
       </div>
       <div class="auth-copy">
-        <h1>Sign in</h1>
-        <p>Use your Google account to access Chat Relay.</p>
+        <h1>Welcome back.</h1>
+        <p>Sign in to manage your workspace and review its activity.</p>
       </div>
       <p id="loginError" class="form-error" hidden role="alert"></p>
       <a class="button google" href="/admin/google/start">Continue with Google</a>
@@ -25,19 +25,20 @@
   </section>
 
   <div id="appView" class="app-shell" hidden>
-    <aside class="sidebar">
+    <header class="sidebar">
       <div class="brand-row sidebar-brand">
         <span class="brand-mark">CR</span>
-        <div><strong>Chat Relay</strong><small>CONTROL CENTER</small></div>
+        <div><strong>Chat Relay</strong><small>WORKSPACE</small></div>
       </div>
-      <div class="sidebar-nav-label">WORKSPACE</div>
       <nav id="nav" aria-label="Dashboard navigation"></nav>
       <div class="sidebar-footer">
-        <div class="sidebar-footer-heading"><span class="sidebar-footer-beacon" aria-hidden="true"></span> Connected workspace</div>
+        <span id="liveStatus" class="live-pill connecting" title="Connecting realtime updates">Connecting</span>
         <span id="roleBadge" class="role-badge"></span>
-        <small>Realtime updates</small>
+        <div class="account-identity"><span id="identityAvatar" class="identity-avatar" aria-hidden="true">CR</span><span id="who" class="identity"></span></div>
+        <button id="refresh" class="icon-button" type="button" title="Refresh" aria-label="Refresh dashboard"></button>
+        <button id="logout" class="button logout-button" type="button">Sign out</button>
       </div>
-    </aside>
+    </header>
 
     <main class="main">
       <header class="topbar">
@@ -47,20 +48,13 @@
           <p id="pageSubtitle" class="subtitle"></p>
         </div>
         <div class="top-actions">
-          <div class="connection-state">
-            <span id="liveStatus" class="live-pill connecting" title="Connecting realtime updates">Connecting</span>
-            <span id="freshness" class="soft-pill">Waiting for data</span>
-          </div>
-          <div class="account-identity"><span id="identityAvatar" class="identity-avatar" aria-hidden="true">CR</span><span id="who" class="identity"></span></div>
-          <button id="refresh" class="icon-button" type="button" title="Refresh" aria-label="Refresh dashboard"></button>
-          <button id="logout" class="button logout-button" type="button">Sign out</button>
+          <span id="freshness" class="soft-pill">Waiting for data</span>
         </div>
       </header>
       <div id="notice" class="notice" hidden role="status"></div>
       <section id="content" aria-label="Dashboard content"></section>
     </main>
   </div>
-
   <script type="module" src="/dashboard/app.js"></script>
 </body>
 </html>

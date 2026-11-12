@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { learnReviewReason, learnFocusItems, learnFocusSummary, usageDirectory } from "../dashboard/ux-insights.js";
+import { learnReviewReason, learnFocusItems, learnFocusSummary, usageDirectory, toolCallSeries } from "../dashboard/ux-insights.js";
 
 test("Review queue is evidence-based, not a blanket low-score quality verdict", () => {
   const rated = {usage:{status:"rated",score:49,evaluated:2,applied:0}};
@@ -28,4 +28,26 @@ test("Account search includes agent names but never mutates or loses order of AP
   assert.deepEqual(usageDirectory(original,"", "calls").map(a=>a.userId),["a","b"]);
   assert.deepEqual(usageDirectory(original,"", "name").map(a=>a.userId),["a","b"]);
   assert.deepEqual(original.map(a=>a.userId),["b","a"]);
+});
+
+test("7 day Tool Calls preserve Bangkok dates and fill only missing past days", () => {
+  const period={range:"7d",from:"2026-11-05T17:00:00.000Z",to:"2026-11-12T08:00:00.000Z"};
+  const input=[
+    {from:"2026-11-06T17:00:00.000Z",calls:9},
+    {from:"2026-11-11T17:00:00.000Z",calls:7},
+  ];
+  const rows=toolCallSeries(input,period);
+  assert.equal(rows.length,7);
+  assert.deepEqual(rows.map(x=>x.calls),[0,9,0,0,0,0,7]);
+  assert.equal(rows.at(-1).from,"2026-11-11T17:00:00.000Z");
+});
+
+test("Today's hourly chart excludes future hours and does not alter the API data",()=>{
+  const period={range:"today",from:"2026-11-11T17:00:00.000Z",to:"2026-11-12T03:25:00.000Z"};
+  const input=[{from:"2026-11-11T17:00:00.000Z",calls:1},{from:"2026-11-12T03:00:00.000Z",calls:6}];
+  const rows=toolCallSeries(input,period);
+  assert.equal(rows.length,11);
+  assert.equal(rows[0].calls,1);
+  assert.equal(rows.at(-1).calls,6);
+  assert.equal(input.length,2);
 });

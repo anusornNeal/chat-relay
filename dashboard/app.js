@@ -5,7 +5,8 @@ import { learnReviewReason, learnFocusItems, learnFocusSummary } from "./ux-insi
 
 let csrf = sessionStorage.getItem("chat_relay_csrf") || "";
 let currentUser = null;
-let activeView = "overview";
+const initialView = new URLSearchParams(location.search).get("view");
+let activeView = ["overview","usage","learn"].includes(initialView) ? initialView : (initialView === "shared" ? "learn" : "usage");
 let liveSocket = null;
 let reconnectTimer = null;
 let fallbackStartTimer = null;
@@ -303,8 +304,8 @@ function isAdmin() { return currentUser?.admin === true; }
 
 function navItems() {
   return isAdmin()
-    ? [["overview", "Overview", "overview"], ["usage", "Usage", "activity"], ["learn", "My Learn", "info"]]
-    : [["overview", "My Overview", "overview"], ["usage", "My usage", "activity"], ["learn", "My Learn", "info"]];
+    ? [["usage", "Usage", "activity"], ["learn", "My Learn", "info"], ["overview", "System", "overview"]]
+    : [["usage", "My usage", "activity"], ["learn", "My Learn", "info"], ["overview", "Overview", "overview"]];
 }
 function renderNav() {
   $("nav").innerHTML = navItems().map(([id, label, glyph]) =>
@@ -329,7 +330,7 @@ function showLoading() {
     '</div><div class="skeleton loading-panel"></div></div>';
 }
 async function switchView(view) {
-  if (!navItems().some(([id]) => id === view)) view = "overview";
+  if (!navItems().some(([id]) => id === view)) view = "usage";
   activeView = view;
   renderNav();
   showLoading();
@@ -656,6 +657,7 @@ async function loadOverview({ patch = false } = {}) {
 
 const usageWorkspace = createUsageWorkspace({
   api, renderContent, setHeader, setNotice, isAdmin,
+  isActive: () => activeView === "usage",
   getCurrentUser: () => currentUser,
   getRange: () => dashboardRange,
   setRange: (value) => { dashboardRange = value; dashboardPeriod = null; },
@@ -684,6 +686,7 @@ let learnScopeKeyFilter = "";
 let learnSelectedMemoryId = null;
 let learnSearchQuery = "";
 let learnSortMode = "usage";
+let learnScopeDrawerOpen = false;
 let learnFocusMode = "review";
 const learnTreeExpanded = { global: true, project: true, agent: true, shared: true };
 let learnLibraryScrollTop = 0;
@@ -1049,20 +1052,21 @@ function bindLearnLibrarySidebar() {
     scroll.scrollTop = learnLibraryScrollTop;
     scroll.onscroll = () => { learnLibraryScrollTop = scroll.scrollTop; };
   }
-  const searchInput = document.getElementById("learnSearch");
-  if (searchInput) searchInput.oninput = () => {
-    learnSearchQuery = searchInput.value;
-    if (sharedLearnActive) sharedLearnUI.rerender();
-    else renderLearnProfile({ patch: true });
-    requestAnimationFrame(() => {
-      const next = document.getElementById("learnSearch");
-      if (next) {
-        next.focus();
-        const pos = next.value.length;
-        next.setSelectionRange?.(pos, pos);
-      }
-    });
-  };
+  for (const input of document.querySelectorAll("#learnSearch, #learnSearchTop")) {
+    input.oninput = () => {
+      learnSearchQuery = input.value;
+      if (sharedLearnActive) sharedLearnUI.rerender();
+      else renderLearnProfile({ patch: true });
+      requestAnimationFrame(() => {
+        const next = document.getElementById(input.id);
+        if (next) {
+          next.focus();
+          const pos = next.value.length;
+          next.setSelectionRange?.(pos, pos);
+        }
+      });
+    };
+  }
   document.querySelectorAll("[data-learn-tree-scope]").forEach((button) => {
     button.onclick = () => {
       const scope = button.dataset.learnTreeScope || "all";
@@ -1174,11 +1178,15 @@ function renderLearnProfile({ patch = false } = {}) {
     : (learnFocusMode === "review" ? "Review evidence, give feedback, and refine rules without leaving this page" : "Your reusable preferences and working patterns");
 
   renderContent(
-    '<section class="learn-folder-shell">' +
+    '<section class="learn-folder-shell learn-review-board' + (learnScopeDrawerOpen ? ' show-scopes' : '') + '">' +
       renderLearnLibrarySidebar() +
       '<div class="learn-folder-main">' +
         '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div>' +
-          '<div class="learn-folder-heading-actions">' + (learnScopeFilter === "project" && !learnScopeKeyFilter ? '<button id="learnMergeProjects" class="button small" type="button">Merge projects</button>' : '') + '<span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
+          '<div class="learn-folder-heading-actions">' +
+            '<label class="learn-review-search">' + icon("search") + '<input id="learnSearchTop" type="search" aria-label="Search Learn rules" placeholder="Search rules…" value="' + esc(learnSearchQuery) + '"></label>' +
+            '<button type="button" id="learnScopeToggle" class="button learn-scope-toggle" aria-expanded="' + learnScopeDrawerOpen + '">' + icon("filter") + 'Scopes & groups</button>' +
+            (learnScopeFilter === "project" && !learnScopeKeyFilter ? '<button id="learnMergeProjects" class="button small" type="button">Merge projects</button>' : '') +
+            '<button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
         '<div class="ux-learn-focus"><div class="ux-learn-focus-tabs" role="group" aria-label="Learn review view">' +
           [['review','Needs review',focusSummary.review],['all','All memories',focusSummary.total],['used','Applied',focusSummary.used]].map(([id,label,count]) =>
             '<button type="button" data-learn-focus="' + id + '" class="ux-focus-tab' + (learnFocusMode === id ? ' active' : '') +
@@ -1209,6 +1217,13 @@ function renderLearnProfile({ patch = false } = {}) {
   if (exportButton) exportButton.onclick = exportLearnProfile;
 
   bindLearnLibrarySidebar();
+  const scopeToggle = document.getElementById("learnScopeToggle");
+  if (scopeToggle) scopeToggle.onclick = () => {
+    learnScopeDrawerOpen = !learnScopeDrawerOpen;
+    renderLearnProfile({patch:true});
+    if (learnScopeDrawerOpen) document.getElementById("learnSearch")?.focus();
+    else document.getElementById("learnScopeToggle")?.focus();
+  };
 
   document.querySelectorAll("[data-learn-focus]").forEach((button) => {
     button.onclick = () => {

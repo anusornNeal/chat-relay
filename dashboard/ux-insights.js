@@ -37,3 +37,26 @@ export function usageDirectory(accounts, query, sortMode = "calls") {
     : Number(b.calls || 0) - Number(a.calls || 0) ||
       String(a.name || a.userId || "").localeCompare(String(b.name || b.userId || "")));
 }
+
+// Normalize sparse UsageAggregates buckets to the exact Bangkok-aligned period.
+// Returns only elapsed hours/days (not future empty slots), with no guessed calls.
+export function toolCallSeries(buckets, period) {
+  const from = Date.parse(period?.from || "");
+  const to = Date.parse(period?.to || "");
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return [];
+  const step = period.range === "today" ? 3_600_000 : 86_400_000;
+  const max = period.range === "today" ? 24 : period.range === "7d" ? 7 : 30;
+  const count = Math.max(0, Math.min(max, Math.floor((to - from) / step) + 1));
+  const sums = new Map();
+  for (const bucket of Array.isArray(buckets) ? buckets : []) {
+    const start = Date.parse(bucket?.from || "");
+    if (!Number.isFinite(start)) continue;
+    const index = Math.round((start - from) / step);
+    if (index < 0 || index >= count) continue;
+    sums.set(index, (sums.get(index) || 0) + Math.max(0, Number(bucket.calls || 0)));
+  }
+  return Array.from({length: count}, (_, index) => ({
+    from: new Date(from + index * step).toISOString(),
+    calls: sums.get(index) || 0,
+  }));
+}
