@@ -1,4 +1,3 @@
-/* System font stack: no external font dependency. */
 [hidden]{display:none!important}
 :root{
   font-family:"Segoe UI","Noto Sans Thai",ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
@@ -204,7 +203,6 @@ tr:last-child td{border-bottom:0}
   *,*::before,*::after{scroll-behavior:auto!important;animation-duration:.001ms!important;transition-duration:.001ms!important}
 }
 
-/* Account and agent usage: one DOM-order-preserving responsive grid. */
 .usage-toolbar-left{display:flex;align-items:center;gap:11px;flex-wrap:wrap}
 .usage-user-tabs{display:inline-flex;align-items:center;gap:3px;padding:4px;border:1px solid var(--line);border-radius:11px;background:#edf0f9}
 .usage-user-tab{border:0;border-radius:8px;background:transparent;padding:8px 12px;color:#758099;font-size:11px;font-weight:650}
@@ -215,7 +213,6 @@ tr:last-child td{border-bottom:0}
 .usage-user-action .icon{width:14px;height:14px}
 .agent-usage-name .agent-dot{width:8px;height:8px}
 .agent-usage-name .agent-dot.online{background:var(--success);box-shadow:0 0 0 4px rgba(33,128,100,.12)}
-/* learn folder explorer */
 html:has(.learn-folder-shell),body:has(.learn-folder-shell){width:100%;height:100%;overflow:hidden}
 .app-shell:has(.learn-folder-shell){width:100vw;height:100vh;min-height:0;overflow:hidden}
 .main:has(.learn-folder-shell){width:100%;height:100vh;min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;padding-bottom:27px}
@@ -372,7 +369,6 @@ html:has(.learn-folder-shell),body:has(.learn-folder-shell){width:100%;height:10
 .learn-project-aliases{font-size:11px;color:#667085;line-height:1.5}
 .learn-project-merge-buttons{display:flex;gap:8px;justify-content:flex-end;padding-top:4px}
 
-/* Navigation and account context */
 .sidebar-nav-label{padding:0 22px 12px;color:#7b8aae;font-size:9px;letter-spacing:.16em;font-weight:780}
 .sidebar-footer-heading{display:flex;align-items:center;gap:8px;font-size:11px;color:#a4b0c9}
 .sidebar-footer-beacon{width:7px;height:7px;border-radius:50%;background:#3ac597;box-shadow:0 0 0 4px rgba(58,197,151,.12)}
@@ -442,7 +438,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
   .learn-folder-confidence{justify-self:end}
 }
 
-/* Tool Calls comparison uses the Ledger, not the old investigation layout. */
 .learn-folder-main:has(>.ux-learn-focus){grid-template-rows:auto auto 50px minmax(0,1fr)}
 .ux-learn-focus{display:flex;justify-content:space-between;align-items:center;gap:15px;min-width:0;padding:13px 0;border-bottom:1px solid var(--line)}
 .ux-learn-focus-tabs{display:flex;align-items:center;gap:5px;padding:4px;background:#edf0f9;border-radius:11px;flex-wrap:wrap}
@@ -503,7 +498,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
   .ux-learn-actions .learn-detail-remove{margin-left:0}
 }
 
-/* Navigation from overview to the two primary user workflows. */
 .ux-next-actions{display:grid;grid-template-columns:minmax(190px,1fr) repeat(2,minmax(0,1.2fr));gap:11px;align-items:stretch;margin-top:16px}
 .ux-next-copy{display:flex;flex-direction:column;justify-content:center;gap:5px;padding:13px 17px}
 .ux-next-copy strong{font-size:13px;color:#263961}
@@ -518,7 +512,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 @media(max-width:900px){.ux-next-actions{grid-template-columns:repeat(2,minmax(0,1fr))}.ux-next-copy{grid-column:1/-1}}
 @media(max-width:540px){.ux-next-actions{grid-template-columns:1fr}.ux-next-copy{grid-column:auto}}
 
-/* Personal Learn keeps the folder explorer visible as a permanent column. */
 .learn-folder-shell.learn-review-board{
  display:grid;grid-template-columns:245px minmax(0,1fr);grid-template-rows:minmax(0,1fr);
  min-height:0;height:100%;width:100%;max-width:100%;flex:1;
@@ -572,7 +565,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
  .learn-review-board .ux-learn-focus{padding:8px 12px}
 }
 
-/* Usage: compact, readable aligned metrics; expand any number of rows. */
 .main:has(.ledger-table-section){max-width:1040px;margin-left:auto;margin-right:auto}
 .ledger-activity-chart{background:#fff;border:1px solid var(--line);border-radius:9px;min-width:0;overflow:hidden}
 .ledger-activity-chart .chart-frame{height:252px;padding:8px 19px 16px}
@@ -588,7 +580,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
  .ledger-activity-chart{overflow-x:auto}
  .ledger-activity-chart .chart-frame{min-width:520px;padding:10px}
 }
-/* REL-38: compact, neutral dashboard; a single indigo accent. */
 .app-shell{display:grid;grid-template-columns:184px minmax(0,1fr);min-height:100vh}
 .sidebar{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;align-items:stretch;gap:0;min-width:0;padding:19px 12px;background:#fff;color:#374151;border-right:1px solid #e5e7eb;border-bottom:0}
 .sidebar-brand{padding:0 10px;margin-bottom:29px}
@@ -746,7 +737,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
  .ledger-disclosures{grid-template-columns:1fr}
 }
 
-/* REL-38: compact usage comparisons, shared detail disclosure and sortable Learn columns. */
 .ledger-call-visual{display:grid;grid-template-columns:minmax(50px,1fr) minmax(55px,72px);align-items:center;gap:14px;width:100%}
 .ledger-call-visual>strong{font-size:15px;font-weight:740;text-align:right;letter-spacing:-.02em;color:#111827;font-variant-numeric:tabular-nums}
 .ledger-volume-track{height:7px;border-radius:4px;background:#eef2ff;overflow:hidden;width:100%}
