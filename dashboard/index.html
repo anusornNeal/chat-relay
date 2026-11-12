@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#111417">
+  <meta name="theme-color" content="#151e35">
   <title>Chat Relay · Operations</title>
   <link rel="stylesheet" href="/dashboard/styles.css">
   <link rel="stylesheet" href="/dashboard/shared-learn.css">
@@ -28,10 +28,12 @@
     <aside class="sidebar">
       <div class="brand-row sidebar-brand">
         <span class="brand-mark">CR</span>
-        <div><strong>Chat Relay</strong><small>Operations</small></div>
+        <div><strong>Chat Relay</strong><small>CONTROL CENTER</small></div>
       </div>
-      <nav id="nav" aria-label="Dashboard"></nav>
+      <div class="sidebar-nav-label">WORKSPACE</div>
+      <nav id="nav" aria-label="Dashboard navigation"></nav>
       <div class="sidebar-footer">
+        <div class="sidebar-footer-heading"><span class="sidebar-footer-beacon" aria-hidden="true"></span> Connected workspace</div>
         <span id="roleBadge" class="role-badge"></span>
         <small>Realtime updates</small>
       </div>
@@ -39,21 +41,23 @@
 
     <main class="main">
       <header class="topbar">
-        <div>
+        <div class="page-heading">
           <p id="eyebrow" class="eyebrow"></p>
           <h1 id="pageTitle"></h1>
           <p id="pageSubtitle" class="subtitle"></p>
         </div>
         <div class="top-actions">
-          <span id="liveStatus" class="live-pill connecting" title="Connecting realtime updates">Connecting</span>
-          <span id="freshness" class="soft-pill">Waiting for data</span>
-          <span id="who" class="identity"></span>
+          <div class="connection-state">
+            <span id="liveStatus" class="live-pill connecting" title="Connecting realtime updates">Connecting</span>
+            <span id="freshness" class="soft-pill">Waiting for data</span>
+          </div>
+          <div class="account-identity"><span id="identityAvatar" class="identity-avatar" aria-hidden="true">CR</span><span id="who" class="identity"></span></div>
           <button id="refresh" class="icon-button" type="button" title="Refresh" aria-label="Refresh dashboard"></button>
-          <button id="logout" class="button" type="button">Sign out</button>
+          <button id="logout" class="button logout-button" type="button">Sign out</button>
         </div>
       </header>
       <div id="notice" class="notice" hidden role="status"></div>
-      <section id="content" aria-live="polite"></section>
+      <section id="content" aria-label="Dashboard content"></section>
     </main>
   </div>
 

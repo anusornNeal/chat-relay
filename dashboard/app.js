@@ -307,7 +307,7 @@ function navItems() {
 }
 function renderNav() {
   $("nav").innerHTML = navItems().map(([id, label, glyph]) =>
-    '<button class="nav-button ' + (activeView === id ? "active" : "") + '" data-view="' + id + '">' +
+    '<button type="button" class="nav-button ' + (activeView === id ? "active" : "") + '" aria-current="' + (activeView === id ? "page" : "false") + '" data-view="' + id + '">' +
       icon(glyph) + '<span class="nav-label">' + esc(label) + "</span></button>"
   ).join("");
   document.querySelectorAll("[data-view]").forEach((button) => {
@@ -315,9 +315,10 @@ function renderNav() {
   });
 }
 function setHeader(title, subtitle) {
-  $("eyebrow").textContent = isAdmin() ? "Admin" : "User";
+  $("eyebrow").textContent = (isAdmin() ? "ADMIN WORKSPACE" : "PERSONAL WORKSPACE") + " / " + (activeView === "learn" ? "KNOWLEDGE" : activeView === "usage" ? "ACCOUNTS" : "ANALYTICS");
   $("pageTitle").textContent = title;
   $("pageSubtitle").textContent = subtitle;
+  document.title = title + " · Chat Relay";
 }
 function showLoading() {
   $("content").innerHTML =
@@ -496,7 +497,7 @@ function periodChips(period) {
   const current = period?.range || dashboardRange || "today";
   const ranges = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]];
   return '<div class="period-chips">' + ranges.map(([value, label]) =>
-    '<button type="button" class="period-chip' + (current === value ? ' primary' : '') + '" data-overview-range="' + value + '">' +
+    '<button type="button" aria-pressed="' + String(current === value) + '" class="period-chip' + (current === value ? ' primary' : '') + '" data-overview-range="' + value + '">' +
       (current === value ? icon("clock") : "") + esc(label) + "</button>"
   ).join("") + "</div>";
 }
@@ -650,6 +651,12 @@ async function loadUsage({ patch = false } = {}) {
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
   dashboardRange = dashboardPeriod.range || dashboardRange;
   const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  // Derive these from the existing response; no additional API requests.
+  const totalCalls = accounts.reduce((sum, account) => sum + Number(account.calls || 0), 0);
+  const totalAgents = accounts.reduce((sum, account) =>
+    sum + (Array.isArray(account.agents) ? account.agents.length : 0), 0);
+  const onlineAgents = accounts.reduce((sum, account) =>
+    sum + (Array.isArray(account.agents) ? account.agents.filter((agent) => agent.online).length : 0), 0);
 
   const accountMarkup = accounts.length ? accounts.map((account) => {
     const agents = Array.isArray(account.agents) ? account.agents : [];
@@ -680,6 +687,11 @@ async function loadUsage({ patch = false } = {}) {
     : "";
 
   renderContent(
+    '<div class="metric-grid usage-metric-grid">' +
+      metricCard(showDeleted ? "Deleted accounts" : "Accounts", fmtNum(accounts.length), "In selected period") +
+      metricCard("Tool invocations", fmtNum(totalCalls), "Across visible accounts") +
+      metricCard("Connected agents", fmtNum(onlineAgents) + " / " + fmtNum(totalAgents), "Account assignments") +
+    '</div>' +
     '<div class="overview-toolbar"><div class="usage-toolbar-left">' + userTabs + periodChips(dashboardPeriod) + '</div>' +
       '<span class="privacy-chip">' + icon("info") + periodDisplayLabel(dashboardRange) + "</span></div>" +
     '<div class="account-agent-grid">' + accountMarkup + "</div>",
@@ -1100,7 +1112,7 @@ function renderLearnProfile({ patch = false } = {}) {
 
   const rowsHtml = visibleItems.length ? visibleItems.map((item) => {
     const active = selected?.id === item.id ? " active" : "";
-    return '<button class="learn-folder-row' + active + '" type="button" data-learn-memory="' + esc(item.id) + '" data-live-key="learn-row-' + esc(item.id) + '">' +
+    return '<button class="learn-folder-row' + active + '" type="button" aria-pressed="' + String(Boolean(active)) + '" title="' + esc(item.key) + '" data-learn-memory="' + esc(item.id) + '" data-live-key="learn-row-' + esc(item.id) + '">' +
       '<span class="learn-folder-file">' + icon("folder") + '</span>' +
       '<span class="learn-folder-copy"><strong>' + esc(item.key) + '</strong><small>' + esc(learnKindLabel(item.kind)) + '</small></span>' +
       '<span class="learn-folder-confidence">' + esc(learnUsageLabel(item)) + '</span>' +
@@ -1118,7 +1130,7 @@ function renderLearnProfile({ patch = false } = {}) {
     const scopePath = selected.scope === "global" ? "Global" : learnScopeLabel(selected);
     detailHtml =
       '<div class="learn-detail-scroll"><div class="learn-detail-top"><span class="learn-type-pill ' + esc(learnKindClass(selected.kind)) + '"><i class="learn-tree-dot ' + esc(learnKindClass(selected.kind)) + '"></i>' + esc(learnKindLabel(selected.kind)) + '</span>' +
-        '<button class="learn-detail-more" type="button" aria-label="More memory actions">' + icon("more") + '</button></div>' +
+        '</div>' +
       '<h3>' + esc(selected.key) + '</h3>' +
       '<div class="learn-detail-path">' + icon("folder") + esc(scopePath) + ' / ' + esc(learnKindLabel(selected.kind)) + '</div>' +
       '<div class="learn-detail-rule"></div>' +
@@ -1245,7 +1257,9 @@ $("logout").insertAdjacentHTML("afterbegin", icon("logout"));
     currentUser = data.user;
     $("loginView").hidden = true;
     $("appView").hidden = false;
-    $("who").textContent = (currentUser.name || currentUser.login) + " \u00b7 " + (isAdmin() ? "Admin" : "User");
+    const displayName = String(currentUser.name || currentUser.login || "User");
+    $("who").textContent = displayName + " \u00b7 " + (isAdmin() ? "Admin" : "User");
+    $("identityAvatar").textContent = displayName.trim().split(/\s+/).slice(0, 2).map((part) => part[0] || "").join("").toUpperCase().slice(0, 2) || "CR";
     $("roleBadge").innerHTML = icon(isAdmin() ? "server" : "users") + (isAdmin() ? "Admin workspace" : "User workspace");
     renderNav();
     showLoading();
