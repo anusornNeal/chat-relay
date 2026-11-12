@@ -219,7 +219,7 @@ export function humanizeToolCall(payload = {}) {
     case "terminal.shell.start":
       return withCwd("Open interactive shell", payload.cwd);
     case "terminal.read":
-      return `Read terminal output · ${cleanText(payload.sessionId, 24)} · after #${number(payload.afterSeq)}`;
+      return `Read terminal output · ${cleanText(payload.sessionId, 24)} · after #${number(payload.afterSeq)}${Number(payload.waitMs) > 0 ? ` · wait up to ${number(payload.waitMs)}ms` : ""}`;
     case "terminal.write":
       return `Send input to terminal · ${String(payload.input ?? "").length} chars`;
     case "terminal.kill":

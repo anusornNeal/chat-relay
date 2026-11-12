@@ -41,7 +41,7 @@ export const AGENT_UPGRADE_EXIT_CODE = 5;
 
 export function summarizeAgentWork({ terminal = {}, scheduler = {}, desktop = {} } = {}) {
   const terminalExec = scheduler.terminalExec || {};
-  const otherSchedulerLanes = ["filesystem", "process", "terminalControl", "desktopRead"];
+  const otherSchedulerLanes = ["filesystem", "process", "terminalControl", "terminalWait", "desktopRead"];
   const activeOtherJobs = otherSchedulerLanes.reduce(
     (sum, name) => sum + Math.max(0, Number(scheduler[name]?.active) || 0),
     0,

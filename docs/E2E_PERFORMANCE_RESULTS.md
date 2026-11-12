@@ -105,3 +105,25 @@ Default learn_prepare now caps **optional** content at 420 characters and report
 **Regression:** npm run test:hardening and npm run verify:publish passed in source at version 1.4.0. Existing Shared Learn ACL, cross-account isolation, Learn usage idempotence, 5-chat Soak and Worker dry-run passed. Full test:full live multi-user smoke was not completed: initial local fixture lacked .dev.vars, and a separate clean test Worker admin bootstrap was restricted by execution authorization. Do not label this specific live smoke PASS; no production user/agent records were changed.
 
 **Release scope:** When the Worker deploy completes, all accounts receive smaller MCP catalog and Learn responses. Already committed native Search changes require a separate upgrade of each npm Local Agent to obtain local search-handler improvements. Agent backward compatibility is tested by existing protocol/upgrade tests. No claim of complete model prompt-to-answer A/B speedup.
+
+## REL-37 -- opt-in terminal wait-on-output (local candidate, 2026-11-12)
+
+**Observed problem:** Agent call history showed repeated `terminal_exec Start-Sleep -Seconds 10-14` followed by `terminal_read`, with each unnecessary explicit sleep making an additional MCP call.
+
+**Implementation:** `terminal_read` and `read_process_output` accept optional `waitMs: 0..15000` (default 0, backward compatible). When a session is running and the requested output has not yet arrived, the local agent asynchronously waits for the next stdout/stderr chunk or process exit, returning early when notified and cleaning up the listener on exit/timeout/close. A dedicated bounded `terminalWait` scheduler lane prevents these waits from blocking `terminal_write`, `terminal_kill`, and other terminal controls. No new Worker router, Durable Object storage, per-call Learn request, or background polling loop.
+
+**Local MCP A/B benchmark:** 8 measured paired rounds (1 warmup), alternating order and verifying exact unique output for every run. Same local Worker/DO/WebSocket and isolated test agent, each running `Start-Sleep -Milliseconds 400; Write-Output <unique>`.
+| Workflow | MCP calls | p50 wall | p95 wall | p50 Relay roundtrip sum | Output |
+|---|---:|---:|---:|---:|---|
+| Existing terminal_start + explicit 1200ms sleep via terminal_exec + read | 3 | 1337.61ms | 1360.87ms | 1243ms | parity PASS |
+| Candidate terminal_start + terminal_read(waitMs:3000) | 2 | 791.30ms | 979.05ms | 729ms | parity PASS |
+
+**Conditional savings:** 33.3% fewer tool calls and 40.8% lower p50 test-client wall-time for this *specific waiting scenario*. This is **not** a release-to-release speedup or a 40.8% improvement in a complete AI coding task.
+
+**Cost and behavior guardrails:** Waiting inside an active Durable Object request contributes to billable duration while active; the old explicit sleep command also held a request open in this benchmark. Use `waitMs` only when the alternative is explicit blocking/polling and a result is genuinely needed; do useful independent work meanwhile when possible. Existing clients default to immediate/non-blocking reads. Older agents may ignore the optional field until upgraded; the new agent advertises `terminal.read.wait`. Limit is 15s, below the Relay request timeout of 30s. For unrelated tasks, do not add delay.
+
+References: https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/ and https://developers.cloudflare.com/durable-objects/platform/pricing/
+
+**Not measured:** Real model reasoning, ChatGPT connector scheduling, actual production Cloudflare duration/CPU/DO request accounting, or whether all model tool choices automatically improve. These require host-side timestamps and production telemetry after a separately approved release.
+
+**Final-candidate repeat after separate wait queue (8 paired measured samples, 1 warmup):** The benchmark harness was corrected to continue polling whenever the legacy fixed 1200ms sleep returned before the process produced output (rather than discarding that trial). Legacy required **3-5 MCP calls**, versus a consistent **2** with wait-on-output. Legacy p50 **1444.91ms**, p95 **2058.64ms**; wait p50 **1163.75ms**, p95 **1318.39ms**, both with exact output parity. Result is **19.5% lower p50** for this repeat, not the 40.8% of the earlier run. Sample size is small and fluctuates with Windows process startup and host load. In both runs, calls are reduced and output correctness is preserved. Do not infer a stable global performance gain from either measurement.

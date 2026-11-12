@@ -185,13 +185,33 @@ console.log("exec ok");
 const started = await tool(3, "terminal_start", {
   command: "1..3 | ForEach-Object { Write-Output ('tick ' + $_); Start-Sleep -Milliseconds 150 }",
 });
-await new Promise((resolve) => setTimeout(resolve, 700));
-const output = await tool(4, "terminal_read", { sessionId: started.sessionId, afterSeq: 0 });
-const joined = output.chunks.map((chunk) => chunk.text).join("");
+let output;
+let afterSeq = 0;
+const outputChunks = [];
+for (let attempt = 0; attempt < 8; attempt++) {
+  output = await tool(80 + attempt, "terminal_read", {
+    sessionId: started.sessionId, afterSeq, waitMs: 2000,
+  });
+  outputChunks.push(...output.chunks);
+  afterSeq = output.nextSeq;
+  if (output.status !== "running") break;
+}
+const joined = outputChunks.map((chunk) => chunk.text).join("");
 if (!joined.includes("tick 1") || !joined.includes("tick 3")) {
   throw new Error(`terminal_start/read failed: ${JSON.stringify(output)}`);
 }
 console.log("long-running session ok");
+
+const waiting = await tool(72, "terminal_start", {
+  command: "Start-Sleep -Milliseconds 400; Write-Output terminal-wait-ok",
+});
+const waited = await tool(73, "terminal_read", {
+  sessionId: waiting.sessionId, afterSeq: 0, waitMs: 3000,
+});
+if (!waited.chunks.some((chunk) => chunk.text.includes("terminal-wait-ok"))) {
+  throw new Error("terminal_read waitMs failed: " + JSON.stringify(waited));
+}
+console.log("terminal wait-on-output ok");
 
 const batchStartedAt = Date.now();
 const batch = await tool(20, "terminal_batch_start", {

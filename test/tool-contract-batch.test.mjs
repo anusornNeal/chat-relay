@@ -41,6 +41,10 @@ test("MCP descriptions direct independent reads to existing batch tools",async()
  const verify=contractBlock(code,"terminal_batch_start");
  assert.match(verify,/one short combined command/);
  assert.match(verify,/Never parallelize dependent steps/);
+ const wait=contractBlock(code,"terminal_read");
+ assert.match(wait,/waitMs/);
+ assert.match(wait,/Durable Object/);
+ assert.match(wait,/15000/);
 });
 
 test("fs_batch returns equal data with isolated errors and bounded exact ordering",async()=>{

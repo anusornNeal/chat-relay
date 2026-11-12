@@ -88,6 +88,15 @@ test("drain readiness includes filesystem, process, terminal-control, desktop-re
   assert.equal(lifecycle.snapshot().work.total, 22);
 });
 
+test("pending wait-on-output prevents agent upgrade until the wait is released", () => {
+  const work = summarizeAgentWork({ scheduler: { terminalWait: { active: 1, queued: 1 } } });
+  assert.equal(work.activeOtherJobs, 1);
+  assert.equal(work.queuedOtherJobs, 1);
+  const lifecycle = new AgentLifecycle({ workSummary: () => work });
+  lifecycle.drain();
+  assert.equal(lifecycle.requestUpgrade().error, "active_work_remaining");
+});
+
 test("pending restart or upgrade stops admitting drain-safe I/O before process exit", () => {
   const upgrade = new AgentLifecycle({ workSummary: () => ({}) });
   upgrade.drain();

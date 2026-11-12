@@ -290,7 +290,7 @@ async function handlePayload(payload) {
       return terminals.startShell(payload.cwd, payload.observability);
     case "terminal.read":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
-      return terminals.read(payload.sessionId, payload.afterSeq, payload.maxChars);
+      return terminals.readWithWait(payload.sessionId, payload.afterSeq, payload.maxChars, payload.waitMs ?? 0);
     case "terminal.write":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.write(payload.sessionId, payload.input, payload.appendNewline !== false);
@@ -535,7 +535,9 @@ function connect() {
     let scheduleMeta = { lane: "unknown", queueWaitMs: 0, queueDepthAtStart: 0, activeAtStart: 0 };
     let handlerDurationMs = 0;
     try {
-      const result = await scheduler.run(action, async (meta = {}) => {
+      const schedulingAction = action === "terminal.read" && Number(message.payload?.waitMs) > 0
+        ? "terminal.read.wait" : action;
+      const result = await scheduler.run(schedulingAction, async (meta = {}) => {
         scheduleMeta = { ...scheduleMeta, ...meta };
         const handlerStartedAt = Date.now();
         try {

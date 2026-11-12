@@ -11,6 +11,8 @@ import {
 const MAX_EXEC_BUFFER = 48 * 1024;
 const MAX_SESSION_BUFFER = 256 * 1024;
 const MAX_READ_CHARS = 24 * 1024;
+const MAX_OUTPUT_WAIT_MS = 15_000;
+const MAX_WAITERS_PER_SESSION = 8;
 const MAX_INPUT_CHARS = 8 * 1024;
 const MAX_SESSIONS = 8;
 const MAX_BATCH_SIZE = 20;
@@ -626,6 +628,7 @@ export class TerminalManager {
   }
 
   close() {
+    for (const session of this.sessions.values()) this.#notifyWaiters(session);
     this.fastExecPool?.close();
   }
 
@@ -724,6 +727,32 @@ export class TerminalManager {
       nextSeq: chunks.at(-1)?.seq ?? afterSeq,
       truncated: afterSeq < oldestSeq - 1,
     };
+  }
+
+  async readWithWait(sessionId, afterSeq = 0, maxChars = MAX_READ_CHARS, waitMs = 0) {
+    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > MAX_OUTPUT_WAIT_MS) {
+      throw new Error("invalid_wait_ms");
+    }
+    const initial = this.read(sessionId, afterSeq, maxChars);
+    if (!waitMs || initial.status !== "running" || initial.chunks.length || initial.truncated) {
+      return initial;
+    }
+    const session = this.#get(sessionId);
+    if (!session) return initial;
+    if (session.waiters.size >= MAX_WAITERS_PER_SESSION) throw new Error("too_many_terminal_waiters");
+
+    return new Promise((resolve) => {
+      let timer = null;
+      const finish = () => {
+        if (timer === null) return;
+        clearTimeout(timer);
+        timer = null;
+        session.waiters.delete(finish);
+        resolve(this.read(sessionId, afterSeq, maxChars));
+      };
+      session.waiters.add(finish);
+      timer = setTimeout(finish, waitMs);
+    });
   }
 
   write(sessionId, input, appendNewline = true) {
@@ -897,6 +926,7 @@ export class TerminalManager {
       chunks: [],
       nextSeq: 1,
       totalChars: 0,
+      waiters: new Set(),
       observability: observability ?? null,
     };
 
@@ -909,6 +939,7 @@ export class TerminalManager {
       session.exitCode = code;
       session.signal = signal;
       session.endedAt = new Date().toISOString();
+      this.#notifyWaiters(session);
     });
 
     return this.#summary(session);
@@ -1016,6 +1047,11 @@ export class TerminalManager {
       const removed = session.chunks.shift();
       session.totalChars -= removed.text.length;
     }
+    if (text.length) this.#notifyWaiters(session);
+  }
+
+  #notifyWaiters(session) {
+    for (const notify of session.waiters) notify();
   }
 
   #summary(session) {

@@ -2067,7 +2067,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_exec",
-    "Use terminal_exec for Git, transformations, aggregation or one short shell command <=20s. For plain reads of 2+ known files prefer read_multiple_files/fs_batch. For INDEPENDENT test/lint jobs use terminal_batch_start; for long builds use terminal_start + terminal_read. Never retry blocked or executionStatus=unknown blindly; keep backups/worktrees under .workspace/.",
+    "Use terminal_exec for Git, transformations, aggregation or one short shell command <=20s. For plain reads of 2+ known files prefer read_multiple_files/fs_batch. For INDEPENDENT test/lint jobs use terminal_batch_start; for long builds use terminal_start + terminal_read. Do not use Start-Sleep just to poll terminal output. Never retry blocked or executionStatus=unknown blindly; keep backups/worktrees under .workspace/.",
     "terminal",
     {
       command: z.string().min(1).max(4000),
@@ -2122,7 +2122,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_start",
-    "Use for long builds/tests or commands potentially >20s. Returns sessionId immediately; poll via terminal_read and respect exitCode/cancellation. New backups/worktrees only when necessary under the project .workspace/.",
+    "Use for long builds/tests or commands potentially >20s. Returns sessionId immediately; use terminal_read for output and exit. When truly waiting for output, prefer an opt-in bounded waitMs over a separate Start-Sleep command. New backups/worktrees only when necessary under the project .workspace/.",
     "terminal",
     {
       command: z.string().min(1).max(4000),
@@ -2143,15 +2143,16 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_read",
-    "Read buffered stdout/stderr from a terminal session. Use afterSeq for incremental reads.",
+    "Read output since afterSeq; default is immediate. Optional waitMs (0-15000) waits for NEW output/exit only when none is buffered. Use instead of a separate Start-Sleep + read; do not use by default since an in-flight Durable Object request accrues duration. Older agents may return immediately.",
     "terminal",
     {
       sessionId: terminalSessionIdSchema,
       afterSeq: z.number().int().min(0).optional(),
       maxChars: z.number().int().min(1024).max(24576).optional(),
+      waitMs: z.number().int().min(0).max(15000).optional(),
     },
-    ({ sessionId, afterSeq, maxChars }) => ({
-      action: "terminal.read", sessionId, afterSeq, maxChars,
+    ({ sessionId, afterSeq, maxChars, waitMs }) => ({
+      action: "terminal.read", sessionId, afterSeq, maxChars, waitMs,
     }),
   );
 
@@ -2201,15 +2202,16 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "read_process_output",
-    "Desktop-Commander-compatible alias for reading session output.",
+    "Alias for reading session output; same optional bounded waitMs as terminal_read.",
     "terminal",
     {
       sessionId: terminalSessionIdSchema,
       afterSeq: z.number().int().min(0).optional(),
       maxChars: z.number().int().min(1024).max(24576).optional(),
+      waitMs: z.number().int().min(0).max(15000).optional(),
     },
-    ({ sessionId, afterSeq, maxChars }) => ({
-      action: "terminal.read", sessionId, afterSeq, maxChars,
+    ({ sessionId, afterSeq, maxChars, waitMs }) => ({
+      action: "terminal.read", sessionId, afterSeq, maxChars, waitMs,
     }),
   );
 

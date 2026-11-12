@@ -41,7 +41,7 @@ export function getAgentCapabilities(options = {}) {
   ];
 
   if (terminalEnabled) {
-    capabilities.push("terminal.exec", "terminal.sessions", "terminal.batch");
+    capabilities.push("terminal.exec", "terminal.sessions", "terminal.batch", "terminal.read.wait");
   }
 
   if (desktopEnabled && ["win32", "darwin"].includes(platform)) {

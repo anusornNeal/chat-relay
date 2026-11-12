@@ -116,6 +116,9 @@ try {
   assert.match(toolDescription("terminal_exec"), /Git, transformations, aggregation/);
   assert.match(toolDescription("terminal_exec"), /read_multiple_files\/fs_batch/);
   assert.match(toolDescription("terminal_batch_start"), /one short combined command/);
+  const waitTool = catalog.tools.find((tool) => tool.name === "terminal_read");
+  assert.ok(waitTool?.inputSchema?.properties?.waitMs, "terminal_read must advertise optional waitMs");
+  assert.match(waitTool.description, /Durable Object/);
   assert.ok(prepareTool, "MCP tools/list must expose prepare");
   assert.ok(reportTool, "MCP tools/list must expose the report for plugin sync");
   assert.ok(reportTool.inputSchema.properties.receiptId);

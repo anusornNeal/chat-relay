@@ -93,6 +93,12 @@ export class CapabilityScheduler {
       ["process", lane("process", options.processConcurrency ?? 4)],
       ["terminalExec", lane("terminalExec", options.terminalExecConcurrency ?? 4)],
       ["terminalControl", lane("terminalControl", options.terminalControlConcurrency ?? 8)],
+      ["terminalWait", new BoundedLane({
+        name: "terminalWait",
+        concurrency: options.terminalWaitConcurrency ?? 2,
+        maxQueued: 2,
+        queueTimeoutMs: 1000,
+      })],
       ["desktopRead", lane("desktopRead", options.desktopReadConcurrency ?? 2)],
     ]);
   }
@@ -111,6 +117,7 @@ export class CapabilityScheduler {
     if (value.startsWith("fs.")) return this.lanes.get("filesystem");
     if (value.startsWith("process.")) return this.lanes.get("process");
     if (value === "terminal.exec") return this.lanes.get("terminalExec");
+    if (value === "terminal.read.wait") return this.lanes.get("terminalWait");
     if (value.startsWith("terminal.")) return this.lanes.get("terminalControl");
     if (["desktop.screenshot", "desktop.clipboard.read", "desktop.window.list"].includes(value)) {
       return this.lanes.get("desktopRead");
