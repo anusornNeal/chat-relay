@@ -28,6 +28,19 @@ test("MCP descriptions direct independent reads to existing batch tools",async()
  assert.match(exec,/20s/);
  assert.match(exec,/executionStatus=unknown/);
  assert.match(long,/>20s/);
+ // Route plain file reads to native file tools; retain shell aggregation.
+ assert.match(read,/2\+ independent known files/);
+ assert.match(read,/plain shell reads/);
+ assert.match(many,/2-20 independent known UTF-8 files/);
+ assert.match(many,/terminal Get-Content/);
+ assert.match(batch,/INDEPENDENT mixed stat\/read\/list\/search/);
+ assert.match(batch,/never batch dependent steps/);
+ assert.match(exec,/Git, transformations, aggregation/);
+ assert.match(exec,/read_multiple_files\/fs_batch/);
+ assert.match(exec,/terminal_batch_start/);
+ const verify=contractBlock(code,"terminal_batch_start");
+ assert.match(verify,/one short combined command/);
+ assert.match(verify,/Never parallelize dependent steps/);
 });
 
 test("fs_batch returns equal data with isolated errors and bounded exact ordering",async()=>{

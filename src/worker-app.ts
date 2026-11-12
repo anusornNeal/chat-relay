@@ -1653,7 +1653,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "read_file",
-    "Read one UTF-8 file range. For multiple independent files prefer read_multiple_files or fs_batch to reduce MCP calls. Bounded nextOffset.",
+    "Read one UTF-8 file range. For 2+ independent known files prefer read_multiple_files or fs_batch (mixed operations), not repeated read_file or plain shell reads. Continue via nextOffset.",
     "read",
     {
       path: z.string().min(1).max(2048),
@@ -1668,7 +1668,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "read_multiple_files",
-    "Batch-first: read 1-20 independent UTF-8 files in one MCP call instead of repeated read_file. 48KiB total; use nextIndex and per-file nextOffset when truncated.",
+    "For 2-20 independent known UTF-8 files prefer one MCP call over repeated read_file or terminal Get-Content; use shell for transformations. 48KiB total; continue via nextIndex/per-file nextOffset.",
     "read",
     {
       paths: z.array(z.union([
@@ -1688,7 +1688,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "fs_batch",
-    "Batch 2-20 independent stat/read/list/search operations (up to eight searches with distinct patterns) in one MCP call. Per-item errors isolated, ordered results, bounded 48KiB; continue via nextIndex or search sessionId/nextOffset.",
+    "For 2-20 INDEPENDENT mixed stat/read/list/search operations prefer one MCP call over separate calls; never batch dependent steps. Up to eight search patterns. Per-item errors isolated; ordered 48KiB result; continue via nextIndex or search sessionId/nextOffset.",
     "read",
     {
       operations: z.array(z.object({
@@ -2067,7 +2067,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_exec",
-    "Short commands <=20s: prefer terminal_exec. For INDEPENDENT medium-duration checks use terminal_batch_start; for long/unknown builds use terminal_start + terminal_read. Never retry blocked or executionStatus=unknown commands blindly; keep project backups/worktrees under .workspace/.",
+    "Use terminal_exec for Git, transformations, aggregation or one short shell command <=20s. For plain reads of 2+ known files prefer read_multiple_files/fs_batch. For INDEPENDENT test/lint jobs use terminal_batch_start; for long builds use terminal_start + terminal_read. Never retry blocked or executionStatus=unknown blindly; keep backups/worktrees under .workspace/.",
     "terminal",
     {
       command: z.string().min(1).max(4000),
@@ -2080,7 +2080,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_batch_start",
-    "Batch Verify: 2-20 INDEPENDENT test/lint jobs, max 20s/job. Prefer terminal_exec for tiny checks; terminal_start for >20s builds. Use terminal_batch_read after useful work for output/status, not frequent polling. Never parallelize dependent steps.",
+    "Batch Verify: 2-20 INDEPENDENT test/lint jobs, max 20s/job. Prefer terminal_exec for tiny checks or one short combined command; terminal_start for >20s builds. Use terminal_batch_read after useful work for output/status, not frequent polling. Never parallelize dependent steps.",
     "terminal",
     {
       jobs: z.array(z.union([

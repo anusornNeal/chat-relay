@@ -108,6 +108,14 @@ try {
   const catalog = await client.listTools();
   const prepareTool = catalog.tools.find((tool) => tool.name === "learn_prepare");
   const reportTool = catalog.tools.find((tool) => tool.name === "learn_usage_report");
+  // Test the actual advertised MCP catalog, not only the TypeScript source.
+  const toolDescription = (name) => catalog.tools.find((tool) => tool.name === name)?.description || "";
+  assert.match(toolDescription("read_multiple_files"), /2-20 independent known UTF-8 files/);
+  assert.match(toolDescription("read_multiple_files"), /terminal Get-Content/);
+  assert.match(toolDescription("fs_batch"), /never batch dependent steps/);
+  assert.match(toolDescription("terminal_exec"), /Git, transformations, aggregation/);
+  assert.match(toolDescription("terminal_exec"), /read_multiple_files\/fs_batch/);
+  assert.match(toolDescription("terminal_batch_start"), /one short combined command/);
   assert.ok(prepareTool, "MCP tools/list must expose prepare");
   assert.ok(reportTool, "MCP tools/list must expose the report for plugin sync");
   assert.ok(reportTool.inputSchema.properties.receiptId);
