@@ -535,40 +535,54 @@ function chartDisplayBuckets(buckets = [], period = dashboardPeriod) {
     };
   });
 }
-function chartMarkup(buckets = [], period = dashboardPeriod, {showStats = true} = {}) {
+function chartMarkup(buckets = [], period = dashboardPeriod, {showStats = true, profile4h = false} = {}) {
   const items = Array.isArray(buckets) ? buckets : [];
-  const displayItems = chartDisplayBuckets(items, period);
-  const byDay = period?.range === "7d" || period?.range === "30d";
-  const callsByBucket = displayItems.map((bucket) => Number(bucket.calls || 0));
+  const displayItems = profile4h ? items : chartDisplayBuckets(items, period);
+  const byDay = !profile4h && (period?.range === "7d" || period?.range === "30d");
+  const callsByBucket = displayItems.map((bucket) => profile4h
+    ? Number(bucket.totalCalls || 0) / 7
+    : Number(bucket.calls || 0));
   const total = callsByBucket.reduce((sum, calls) => sum + calls, 0);
   const max = Math.max(1, ...callsByBucket);
   const average = displayItems.length ? total / displayItems.length : 0;
   const peakIndex = callsByBucket.indexOf(Math.max(0, ...callsByBucket));
   const peakBucket = peakIndex >= 0 && callsByBucket[peakIndex] > 0 ? displayItems[peakIndex] : null;
-  const peakLabel = peakBucket ? (byDay ? bkkDayLabel(peakBucket.from) : bkkHourMinute(peakBucket.from)) : "\u2014";
-  const yTicks = [1, .75, .5, .25, 0].map((ratio) => Math.round(max * ratio));
-  const yLabels = '<div class="chart-y-axis" aria-hidden="true">' + yTicks.map((value) => '<span>' + fmtNum(value) + "</span>").join("") + "</div>";
+  const peakLabel = peakBucket ? (profile4h ? String(peakBucket.startHour).padStart(2, "0") + ":00" :
+    byDay ? bkkDayLabel(peakBucket.from) : bkkHourMinute(peakBucket.from)) : "\u2014";
+  const avgFormat = (value) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 1 });
+  const yTicks = [1, .75, .5, .25, 0].map((ratio) => profile4h
+    ? Math.round(max * ratio * 10) / 10 : Math.round(max * ratio));
+  const yLabels = '<div class="chart-y-axis" aria-hidden="true">' + yTicks.map((value) => '<span>' + (profile4h ? avgFormat(value) : fmtNum(value)) + "</span>").join("") + "</div>";
   const currentHour = !byDay && Number.isFinite(Date.parse(period?.to || ""))
     ? Math.floor(Date.parse(period.to) / (60 * 60 * 1000))
     : null;
   const bars = displayItems.map((bucket, index) => {
-    const calls = Number(bucket.calls || 0);
-    const errors = Number(bucket.operationalErrors ?? bucket.errors ?? 0);
+    const calls = callsByBucket[index];
+    const errors = profile4h ? 0 : Number(bucket.operationalErrors ?? bucket.errors ?? 0);
     const height = Math.max(calls ? 4 : 0, (calls / max) * 100);
-    const start = bkkHourMinute(bucket.from);
-    const end = bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
+    const start = profile4h ? String(bucket.startHour).padStart(2, "0") + ":00" : bkkHourMinute(bucket.from);
+    const end = profile4h ? String(bucket.endHour).padStart(2, "0") + ":00" :
+      bkkHourMinute(new Date(Date.parse(bucket.to) + 1).toISOString());
     const label = byDay ? bkkDayLabel(bucket.from) : start + "\u2013" + end;
-    const bucketHour = Math.floor(Date.parse(bucket.from) / (60 * 60 * 1000));
-    const current = (byDay ? index === displayItems.length - 1 : bucketHour === currentHour) ? " current" : "";
+    const bucketHour = profile4h ? null : Math.floor(Date.parse(bucket.from) / (60 * 60 * 1000));
+    const current = profile4h ? "" :
+      (byDay ? index === displayItems.length - 1 : bucketHour === currentHour) ? " current" : "";
+    const caption = profile4h
+      ? avgFormat(calls) + " average Tool Calls/day; " + fmtNum(bucket.totalCalls || 0) + " total over 7 days"
+      : fmtNum(calls) + " tool invocations; " + fmtNum(errors) + " operational errors";
     return '<div class="chart-bar' + current + '" style="--bar-height:' + height + '%" tabindex="0" role="img" aria-label="' +
-      esc(label + ", " + calls + " tool invocations, " + errors + " operational errors") + '">' +
-      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' + fmtNum(calls) + ' invocations</span><small>' + fmtNum(errors) + ' operational errors</small></span>' +
-      '<span class="bar-fill"></span>' + (errors > 0 ? '<span class="chart-error-dot" aria-hidden="true"></span>' : "") + "</div>";
+      esc(label + ", " + caption) + '">' +
+      '<span class="chart-tooltip"><strong>' + esc(label) + '</strong><span>' +
+      (profile4h ? avgFormat(calls) + " avg calls/day" : fmtNum(calls) + " invocations") + '</span><small>' +
+      (profile4h ? fmtNum(bucket.totalCalls || 0) + " across 7 days" : fmtNum(errors) + " operational errors") +
+      '</small></span><span class="bar-fill"></span>' +
+      (errors > 0 ? '<span class="chart-error-dot" aria-hidden="true"></span>' : "") + "</div>";
   }).join("");
-  const labelEvery = byDay ? (displayItems.length > 14 ? 5 : 1) : 3;
+  const labelEvery = profile4h ? 1 : byDay ? (displayItems.length > 14 ? 5 : 1) : 3;
   const xLabels = displayItems.map((bucket, index) => {
     const show = index % labelEvery === 0 || index === displayItems.length - 1;
-    const label = byDay ? bkkDayLabel(bucket.from) : bkkHourMinute(bucket.from);
+    const label = profile4h ? String(bucket.startHour).padStart(2, "0") + ":00" :
+      byDay ? bkkDayLabel(bucket.from) : bkkHourMinute(bucket.from);
     return '<span class="' + (show ? "" : "muted") + '">' + (show ? esc(label) : "") + "</span>";
   }).join("");
   const intervalLabel = byDay ? "day" : "hour";
@@ -578,7 +592,7 @@ function chartMarkup(buckets = [], period = dashboardPeriod, {showStats = true} 
     '<div><span>Peak</span><strong>' + esc(peakLabel) + '</strong></div>' +
     "</div>";
 
-  return (showStats ? stats : "") + '<div class="chart-frame">' + yLabels +
+  return (showStats ? stats : "") + '<div class="chart-frame' + (profile4h ? ' chart-profile-4h' : '') + '">' + yLabels +
     '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div>' +
     '<div class="chart-bars">' + bars + '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
 }
@@ -643,7 +657,7 @@ const usageWorkspace = createUsageWorkspace({
     dashboardRange = dashboardPeriod.range || dashboardRange;
   },
   periodChips, periodDisplayLabel, icon, esc, fmtNum, fmtMs, fmtPct,
-  renderActivityChart: (buckets, period) => chartMarkup(buckets, period, {showStats:false}),
+  renderActivityChart: (buckets, period, options = {}) => chartMarkup(buckets, period, {showStats:false, ...options}),
 });
 async function loadUsage(options = {}) { return usageWorkspace.load(options); }
 

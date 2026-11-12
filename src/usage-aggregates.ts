@@ -334,7 +334,7 @@ export class UsageAggregates {
     return { rows: data, firstHour };
   }
 
-  private sqlDetails(fromMs: number, toMs: number, filters: UsageFilters) {
+  private sqlDetails(fromMs: number, toMs: number, filters: UsageFilters, hourlyProfile4h = false) {
     if (!this.sql) return null;
 
     const startKey = `${String(hourStart(fromMs)).padStart(13, "0")}|`;
@@ -352,10 +352,15 @@ export class UsageAggregates {
     const predicate = where.join(" AND ");
 
     const byDay = toMs - fromMs > 36 * HOUR;
+    // Reuse the existing bucket aggregation pass for a 7-day hour-of-day profile.
+    // Group at Bangkok-local four-hour boundaries; daily totals are reduced below.
+    const profile4h = hourlyProfile4h && byDay && toMs - fromMs <= 7 * DAY;
     const bucketSize = byDay ? DAY : HOUR;
-    const bucketExpr = byDay
-      ? `(CAST((CAST(substr(bucket_key, 1, 13) AS INTEGER) + ${BKK}) / ${DAY} AS INTEGER) * ${DAY} - ${BKK})`
-      : "CAST(substr(bucket_key, 1, 13) AS INTEGER)";
+    const bucketExpr = profile4h
+      ? `(CAST((CAST(substr(bucket_key, 1, 13) AS INTEGER) + ${BKK}) / ${4 * HOUR} AS INTEGER) * ${4 * HOUR} - ${BKK})`
+      : byDay
+        ? `(CAST((CAST(substr(bucket_key, 1, 13) AS INTEGER) + ${BKK}) / ${DAY} AS INTEGER) * ${DAY} - ${BKK})`
+        : "CAST(substr(bucket_key, 1, 13) AS INTEGER)";
     const bucketRows = this.sql.exec<{
       start_ms: number;
       calls: number | null;
@@ -457,6 +462,29 @@ export class UsageAggregates {
       calls: Number(row.calls || 0),
     }));
 
+    const profileDays = new Map<number, { from: string; to: string; calls: number; errors: number; operationalErrors: number }>();
+    const fourHourTotals = Array.from({ length: 6 }, () => 0);
+    if (profile4h) {
+      for (const row of bucketRows) {
+        const startMs = Number(row.start_ms);
+        const dayStartMs = bkkDayStart(startMs);
+        let day = profileDays.get(dayStartMs);
+        if (!day) {
+          day = {
+            from: new Date(dayStartMs).toISOString(),
+            to: new Date(dayStartMs + DAY - 1).toISOString(),
+            calls: 0, errors: 0, operationalErrors: 0,
+          };
+          profileDays.set(dayStartMs, day);
+        }
+        day.calls += Number(row.calls || 0);
+        day.errors += Number(row.errors || 0);
+        day.operationalErrors += Number(row.operational_errors || 0);
+        const slot = Math.floor(((startMs + BKK) % DAY) / (4 * HOUR));
+        fourHourTotals[slot] += Number(row.calls || 0);
+      }
+    }
+
     return {
       metric: {
         calls,
@@ -473,16 +501,27 @@ export class UsageAggregates {
         p95DurationMs,
         p95Approximate: detailedCalls > 0,
       },
-      buckets: bucketRows.map((row) => {
-        const start = Number(row.start_ms);
-        return {
-          from: new Date(start).toISOString(),
-          to: new Date(start + bucketSize - 1).toISOString(),
-          calls: Number(row.calls || 0),
-          errors: Number(row.errors || 0),
-          operationalErrors: Number(row.operational_errors || 0),
-        };
-      }),
+      buckets: profile4h
+        ? [...profileDays.values()].sort((a, b) => a.from.localeCompare(b.from))
+        : bucketRows.map((row) => {
+          const start = Number(row.start_ms);
+          return {
+            from: new Date(start).toISOString(),
+            to: new Date(start + bucketSize - 1).toISOString(),
+            calls: Number(row.calls || 0),
+            errors: Number(row.errors || 0),
+            operationalErrors: Number(row.operational_errors || 0),
+          };
+        }),
+      hourlyAverage: profile4h ? {
+        days: 7,
+        intervalHours: 4,
+        buckets: fourHourTotals.map((totalCalls, index) => ({
+          startHour: index * 4,
+          endHour: (index + 1) * 4,
+          totalCalls,
+        })),
+      } : null,
       topTools,
       detailSampleSize: detailedCalls,
     };
@@ -570,6 +609,7 @@ export class UsageAggregates {
     toMs: number,
     filters: UsageFilters = {},
     includeDetails = false,
+    includeHourlyProfile = false,
   ) {
     const sql = this.sqlRows(fromMs, toMs, filters);
     const currentRows = this.sql ? sql.rows : await this.fallbackRows(fromMs, toMs, filters);
@@ -592,7 +632,7 @@ export class UsageAggregates {
       .map(([userId, userCalls]) => ({ userId, calls: userCalls }))
       .sort((a, b) => b.calls - a.calls || a.userId.localeCompare(b.userId));
 
-    const details = includeDetails ? this.sqlDetails(fromMs, toMs, filters) : null;
+    const details = includeDetails ? this.sqlDetails(fromMs, toMs, filters, includeHourlyProfile) : null;
     const detailedSampleSize = Number(details?.detailSampleSize || 0);
     return {
       metric: calls
@@ -603,6 +643,7 @@ export class UsageAggregates {
       users,
       agents,
       buckets: details?.buckets ?? [],
+      hourlyAverage: details?.hourlyAverage ?? null,
       topTools: details?.topTools ?? [],
       detailSampleSize: detailedSampleSize,
       sampleSize: calls,

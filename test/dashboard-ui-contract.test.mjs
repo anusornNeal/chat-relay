@@ -49,7 +49,7 @@ test("Review and investigation handlers cannot retain stale selection after DOM 
   assert.doesNotMatch(app, /learnRefineMemory"\)\?\.addEventListener/);
   assert.match(usage, /data-ledger-user/);
   assert.match(usage, /expandedIds\.has\(account\.userId\)/);
-  assert.match(usage, /renderActivityChart\(summary\.buckets/);
+  assert.match(usage, /weekly \? averageProfile\.buckets/);
   assert.doesNotMatch(usage, /data-ledger-refresh|data-ledger-timeline/);
   assert.match(usage, /if \(sequence !== loadSequence\) return/);
 });
@@ -71,7 +71,7 @@ test("independent Usage details reuse Overview's hourly chart without redundant 
   assert.match(usage,/expandedIds\.delete\(nextId\)/);
   assert.match(usage,/const loadingKeys = new Set\(\)/);
   assert.match(usage,/const detailErrors = new Map\(\)/);
-  assert.match(app,/renderActivityChart: \(buckets, period\) => chartMarkup\(buckets, period, \{showStats:false\}\)/);
+  assert.match(app,/renderActivityChart: \(buckets, period, options = \{\}\) => chartMarkup/);
   assert.doesNotMatch(usage,/data-ledger-refresh|data-ledger-timeline|Open overview/);
   assert.match(css,/\.learn-review-board>\.learn-folder-tree\{[\s\S]*?position:static/);
   assert.doesNotMatch(app,/id="learnScopeToggle"|id="learnSearchTop"/);
@@ -84,7 +84,7 @@ test("usage status and linked account panels are grounded and the Learn sort str
   assert.match(usage, /agent\.online === true/);
   assert.match(usage, /agent\.online === false/);
   assert.match(usage, /Status unavailable/);
-  assert.match(usage, /renderActivityChart\(summary\.buckets/);
+  assert.match(usage, /weekly \? averageProfile\.buckets/);
   assert.doesNotMatch(usage, /daily-bars|daily-column/);
   assert.match(app, /learn-column-sort/);
   assert.match(app, /learnSortDirection/);
@@ -97,7 +97,7 @@ test("Overview and Usage render Today/7d/30d with one zero-baseline chart", () =
   for (const range of ['"today"','"7d"','"30d"']) {
     assert(app.includes(range), "shared chart must support " + range);
   }
-  assert.equal(usage.split('renderActivityChart(summary.buckets || [], period)').length - 1, 1);
+  assert.equal((usage.match(/renderActivityChart\(/g) || []).length, 1);
   assert(usage.includes('renderActivityChart'), "Usage reuses the Overview renderer");
   assert.doesNotMatch(usage, /daily-bars|daily-column|renderHourlyChart|toolCallSeries/);
   assert(!css.includes(".ledger-activity-chart .chart-plot{height:"), "plot uses the grid height");
@@ -111,4 +111,19 @@ test("clicking anywhere on a user row expands it exactly once, while the name re
   assert.doesNotMatch(usage, /document\.querySelectorAll\("\[data-ledger-user\]"\)\.forEach/);
   assert.match(usage, /aria-expanded/);
   assert.match(css, /\.ledger-person-row\{cursor:pointer\}/);
+});
+
+test("7d selected user average uses six real four-hour aggregates, not daily interpolation", () => {
+  const aggregates = readFileSync(new URL("../src/usage-aggregates.ts", import.meta.url), "utf8");
+  const routes = readFileSync(new URL("../src/admin.ts", import.meta.url), "utf8");
+  assert.match(usage, /range === "7d" \? "&profile=4h"/);
+  assert.match(usage, /averageProfile\.buckets\.length === 6/);
+  assert.match(app, /profile4h \? items : chartDisplayBuckets/);
+  assert.match(app, /chart-profile-4h/);
+  assert.match(aggregates, /fourHourTotals/);
+  assert.match(aggregates, /profile4h \? \{/);
+  assert.match(routes, /selectedUserId\)\)/);
+  assert.match(css, /\.chart-profile-4h \.bar-fill/);
+  assert.match(usage, /ledger-row-chevron/);
+  assert.doesNotMatch(usage, /icon\("chevron"\) \+ '<\/button>/);
 });

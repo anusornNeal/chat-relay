@@ -180,7 +180,11 @@ export class Usage extends DurableObject {
       const userId = url.searchParams.get("userId");
       const agentId = url.searchParams.get("agentId");
       const includeDetails = url.searchParams.get("details") === "1";
-      return Response.json(await this.aggregates.window(fromMs, toMs, { userId, agentId }, includeDetails));
+      const includeHourlyProfile = includeDetails && Boolean(userId) &&
+        url.searchParams.get("profile") === "4h" && toMs - fromMs <= 7 * 24 * 60 * 60 * 1000;
+      return Response.json(await this.aggregates.window(
+        fromMs, toMs, { userId, agentId }, includeDetails, includeHourlyProfile,
+      ));
     }
 
     return Response.json({ error: "not_found" }, { status: 404 });
