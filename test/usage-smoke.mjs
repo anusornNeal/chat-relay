@@ -25,6 +25,20 @@ async function admin(path, method = "GET", body) {
   });
 }
 
+// Usage delivery is intentionally batched. Assert eventual committed values rather
+// than racing the asynchronous flush immediately after the last MCP response.
+async function waitForOverview(load, expected, label, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (true) {
+    last = await load();
+    if (!last.response.ok) throw new Error(`${label} query failed: ${last.text}`);
+    if (expected(last.data)) return last;
+    if (Date.now() >= deadline) throw new Error(`${label} timed out: ${last.text}`);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 async function browserLogin(userId, label) {
   const suffix = Date.now().toString(36) + "-" + label;
   const login = "usage-" + suffix;
@@ -42,9 +56,32 @@ async function browserLogin(userId, label) {
 
 async function openDashboardWs(cookie) {
   const socket = new WebSocket(base.replace(/^http/, "ws") + "/admin/ws", { headers: { cookie } });
+  // DashboardHub sends "ready" after accepting the socket. Wait for that
+  // handshake rather than guessing a 40ms subscription delay on CI machines.
   await new Promise((resolve, reject) => {
-    socket.once("open", resolve);
-    socket.once("error", reject);
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.terminate();
+      reject(new Error("dashboard websocket ready timeout"));
+    }, 10_000);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+    const onMessage = (raw) => {
+      let event;
+      try { event = JSON.parse(String(raw)); } catch { return; }
+      if (event?.type !== "ready") return;
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => { cleanup(); reject(error); };
+    const onClose = () => { cleanup(); reject(new Error("dashboard websocket closed before ready")); };
+    socket.on("message", onMessage);
+    socket.once("error", onError);
+    socket.once("close", onClose);
   });
   return socket;
 }
@@ -151,7 +188,6 @@ const lifecycleGrant = await admin("/admin/grants", "POST", {
 if (!lifecycleGrant.response.ok) throw new Error(`lifecycle grant failed: ${lifecycleGrant.text}`);
 const lifecycleCookie = await browserLogin(lifecycleUser.data.user.id, "lifecycle");
 const dashboardSocket = await openDashboardWs(lifecycleCookie);
-await new Promise((resolve) => setTimeout(resolve, 40));
 
 const aggregateInvalidation = nextDashboardEvent(dashboardSocket, (event) => event.type === "invalidate" && event.topics?.includes("overview"));
 const lifecycleSensitivePath = "SENSITIVE_FAST_LIFECYCLE_PATH.txt";
@@ -184,7 +220,16 @@ if (!grant.response.ok) throw new Error(`grant failed: ${grant.text}`);
 await tool(created.data.token, 5, "read_file", { agentId: usageAgentId, path: "usage-reader.txt" });
 
 const readerCookie = await browserLogin(created.data.user.id, "reader");
-const initialOverview = await admin("/admin/api/overview");
+const initialOverview = await waitForOverview(
+  () => admin("/admin/api/overview"),
+  (data) => {
+    const owner = (data.accounts || []).find((item) => item.userId === "owner");
+    return owner?.calls >= 5
+      && owner.agents?.some((agent) => agent.agentId === usageAgentId && agent.calls >= 4)
+      && owner.agents?.some((agent) => agent.agentId === "missing-agent" && agent.calls >= 1);
+  },
+  "owner and agent usage attribution",
+);
 if (!initialOverview.response.ok) throw new Error(`overview query failed: ${initialOverview.text}`);
 const ownerBefore = (initialOverview.data.accounts || []).find((item) => item.userId === "owner");
 if (!ownerBefore || ownerBefore.calls < 5) throw new Error(`owner usage attribution failed: ${initialOverview.text}`);
@@ -193,7 +238,13 @@ if (!usageAgentBefore || usageAgentBefore.calls < 4) throw new Error(`agent usag
 const missingAgentBefore = (ownerBefore.agents || []).find((item) => item.agentId === "missing-agent");
 if (!missingAgentBefore || missingAgentBefore.calls < 1) throw new Error(`missing-agent attribution failed: ${initialOverview.text}`);
 
-const readerOverview = await jsonFetch("/admin/api/overview", { headers: { cookie: readerCookie } });
+const readerOverview = await waitForOverview(
+  () => jsonFetch("/admin/api/overview", { headers: { cookie: readerCookie } }),
+  (data) => data.accounts?.length === 1
+    && data.accounts[0]?.userId === created.data.user.id
+    && data.accounts[0]?.calls === 1,
+  "reader usage filtering",
+);
 if (!readerOverview.response.ok || readerOverview.data.accounts?.length !== 1 || readerOverview.data.accounts[0]?.userId !== created.data.user.id || readerOverview.data.accounts[0]?.calls !== 1) {
   throw new Error(`server-side user usage filtering failed: ${readerOverview.text}`);
 }
@@ -235,7 +286,12 @@ for (let offset = 0; offset < bulkCalls; offset += 25) {
     tool(ownerToken, 1000 + offset + index, "ping_agent", { agentId: usageAgentId }, false, "usage-bulk-session")
   ));
 }
-const todayOverview = await admin("/admin/api/overview");
+const todayOverview = await waitForOverview(
+  () => admin("/admin/api/overview"),
+  (data) => ((data.accounts || []).find((item) => item.userId === "owner")?.calls || 0) > 1000,
+  "Today overview usage aggregation",
+  20_000,
+);
 if (!todayOverview.response.ok || todayOverview.data.period?.timezoneLabel !== "BKK · UTC+7") {
   throw new Error(`Bangkok Today overview contract missing: ${todayOverview.text}`);
 }
