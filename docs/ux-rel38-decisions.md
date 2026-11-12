@@ -68,3 +68,7 @@ These are design references, not claims that copying their appearance guarantees
 6. **My Learn:** remove the duplicate Name/Updated/Usage Score sort strip. Actual column headings are keyboard-accessible buttons with direction indicators; explicit sorting overrides default review-priority ordering. Folder Explorer remains visible on desktop.
 
 Browser QA should verify 19 admin/user screens, Today/7d/30d values, linked detail panels, both known online/offline statuses, and absence of the Overview dropdown. All changes remain on the local REL-38 feature branch pending design review.
+
+### Shared chart correction
+
+All three range options (**Today**, **7 days**, **30 days**) in the Usage expansion now call the same `chartMarkup()` renderer used by Overview, via `renderActivityChart()`. Removed the separate `daily-bars` implementation entirely. X-axis labels adapt to the active interval (3-hour ticks, every day, or every five days). Fixed a CSS grid defect that assigned a second independent height to the expanded chart plot and bars, causing a visibly floating zero baseline. Headless Chrome measured the final bar-to-plot baseline gap at 1px and the zero tick gap at 0px for all three ranges, with 24, 7 and 30 slots respectively. No extra endpoint or external charting library was added.

@@ -643,7 +643,7 @@ const usageWorkspace = createUsageWorkspace({
     dashboardRange = dashboardPeriod.range || dashboardRange;
   },
   periodChips, periodDisplayLabel, icon, esc, fmtNum, fmtMs, fmtPct,
-  renderHourlyChart: (buckets, period) => chartMarkup(buckets, period, {showStats:false}),
+  renderActivityChart: (buckets, period) => chartMarkup(buckets, period, {showStats:false}),
 });
 async function loadUsage(options = {}) { return usageWorkspace.load(options); }
 

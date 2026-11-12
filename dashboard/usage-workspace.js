@@ -1,11 +1,11 @@
-import { usageDirectory, toolCallSeries } from "./ux-insights.js";
+import { usageDirectory } from "./ux-insights.js";
 
 // A comparison-first Tool Calls workspace. One overview request per period;
 // a user-specific time series is fetched only when a row is opened.
 export function createUsageWorkspace({
   api, renderContent, setHeader, setNotice, isAdmin, isActive, getCurrentUser, getRange,
   setRange, setPeriod, periodChips, periodDisplayLabel, icon, esc,
-  fmtNum, fmtMs, fmtPct, renderHourlyChart,
+  fmtNum, fmtMs, fmtPct, renderActivityChart,
 }) {
   let snapshot = null;
   let mode = "active";
@@ -20,7 +20,6 @@ export function createUsageWorkspace({
   const detailsCache = new Map();
   const inFlight = new Set();
   const bkkDate = new Intl.DateTimeFormat("en-GB", {timeZone: "Asia/Bangkok", day: "numeric", month: "short"});
-  const bkkFull = new Intl.DateTimeFormat("en-GB", {timeZone: "Asia/Bangkok", weekday: "short", day: "numeric", month: "short"});
 
   const titleFor = (account) => String(account.name || account.login || account.userId || "Unknown");
   const agentsFor = (account) => Array.isArray(account.agents) ? account.agents : [];
@@ -49,30 +48,13 @@ export function createUsageWorkspace({
 
   function renderTimeline(summary, account) {
     const period = summary.period || currentPeriod();
-    const daily = toolCallSeries(summary.buckets, period);
     const byHour = period.range === "today";
     const monthly = period.range === "30d";
-    const max = Math.max(1, ...daily.map(row => row.calls));
     const total = Number.isFinite(Number(summary.usage?.calls)) ? Number(summary.usage.calls) :
-      daily.reduce((sum,row) => sum + row.calls,0);
-    const shortDay = new Intl.DateTimeFormat("en-GB", {timeZone:"Asia/Bangkok",weekday:"short"});
-    const visualization = byHour
-      ? '<div class="ledger-hour-chart">' + renderHourlyChart(summary.buckets || [], period) + '</div>'
-      : '<div class="daily-bars' + (monthly ? ' thirty' : '') + '" role="list" aria-label="Tool Calls by day">' +
-        daily.map((row,index) => {
-          const date = new Date(row.from);
-          const label = bkkFull.format(date);
-          const height = row.calls ? Math.max(4,row.calls/max*100) : 0;
-          const showTick = !monthly || index % 5 === 0 || index === daily.length-1;
-          const amount = showTick ? fmtNum(row.calls) : ' ';
-          return '<div class="daily-column" tabindex="0" role="listitem" title="' +
-            esc(label + ': ' + fmtNum(row.calls) + ' Tool Calls') + '" aria-label="' +
-            esc(label + ': ' + fmtNum(row.calls) + ' Tool Calls') + '">' +
-            '<strong>' + amount + '</strong><div class="daily-bar-area" aria-hidden="true"><span style="height:' +
-            height.toFixed(2) + '%"></span></div>' +
-            '<span aria-hidden="true">' + (showTick ? esc(shortDay.format(date)) : ' ') + '</span>' +
-            '<small aria-hidden="true">' + (showTick ? esc(bkkDate.format(date)) : ' ') + '</small></div>';
-        }).join('') + '</div>';
+      (summary.buckets || []).reduce((sum,row) => sum + Number(row.calls || 0),0);
+    // All ranges share the exact same zero-baseline chart renderer as Overview.
+    const visualization = '<div class="ledger-activity-chart">' +
+      renderActivityChart(summary.buckets || [], period) + '</div>';
     const metrics = summary.usage || {};
     const metricsOpen = expandedMetricsIds.has(account.userId);
     const agentRows = agentsFor(account).map(agent => {

@@ -16,7 +16,7 @@ if(!js.response.ok || !usageAsset.response.ok || !insightsAsset.response.ok) thr
 const expectedApp = ["/admin/api/summary", "/admin/api/learn", "My Learn", "loadLearn", "learn-folder-shell", "learn-tree-row", "learnTreeExpanded", "learnScopedTreeExpanded", "data-learn-tree-toggle", 'role="radiogroup"', "Useful", "Not useful", "learnRefineMemory", "ux-learn-focus", "loadUsage", "System overview", "Operational error rate", "Tool activity", "/admin/ws", "fallbackPollTimer = setInterval", 'activeView !== "learn"'];
 for(const marker of expectedApp) if(!js.text.includes(marker)) throw Error("Dashboard app missing " + marker);
 for(const marker of ["Recent Learn changes", "Top tools", "/admin/api/errors", "/admin/api/tool-calls", "loadErrors", "ADMIN_TOKEN"]) if(js.text.includes(marker)) throw Error("Dashboard app contains obsolete or secret marker " + marker);
-const expectedUsage = ["createUsageWorkspace", "/admin/api/overview", "/admin/api/summary", "Find a person or agent", "ledger-table", "data-ledger-user", "toolCallSeries", "usageSearch", "renderHourlyChart"];
+const expectedUsage = ["createUsageWorkspace", "/admin/api/overview", "/admin/api/summary", "Find a person or agent", "ledger-table", "data-ledger-user", "renderActivityChart", "usageSearch"];
 for(const marker of expectedUsage) if(!usageAsset.text.includes(marker)) throw Error("Usage workspace missing " + marker);
 for(const marker of ["learnReviewReason","learnFocusItems","usageDirectory"]) if(!insightsAsset.text.includes(marker)) throw Error("UX helpers missing " + marker);
 
@@ -24,7 +24,7 @@ if(!page.text.includes('id="loginError"'))throw Error("dashboard login recovery 
 if(!js.text.includes("API_TIMEOUT_MS = 12000")||!js.text.includes("request_timeout")||!js.text.includes("scheduleDataRetry")||!js.text.includes("refreshActiveIncrementally({ initial: true })"))throw Error("dashboard load recovery guards missing");
 const liveStartAt=js.text.lastIndexOf("startLiveChannel();"),initialLoadAt=js.text.lastIndexOf("refreshActiveIncrementally({ initial: true });");if(liveStartAt<0||initialLoadAt<0||liveStartAt>initialLoadAt)throw Error("dashboard realtime must start before initial data load");
 const css = await req("/dashboard/styles.css");
-const expectedCss = ["@media","Segoe UI",".ledger-table",".ledger-summary",".daily-bars",".ux-learn-focus",".ux-refine-dialog",".overview-chart-panel",".live-pill",".learn-folder-shell",".learn-folder-tree",".learn-detail-pane",".learn-folder-workspace",".learn-tree-row",".learn-folder-heading-actions",".learn-export-button"];
+const expectedCss = ["@media","Segoe UI",".ledger-table",".ledger-summary",".ledger-activity-chart",".ux-learn-focus",".ux-refine-dialog",".overview-chart-panel",".live-pill",".learn-folder-shell",".learn-folder-tree",".learn-detail-pane",".learn-folder-workspace",".learn-tree-row",".learn-folder-heading-actions",".learn-export-button"];
 if(!css.response.ok || css.text.includes("cdn.jsdelivr.net")) throw Error("Dashboard stylesheet unavailable or uses CDN");
 for(const marker of expectedCss) if(!css.text.includes(marker)) throw Error("Dashboard stylesheet missing " + marker);
 

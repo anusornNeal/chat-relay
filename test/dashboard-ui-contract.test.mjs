@@ -49,7 +49,7 @@ test("Review and investigation handlers cannot retain stale selection after DOM 
   assert.doesNotMatch(app, /learnRefineMemory"\)\?\.addEventListener/);
   assert.match(usage, /data-ledger-user/);
   assert.match(usage, /expandedIds\.has\(account\.userId\)/);
-  assert.match(usage, /renderHourlyChart\(summary\.buckets/);
+  assert.match(usage, /renderActivityChart\(summary\.buckets/);
   assert.doesNotMatch(usage, /data-ledger-refresh|data-ledger-timeline/);
   assert.match(usage, /if \(sequence !== loadSequence\) return/);
 });
@@ -59,9 +59,8 @@ test("Overview is first, normal users have no redundant Usage page", () => {
   assert.match(app, /\[\["overview", "Overview", "overview"\], \["learn", "My Learn", "info"\]\]/);
   assert.match(app, /if \(!navItems\(\)\.some\(\(\[id\]\) => id === activeView\)\) activeView = "overview"/);
   assert.doesNotMatch(usage, /SHARE OF LISTED|100% of listed Tool Calls/);
-  assert.match(usage, /daily-bars/);
-  assert.match(usage, /daily-bars/);
-  assert.match(usage, /monthly \? ' thirty'/);
+  assert.match(usage, /renderActivityChart/);
+  assert.doesNotMatch(usage, /daily-bars|daily-column/);
   assert.match(usage, /data-ledger-metrics/);
   assert.match(usage, /ledger-agent-status/);
 });
@@ -72,7 +71,7 @@ test("independent Usage details reuse Overview's hourly chart without redundant 
   assert.match(usage,/expandedIds\.delete\(nextId\)/);
   assert.match(usage,/const loadingKeys = new Set\(\)/);
   assert.match(usage,/const detailErrors = new Map\(\)/);
-  assert.match(app,/renderHourlyChart: \(buckets, period\) => chartMarkup\(buckets, period, \{showStats:false\}\)/);
+  assert.match(app,/renderActivityChart: \(buckets, period\) => chartMarkup\(buckets, period, \{showStats:false\}\)/);
   assert.doesNotMatch(usage,/data-ledger-refresh|data-ledger-timeline|Open overview/);
   assert.match(css,/\.learn-review-board>\.learn-folder-tree\{[\s\S]*?position:static/);
   assert.doesNotMatch(app,/id="learnScopeToggle"|id="learnSearchTop"/);
@@ -85,9 +84,22 @@ test("usage status and linked account panels are grounded and the Learn sort str
   assert.match(usage, /agent\.online === true/);
   assert.match(usage, /agent\.online === false/);
   assert.match(usage, /Status unavailable/);
-  assert.match(usage, /daily-bars/);
-  assert.match(usage, /monthly \? ' thirty'/);
+  assert.match(usage, /renderActivityChart\(summary\.buckets/);
+  assert.doesNotMatch(usage, /daily-bars|daily-column/);
   assert.match(app, /learn-column-sort/);
   assert.match(app, /learnSortDirection/);
   assert.doesNotMatch(app, /class="learn-folder-sort"/);
+});
+
+test("Overview and Usage render Today/7d/30d with one zero-baseline chart", () => {
+  assert.match(app, /function chartMarkup\(/);
+  assert.match(app, /function chartDisplayBuckets\(/);
+  for (const range of ['"today"','"7d"','"30d"']) {
+    assert(app.includes(range), "shared chart must support " + range);
+  }
+  assert.equal(usage.split('renderActivityChart(summary.buckets || [], period)').length - 1, 1);
+  assert(usage.includes('renderActivityChart'), "Usage reuses the Overview renderer");
+  assert.doesNotMatch(usage, /daily-bars|daily-column|renderHourlyChart|toolCallSeries/);
+  assert(!css.includes(".ledger-activity-chart .chart-plot{height:"), "plot uses the grid height");
+  assert(!css.includes(".ledger-activity-chart .chart-bars{height:"), "bars share the plot baseline");
 });
