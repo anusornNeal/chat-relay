@@ -103,3 +103,12 @@ test("Overview and Usage render Today/7d/30d with one zero-baseline chart", () =
   assert(!css.includes(".ledger-activity-chart .chart-plot{height:"), "plot uses the grid height");
   assert(!css.includes(".ledger-activity-chart .chart-bars{height:"), "bars share the plot baseline");
 });
+
+test("clicking anywhere on a user row expands it exactly once, while the name remains keyboard-accessible", () => {
+  assert.match(usage, /document\.querySelectorAll\("\.ledger-person-row"\)\.forEach\(\(row\) =>/);
+  assert.match(usage, /row\.onclick = \(\) =>/);
+  assert.match(usage, /row\.querySelector\("\[data-ledger-user\]"\)/);
+  assert.doesNotMatch(usage, /document\.querySelectorAll\("\[data-ledger-user\]"\)\.forEach/);
+  assert.match(usage, /aria-expanded/);
+  assert.match(css, /\.ledger-person-row\{cursor:pointer\}/);
+});

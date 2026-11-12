@@ -685,7 +685,9 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .ledger-table thead th button{font-size:inherit;font-weight:inherit;letter-spacing:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .ledger-table .ledger-numeric{text-align:right}
 .ledger-call-count{font-size:16px;font-weight:720;color:#111827}
-.ledger-person-row:hover{background:#f8fafc}
+.ledger-person-row{cursor:pointer}
+.ledger-person-row:hover>th,.ledger-person-row:hover>td{background:#eef2ff}
+.ledger-person-row:focus-within>th,.ledger-person-row:focus-within>td{background:#f5f6ff}
 .ledger-person-row.selected{background:#f5f6ff}
 .ledger-person{display:flex;align-items:center;gap:11px;width:100%;min-width:165px;text-align:left;color:#1f2937;background:transparent;border:0;padding:0}
 .ledger-person .icon{width:13px;height:13px;margin-left:auto;color:#94a3b8;transform:rotate(90deg)}

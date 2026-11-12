@@ -180,9 +180,12 @@ export function createUsageWorkspace({
         render({patch:true});
       };
     });
-    document.querySelectorAll("[data-ledger-user]").forEach((button) => {
-      button.onclick = () => {
-        const nextId = button.dataset.ledgerUser;
+    // The entire table row is the pointer target. The existing button remains
+    // the keyboard-accessible control; its click bubbles here exactly once.
+    document.querySelectorAll(".ledger-person-row").forEach((row) => {
+      row.onclick = () => {
+        const nextId = row.querySelector("[data-ledger-user]")?.dataset.ledgerUser;
+        if (!nextId) return;
         if (expandedIds.has(nextId)) expandedIds.delete(nextId);
         else expandedIds.add(nextId);
         render({patch:true});
