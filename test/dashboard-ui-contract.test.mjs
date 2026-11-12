@@ -9,8 +9,8 @@ const app = readFileSync(new URL("../dashboard/app.js", import.meta.url), "utf8"
 const usage = readFileSync(new URL("../dashboard/usage-workspace.js", import.meta.url), "utf8");
 
 test("dashboard has one small, self-contained design system", () => {
-  assert.match(css, /--accent:#237f5a/);
-  assert.match(css, /--line:#e0e8df/);
+  assert.match(css, /--accent:#4f46e5/);
+  assert.match(css, /--line:#e5e7eb/);
   assert.match(css, /font-family:"Segoe UI"/);
   assert.doesNotMatch(css, /@import|cdn.jsdelivr.net/);
   assert.equal((css.match(/^\.ledger-table\{/gm) || []).length, 1, "one primary comparison table");
@@ -50,4 +50,13 @@ test("Review and investigation handlers cannot retain stale selection after DOM 
   assert.match(usage, /data-ledger-user/);
   assert.match(usage, /data-ledger-timeline/);
   assert.match(usage, /if \(sequence !== loadSequence\) return/);
+});
+
+test("Overview is first, normal users have no redundant Usage page", () => {
+  assert.match(app, /\[\["overview", "Overview", "overview"\], \["usage", "Usage", "activity"\]/);
+  assert.match(app, /\[\["overview", "Overview", "overview"\], \["learn", "My Learn", "info"\]\]/);
+  assert.match(app, /if \(!navItems\(\)\.some\(\(\[id\]\) => id === activeView\)\) activeView = "overview"/);
+  assert.doesNotMatch(usage, /SHARE OF LISTED|100% of listed Tool Calls/);
+  assert.match(usage, /daily-bars/);
+  assert.match(usage, /daily-table/);
 });

@@ -6,7 +6,7 @@ import { learnReviewReason, learnFocusItems, learnFocusSummary } from "./ux-insi
 let csrf = sessionStorage.getItem("chat_relay_csrf") || "";
 let currentUser = null;
 const initialView = new URLSearchParams(location.search).get("view");
-let activeView = ["overview","usage","learn"].includes(initialView) ? initialView : (initialView === "shared" ? "learn" : "usage");
+let activeView = ["overview","usage","learn"].includes(initialView) ? initialView : (initialView === "shared" ? "learn" : "overview");
 let liveSocket = null;
 let reconnectTimer = null;
 let fallbackStartTimer = null;
@@ -304,8 +304,8 @@ function isAdmin() { return currentUser?.admin === true; }
 
 function navItems() {
   return isAdmin()
-    ? [["usage", "Usage", "activity"], ["learn", "My Learn", "info"], ["overview", "System", "overview"]]
-    : [["usage", "My usage", "activity"], ["learn", "My Learn", "info"], ["overview", "Overview", "overview"]];
+    ? [["overview", "Overview", "overview"], ["usage", "Usage", "activity"], ["learn", "My Learn", "info"]]
+    : [["overview", "Overview", "overview"], ["learn", "My Learn", "info"]];
 }
 function renderNav() {
   $("nav").innerHTML = navItems().map(([id, label, glyph]) =>
@@ -319,7 +319,7 @@ function renderNav() {
 function setHeader(title, subtitle) {
   $("eyebrow").textContent = (isAdmin() ? "ADMIN WORKSPACE" : "PERSONAL WORKSPACE") + " / " + (activeView === "learn" ? "KNOWLEDGE" : activeView === "usage" ? "ACCOUNTS" : "ANALYTICS");
   $("pageTitle").textContent = title;
-  $("pageSubtitle").textContent = subtitle;
+  $("pageSubtitle").textContent = "";
   document.title = title + " · Chat Relay";
 }
 function showLoading() {
@@ -330,7 +330,7 @@ function showLoading() {
     '</div><div class="skeleton loading-panel"></div></div>';
 }
 async function switchView(view) {
-  if (!navItems().some(([id]) => id === view)) view = "usage";
+  if (!navItems().some(([id]) => id === view)) view = "overview";
   activeView = view;
   renderNav();
   showLoading();
@@ -628,17 +628,8 @@ async function loadOverview({ patch = false } = {}) {
     '<div class="metric-grid">' + cards.join("") + "</div>" +
     '<section class="panel overview-chart-panel"><div class="overview-chart-heading"><div><div class="panel-kicker">Activity</div><h2>Tool activity</h2><p>Invocations by ' + chartUnit + ' for ' + esc(periodLabel.toLowerCase()) + '.</p></div>' +
       '<div class="chart-legend"><span class="legend-invocations"><i></i>Invocations</span><span class="legend-errors"><i></i>Operational error</span></div></div>' +
-      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>" +
-    '<section class="ux-next-actions" aria-label="Next actions">' +
-      '<div class="ux-next-copy"><strong>Where to go next</strong><span>Move from summary to an actionable workflow</span></div>' +
-      '<button type="button" data-workspace-jump="usage">' + icon("activity") +
-        '<span><strong>Investigate usage</strong><small>Accounts, agents, latency & errors</small></span>' + icon("chevron") + '</button>' +
-      '<button type="button" data-workspace-jump="learn">' + icon("check") +
-        '<span><strong>Review Learn</strong><small>Evidence, feedback & rule refinement</small></span>' + icon("chevron") + '</button></section>';
+      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>";
   renderContent(liveMarkup, patch);
-  document.querySelectorAll("[data-workspace-jump]").forEach((button) => {
-    button.onclick = () => { void switchView(button.dataset.workspaceJump); };
-  });
   const overviewFilter = document.getElementById("overview-user-filter");
   if (overviewFilter) overviewFilter.onchange = async () => {
     overviewUserId = overviewFilter.value;
@@ -1331,6 +1322,7 @@ $("logout").insertAdjacentHTML("afterbegin", icon("logout"));
     $("who").textContent = displayName + " \u00b7 " + (isAdmin() ? "Admin" : "User");
     $("identityAvatar").textContent = displayName.trim().split(/\s+/).slice(0, 2).map((part) => part[0] || "").join("").toUpperCase().slice(0, 2) || "CR";
     $("roleBadge").innerHTML = icon(isAdmin() ? "server" : "users") + (isAdmin() ? "Admin workspace" : "User workspace");
+    if (!navItems().some(([id]) => id === activeView)) activeView = "overview";
     renderNav();
     showLoading();
     startLiveChannel();

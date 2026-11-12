@@ -24,7 +24,7 @@ if(!page.text.includes('id="loginError"'))throw Error("dashboard login recovery 
 if(!js.text.includes("API_TIMEOUT_MS = 12000")||!js.text.includes("request_timeout")||!js.text.includes("scheduleDataRetry")||!js.text.includes("refreshActiveIncrementally({ initial: true })"))throw Error("dashboard load recovery guards missing");
 const liveStartAt=js.text.lastIndexOf("startLiveChannel();"),initialLoadAt=js.text.lastIndexOf("refreshActiveIncrementally({ initial: true });");if(liveStartAt<0||initialLoadAt<0||liveStartAt>initialLoadAt)throw Error("dashboard realtime must start before initial data load");
 const css = await req("/dashboard/styles.css");
-const expectedCss = ["@media","Segoe UI",".ledger-table",".ledger-summary",".ledger-day-row",".ux-learn-focus",".ux-refine-dialog",".overview-chart-panel",".live-pill",".learn-folder-shell",".learn-folder-tree",".learn-detail-pane",".learn-folder-workspace",".learn-tree-row",".learn-folder-heading-actions",".learn-export-button"];
+const expectedCss = ["@media","Segoe UI",".ledger-table",".ledger-summary",".daily-bars",".ux-learn-focus",".ux-refine-dialog",".overview-chart-panel",".live-pill",".learn-folder-shell",".learn-folder-tree",".learn-detail-pane",".learn-folder-workspace",".learn-tree-row",".learn-folder-heading-actions",".learn-export-button"];
 if(!css.response.ok || css.text.includes("cdn.jsdelivr.net")) throw Error("Dashboard stylesheet unavailable or uses CDN");
 for(const marker of expectedCss) if(!css.text.includes(marker)) throw Error("Dashboard stylesheet missing " + marker);
 

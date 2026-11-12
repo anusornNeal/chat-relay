@@ -12,19 +12,19 @@ These are user-provided requirements, not assumptions from analytics.
 
 | Decision | User task / rationale | Evidence or type |
 |---|---|---|
-| Open the workspace on **Usage**; put Usage, Learn, System in horizontal navigation | Prioritize the most frequently needed task, without a permanent 240px sidebar | Design hypothesis, validate with users; not a universal rule |
+| Start on **Overview**, with a compact persistent **left sidebar**: Overview → Usage → My Learn for admin | Preserve familiar navigation order, place the most frequently used destinations at stable left positions | User feedback + Vercel Feb 2026 navigation changelog; layout itself is a hypothesis |
 | Show **Tool Calls** explicitly and only | Avoid confusing tool invocations with HTTP requests, tokens, or Cloudflare compute | Confirmed requirement and existing Usage API metric |
-| Show a large **period total** and a sortable **per-person numerical table** | Compare exact totals without opening N user details; right-aligned, tabular numerals aid scanning | Carbon data-table guidance; GOV.UK table guidance |
+| Show a **compact period total** immediately followed by a sortable **per-person numerical table**, fully above the first desktop fold | Answer usage questions without scrolling past decorative headings or a large KPI hero | Explicit user correction + Carbon/GOV.UK data-table guidance |
 | Default sort: most Tool Calls first; offer name sorting and search | Answer “who used the most?” immediately, find a known person or agent quickly | User task and design hypothesis |
 | Choose Today / 7 days / 30 days with visible BKK date boundaries | Prevent ambiguous rolling-window interpretations | Existing API semantics: Asia/Bangkok midnight; 7d includes today plus six preceding days |
-| Reveal per-person **hourly/daily** counts inside an expanded table row | Numeric per-day breakdown without forcing everyone into separate views | Progressive disclosure; task-specific hierarchy |
+| Use **seven labeled bars with numbers above each bar** for 7 days; use an exact-value table for today (hours) and 30 days (too many bars) | Preserve data precision and avoid tiny unreadable bars and hover-only values | User feedback + NN/g dashboard chart comprehension; hypothesis tested by screenshot/interaction QA |
 | Hide Agent and Performance details behind named disclosures | These are useful but not the primary task | Progressive disclosure / focus on main task |
 | Fetch selected-user summary **on demand**, cached per user+range | Avoid N+1 calls and unexpected Durable Object load | Verified endpoint contracts; performance constraint |
-| Show personal user's own usage rather than every user | Do not expose other users' history | Existing backend role scoping; security requirement |
+| **Normal users see Overview + My Learn only**; their personal Tool Calls and trend are already on Overview, avoiding duplicate Usage | Remove redundant navigation and decisions without hiding their usage information | Explicit user feedback + existing backend role scoping |
 | Make the Learn default a **Review Desk**; show folders/groups only on request | Prioritize evaluation, feedback, refinement rather than browsing a directory | User task + design hypothesis, with review suggestions labeled as non-authoritative |
 | Keep Learn Search visible; allow filtering by scope/group when needed | Find a memory without entering a permanent folder-tree hierarchy | Progressive disclosure and accessibility |
 | Keep API mutation controls authenticated and use existing CSRF flow | UI changes must not expand client authority | Verified existing endpoints and auth behavior |
-| Keep reduced-motion, focus states, escape-safe text rendering and mobile fallback | Usable keyboard/screen-reader/mobile interaction | WCAG 2.2 Focus Visible and robust UI practices |
+| Use **neutral surfaces with a restrained indigo accent**, less text and no `Share of listed` | Reduce competing emphasis and remove a metric the user said has no value | Explicit user feedback; palette is a testable design hypothesis |\n| Keep focus states, escape-safe text rendering and mobile fallback | Usable keyboard/screen-reader/mobile interaction | WCAG 2.2 Focus Visible and robust UI practices |
 
 ## Existing API contract (verified in source)
 
@@ -48,3 +48,12 @@ In a user review, compare the old and new UI with the same three tasks: (1) iden
 - W3C WCAG 2.2, Focus Visible: https://www.w3.org/WAI/WCAG22/Understanding/focus-visible.html
 
 The navigation layout, color palette, exact density and scope drawer are design hypotheses; cited sources support general usability principles, **not** proof that this particular layout is superior to the previous one.
+
+## Navigation and glanceability references
+
+- Vercel, new navigation default (26 Feb 2026): https://vercel.com/changelog/dashboard-navigation-redesign-rollout
+- Stripe, Connect Overview: https://docs.stripe.com/connect/dashboard/understand-your-connect-business
+- NN/g, complex application design: https://www.nngroup.com/articles/complex-application-design/
+- NN/g, charts and graphs on dashboards: https://www.nngroup.com/articles/dashboards-preattentive/
+
+These are design references, not claims that copying their appearance guarantees better task performance. This round deliberately removes redundant controls and text rather than adding new dashboard features.

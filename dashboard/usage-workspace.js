@@ -48,44 +48,45 @@ export function createUsageWorkspace({
   }
 
   function renderTimeline(summary, account) {
-    const period = summary.period || currentPeriod();
-    const daily = toolCallSeries(summary.buckets, period);
-    const maximum = Math.max(1, ...daily.map((row) => row.calls));
-    const byHour = period.range === "today";
-    const rows = daily.map((entry) => {
-      const label = byHour ? bkkTime.format(new Date(entry.from)) : bkkFull.format(new Date(entry.from));
-      const percentage = Math.min(100, Math.max(0, entry.calls / maximum * 100));
-      return '<div class="ledger-day-row" role="listitem" aria-label="' + esc(label + ": " + fmtNum(entry.calls) + " Tool Calls") + '">' +
-        '<span class="ledger-day-label">' + esc(label) + '</span>' +
-        '<span class="ledger-bar-track" aria-hidden="true"><span class="ledger-bar-fill" style="width:' + percentage.toFixed(2) + '%"></span></span>' +
-        '<strong class="ledger-day-value">' + fmtNum(entry.calls) + '</strong></div>';
-    }).join("");
-    const summaryCalls = Number(summary.usage?.calls);
-    const sum = Number.isFinite(summaryCalls) ? summaryCalls : daily.reduce((a, x) => a + x.calls, 0);
-    const agentRows = agentsFor(account).map((agent) =>
-      '<div class="ledger-agent-row"><div><strong>' + esc(agent.name || agent.agentId) + '</strong>' +
-      '<span>' + esc(agent.agentId) + '</span></div><strong>' + fmtNum(agent.calls) + '</strong></div>').join("");
-    const metrics = summary.usage || {};
-    return '<div class="ledger-expanded-inner"><div class="ledger-timeline-top">' +
-      '<div><p class="ledger-caption">ACTIVITY OVER TIME · ' + esc(period.timezoneLabel || "BKK · UTC+7") + '</p>' +
-      '<h3>' + esc(titleFor(account)) + '</h3>' +
-      '<p>' + esc(dateWindow()) + ' · ' + (byHour ? 'Hourly' : 'Daily') + ' Tool Calls</p></div>' +
-      '<div class="ledger-detail-total"><strong>' + fmtNum(sum) + '</strong><span>Tool Calls</span></div></div>' +
-      '<div class="ledger-day-list" role="list" aria-label="Tool Calls by ' + (byHour ? 'hour' : 'day') + '">' +
-        (rows || '<p class="ledger-muted">No recorded Tool Calls during this period.</p>') + '</div>' +
-      '<div class="ledger-disclosures">' +
-        '<details><summary>Agent breakdown <span>' + fmtNum(agentsFor(account).length) + ' agents</span></summary>' +
-          '<div class="ledger-agent-list">' + (agentRows || '<p class="ledger-muted">No agents assigned.</p>') + '</div></details>' +
-        '<details><summary>Performance details <span>Advanced</span></summary>' +
-          '<div class="ledger-diagnostic-grid">' +
-          [['Avg latency',fmtMs(metrics.avgDurationMs)],['p95 latency',fmtMs(metrics.p95DurationMs)],
-           ['Operational errors',fmtNum(metrics.operationalErrors || 0)],['Error rate',fmtPct(metrics.operationalErrorRate)]]
-            .map(([label,value])=>'<div><span>' + esc(label) + '</span><strong>' + esc(value) + '</strong></div>').join('') +
-          '</div></details></div>' +
-      (summary.bounded === true ? '<p class="ledger-caveat">Detailed history has bounded coverage. Values may be incomplete.</p>' : '') +
-      '<div class="ledger-expanded-actions"><button type="button" class="ledger-link" data-ledger-refresh="' + esc(account.userId) + '">Refresh breakdown</button>' +
-      '<button type="button" class="ledger-link" data-ledger-timeline="' + esc(account.userId) + '">Open activity overview ' + icon("chevron") + '</button></div>' +
-      adminControls(account) + '</div>';
+    const period=summary.period||currentPeriod();
+    const daily=toolCallSeries(summary.buckets,period);
+    const byHour=period.range==="today";
+    const byWeek=period.range==="7d";
+    const max=Math.max(1,...daily.map(row=>row.calls));
+    const sum=Number.isFinite(Number(summary.usage?.calls))?Number(summary.usage.calls):daily.reduce((n,row)=>n+row.calls,0);
+    const shortDay=new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Bangkok",weekday:"short"});
+    const visualization=byWeek
+      ? '<div class="daily-bars" role="list" aria-label="Tool Calls by day">' +
+        daily.map((row)=>{
+          const date=new Date(row.from),height=row.calls?Math.max(4,row.calls/max*100):0;
+          const label=bkkFull.format(date);
+          return '<div class="daily-column" role="listitem" aria-label="'+esc(label+": "+fmtNum(row.calls)+" Tool Calls")+'">' +
+            '<strong>'+fmtNum(row.calls)+'</strong><div class="daily-bar-area" aria-hidden="true"><span style="height:'+height.toFixed(2)+'%"></span></div>' +
+            '<span>'+esc(shortDay.format(date))+'</span><small>'+esc(bkkDate.format(date))+'</small></div>';
+        }).join("")+'</div>'
+      : '<div class="daily-table-scroll"><table class="daily-table"><caption class="sr-only">Tool Calls by '+(byHour?'hour':'day')+'</caption>' +
+        '<thead><tr><th scope="col">'+(byHour?'Time':'Date')+' (BKK)</th><th scope="col">Tool Calls</th></tr></thead><tbody>' +
+        daily.map(row=>'<tr class="ledger-day-row"><th scope="row" class="ledger-day-label">'+
+          esc(byHour?bkkTime.format(new Date(row.from)):bkkFull.format(new Date(row.from)))+
+          '</th><td class="ledger-day-value">'+fmtNum(row.calls)+'</td></tr>').join("")+'</tbody></table></div>';
+    const metrics=summary.usage||{};
+    const agentRows=agentsFor(account).map(agent=>'<div class="ledger-agent-row"><div><strong>'+esc(agent.name||agent.agentId)+'</strong>' +
+      '<span>'+esc(agent.agentId)+'</span></div><strong>'+fmtNum(agent.calls)+'</strong></div>').join("");
+    return '<div class="ledger-expanded-inner"><div class="ledger-timeline-top"><div><h3>'+
+      (byWeek?'Last 7 days':byHour?'Today by hour':'Daily Tool Calls')+'</h3></div>' +
+      '<div class="ledger-detail-total"><strong>'+fmtNum(sum)+'</strong><span>Total</span></div></div>' +
+      visualization+
+      '<div class="ledger-disclosures"><details><summary>Agents <span>'+fmtNum(agentsFor(account).length)+'</span></summary>' +
+        '<div class="ledger-agent-list">'+(agentRows||'<p class="ledger-muted">No agents</p>')+'</div></details>'+
+      '<details><summary>Performance <span>Advanced</span></summary><div class="ledger-diagnostic-grid">'+
+      [['Avg latency',fmtMs(metrics.avgDurationMs)],['p95 latency',fmtMs(metrics.p95DurationMs)],
+       ['Errors',fmtNum(metrics.operationalErrors||0)],['Error rate',fmtPct(metrics.operationalErrorRate)]]
+        .map(([label,value])=>'<div><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong></div>').join("")+
+      '</div></details></div>'+
+      (summary.bounded===true?'<p class="ledger-caveat">Partial history</p>':'')+
+      '<div class="ledger-expanded-actions"><button type="button" class="ledger-link" data-ledger-refresh="'+esc(account.userId)+'">Refresh</button>'+
+      '<button type="button" class="ledger-link" data-ledger-timeline="'+esc(account.userId)+'">Open overview</button></div>'+
+      adminControls(account)+'</div>';
   }
 
   function renderExpanded(account) {
@@ -115,13 +116,10 @@ export function createUsageWorkspace({
     const hasDeleted = admin && mode === "deleted";
     const range = getRange();
     const header = scopeTitle();
-    setHeader(header, admin
-      ? "Compare Tool Calls across people, then open a row for its daily breakdown"
-      : "See your Tool Calls for the selected period, broken down by day or hour");
+    setHeader(header, "");
 
     const rows = matched.map((account, index) => {
       const calls = Math.max(0, Number(account.calls || 0));
-      const ratio = total ? calls / total * 100 : 0;
       const open = selectedId === account.userId;
       const agentCount = agentsFor(account).length;
       return '<tr class="ledger-person-row' + (open ? ' selected' : '') + '" data-live-key="ledger-user-' + esc(account.userId) + '">' +
@@ -131,11 +129,9 @@ export function createUsageWorkspace({
           '<span class="ledger-person-name"><strong>' + esc(titleFor(account)) + '</strong><span>' + esc(account.login || account.userId) + '</span></span>' +
           icon("chevron") + '</button></th>' +
         '<td class="ledger-numeric ledger-call-count">' + fmtNum(calls) + '</td>' +
-        (admin ? '<td class="ledger-share"><div aria-label="' + ratio.toFixed(1) + '% of Tool Calls across listed users">' +
-          '<span class="ledger-mini-track" aria-hidden="true"><span style="width:' + ratio.toFixed(2) + '%"></span></span>' +
-          '<span>' + ratio.toFixed(1) + '%</span></div></td>' : '') +
+
         '<td class="ledger-numeric ledger-agent-count">' + fmtNum(agentCount) + '</td>' +
-      '</tr>' + (open ? '<tr class="ledger-detail-row"><td colspan="' + (admin ? 4 : 3) +
+      '</tr>' + (open ? '<tr class="ledger-detail-row"><td colspan="' + 3 +
         '" class="ledger-detail-cell">' + renderExpanded(account) + '</td></tr>' : '');
     }).join("");
 
@@ -150,21 +146,13 @@ export function createUsageWorkspace({
     const windowLabel = dateWindow();
     const caption = hasDeleted ? "Deleted accounts only" : admin ? "Active accounts only" : "Your account";
     renderContent(
-      '<div class="ledger-heading"><div class="ledger-intro"><span class="ledger-kicker">USAGE · TOOL CALLS</span>' +
-        '<h2>' + (admin ? "Every call, accounted for." : "Your activity, at a glance.") + '</h2>' +
-        '<p>Understand volume first. Inspect trends and agents only when you need them.</p></div>' +
-        '<div class="ledger-period"><span>TIME WINDOW · ' + esc(period.timezoneLabel || "BKK / UTC+7") + '</span>' +
-           periodChips(period) + '</div></div>' +
-      '<section class="ledger-summary" aria-label="Usage summary"><div class="ledger-main-number"><span>' +
-        (admin ? "TOOL CALLS BY LISTED USERS" : "YOUR TOOL CALLS") + '</span><strong>' + fmtNum(total) + '</strong>' +
-        '<small>' + esc(windowLabel) + ' · ' + esc(caption) + '</small></div>' +
-        '<div class="ledger-summary-facts"><div><strong>' + fmtNum(members) + '</strong><span>' + (admin ? "Users in view" : "User") + '</span></div>' +
-        '<div><strong>' + fmtNum(allAgents.size) + '</strong><span>Related agents</span></div></div>' +
-        '<div class="ledger-summary-hint">' + icon("info") + '<span>Today begins at 00:00 Bangkok time. Recent calls may appear after a short batching delay.</span></div></section>' +
+      '<div class="ledger-heading"><span class="ledger-kicker">TOOL CALLS · BKK</span><div class="ledger-period">' + periodChips(period) + '</div></div>' +
+      '<section class="ledger-summary" aria-label="Usage summary"><div class="ledger-main-number"><span>Tool Calls</span><strong>'+fmtNum(total)+'</strong></div>' +
+      '<div class="ledger-summary-facts"><div><strong>'+fmtNum(members)+'</strong><span>Users</span></div>' +
+      '<div><strong>'+fmtNum(allAgents.size)+'</strong><span>Agents</span></div></div>' +
+      '<span class="ledger-window-label">'+esc(windowLabel)+'</span></section>' +
       '<section class="ledger-table-section" aria-label="User Tool Calls comparison">' +
-        '<div class="ledger-table-heading"><div><span class="ledger-kicker">' + (admin ? "PEOPLE" : "PERSONAL VIEW") + '</span>' +
-          '<h3>' + (admin ? "Usage by person" : "Your daily breakdown") + '</h3>' +
-          '<p>Click a name to see Tool Calls by ' + (range === "today" ? "hour" : "day") + '.</p></div>' +
+        '<div class="ledger-table-heading"><div><h3>' + (admin ? "By user" : "Your activity") + '</h3></div>' +
           '<div class="ledger-table-actions">' + adminControls +
             '<label class="ledger-search"><span class="sr-only">Search users or agents</span>' + icon("search") +
             '<input type="search" id="usageSearch" value="' + esc(query) + '" placeholder="Find a person or agent..." aria-label="Search users or agents"></label></div></div>' +
@@ -174,16 +162,13 @@ export function createUsageWorkspace({
             '<button type="button" data-ledger-sort="name" aria-label="Sort by name">USER <span aria-hidden="true">' + (sortBy==="name" ? (sortDirection==="asc" ? "↑" : "↓") : "") + '</span></button></th>' +
           '<th scope="col" class="ledger-numeric" aria-sort="' + (sortBy==="calls" ? sortDirection==="desc"?"descending":"ascending" : "none") + '">' +
             '<button type="button" data-ledger-sort="calls" aria-label="Sort by Tool Calls">TOOL CALLS <span aria-hidden="true">' + (sortBy==="calls" ? (sortDirection==="desc" ? "↓" : "↑") : "") + '</span></button></th>' +
-          (admin ? '<th scope="col">SHARE OF LISTED</th>' : '') +
           '<th scope="col" class="ledger-numeric">AGENTS</th></tr></thead>' +
-          '<tbody>' + (rows || '<tr><td colspan="' + (admin?4:3) +
+          '<tbody>' + (rows || '<tr><td colspan="' + 3 +
             '"><div class="ledger-empty"><strong>No matching users</strong><span>Try changing your search or account status.</span></div></td></tr>') +
           '</tbody><tfoot><tr><th scope="row">TOTAL · ' + fmtNum(accounts.length) + ' ' + (admin ? "users":"user") + '</th>' +
-            '<td class="ledger-numeric">' + fmtNum(total) + '</td>' + (admin ? '<td>100% of listed Tool Calls</td>' : '') +
+            '<td class="ledger-numeric">' + fmtNum(total) + '</td>' +
             '<td class="ledger-numeric">' + fmtNum(allAgents.size) + '</td></tr></tfoot></table></div></section>' +
-      '<p class="ledger-footnote">' + icon("info") +
-        'Tool Calls measure calls to Relay tools, not model tokens or Cloudflare requests. Time boundaries: Asia/Bangkok. ' +
-        'Totals cover the users shown in this account status.</p>',
+      '<span class="ledger-footnote">Tool Calls · Bangkok time</span>',
       patch,
     );
 
