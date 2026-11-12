@@ -174,7 +174,7 @@ assert.doesNotMatch(ui, /data-learn-sort="confidence"/);
 // The usage sort must rank rated scores first, then Unrated, then New.
 const sortFunction = ui.slice(ui.indexOf('function learnUsageSortValue('), ui.indexOf('function learnTreeKindRows('));
 const sortVisible = new Function('items', 'learnScopeFilter', 'learnScopeKeyFilter', 'learnKindFilter', 'learnSearchQuery', 'learnSortMode',
-  'const learnItemsForScope = (items) => items;\n' + sortFunction + '\nreturn learnVisibleItems(items);');
+  'const learnItemsForScope = (items) => items;\nconst learnFocusMode = "all";\nconst learnFocusItems = (items) => items;\n' + sortFunction + '\nreturn learnVisibleItems(items);');
 const sorted = sortVisible([
   { key: 'new', usage: { status: 'new', score: null } },
   { key: 'low', usage: { status: 'rated', score: 0 } },

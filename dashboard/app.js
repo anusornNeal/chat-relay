@@ -1,5 +1,7 @@
 import { renderLearnMarkdown } from "./learn-markdown.js";
 import { createSharedLearnUI } from "./shared-learn.js";
+import { createUsageWorkspace } from "./usage-workspace.js";
+import { learnReviewReason, learnFocusItems, learnFocusSummary } from "./ux-insights.js";
 
 let csrf = sessionStorage.getItem("chat_relay_csrf") || "";
 let currentUser = null;
@@ -21,7 +23,6 @@ const pendingLiveTopics = new Set();
 let dashboardPeriod = null;
 let dashboardRange = "today";
 let overviewUserId = "";
-let usageUserMode = "active";
 
 const BKK_TZ = "Asia/Bangkok";
 const API_TIMEOUT_MS = 12000;
@@ -626,8 +627,17 @@ async function loadOverview({ patch = false } = {}) {
     '<div class="metric-grid">' + cards.join("") + "</div>" +
     '<section class="panel overview-chart-panel"><div class="overview-chart-heading"><div><div class="panel-kicker">Activity</div><h2>Tool activity</h2><p>Invocations by ' + chartUnit + ' for ' + esc(periodLabel.toLowerCase()) + '.</p></div>' +
       '<div class="chart-legend"><span class="legend-invocations"><i></i>Invocations</span><span class="legend-errors"><i></i>Operational error</span></div></div>' +
-      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>";
+      chartMarkup(data.buckets || [], dashboardPeriod) + "</section>" +
+    '<section class="ux-next-actions" aria-label="Next actions">' +
+      '<div class="ux-next-copy"><strong>Where to go next</strong><span>Move from summary to an actionable workflow</span></div>' +
+      '<button type="button" data-workspace-jump="usage">' + icon("activity") +
+        '<span><strong>Investigate usage</strong><small>Accounts, agents, latency & errors</small></span>' + icon("chevron") + '</button>' +
+      '<button type="button" data-workspace-jump="learn">' + icon("check") +
+        '<span><strong>Review Learn</strong><small>Evidence, feedback & rule refinement</small></span>' + icon("chevron") + '</button></section>';
   renderContent(liveMarkup, patch);
+  document.querySelectorAll("[data-workspace-jump]").forEach((button) => {
+    button.onclick = () => { void switchView(button.dataset.workspaceJump); };
+  });
   const overviewFilter = document.getElementById("overview-user-filter");
   if (overviewFilter) overviewFilter.onchange = async () => {
     overviewUserId = overviewFilter.value;
@@ -644,108 +654,19 @@ async function loadOverview({ patch = false } = {}) {
   });
 }
 
-async function loadUsage({ patch = false } = {}) {
-  setHeader(isAdmin() ? "Usage" : "My usage", "Tool calls by account and agent");
-  const showDeleted = isAdmin() && usageUserMode === "deleted";
-  const data = await api("/admin/api/overview?range=" + encodeURIComponent(dashboardRange) + (isAdmin() ? "&deleted=" + String(showDeleted) : ""));
-  dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
-  dashboardRange = dashboardPeriod.range || dashboardRange;
-  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
-  // Derive these from the existing response; no additional API requests.
-  const totalCalls = accounts.reduce((sum, account) => sum + Number(account.calls || 0), 0);
-  const totalAgents = accounts.reduce((sum, account) =>
-    sum + (Array.isArray(account.agents) ? account.agents.length : 0), 0);
-  const onlineAgents = accounts.reduce((sum, account) =>
-    sum + (Array.isArray(account.agents) ? account.agents.filter((agent) => agent.online).length : 0), 0);
-
-  const accountMarkup = accounts.length ? accounts.map((account) => {
-    const agents = Array.isArray(account.agents) ? account.agents : [];
-    const activeAgents = agents.filter((agent) => Number(agent.calls || 0) > 0);
-    const visibleAgents = activeAgents.length ? activeAgents : agents.slice(0, 1);
-    const agentRows = visibleAgents.length ? visibleAgents.map((agent) =>
-      '<div class="agent-usage-row" data-live-key="' + esc(account.userId + ":" + agent.agentId) + '">' +
-        '<div class="agent-usage-name"><span class="agent-dot ' + (agent.online ? "online" : "") + '"></span><div><strong>' + esc(agent.name || agent.agentId) +
-        '</strong><small>' + esc(agent.agentId) + '</small></div></div>' +
-        '<strong class="agent-usage-count">' + fmtNum(agent.calls) + '</strong>' +
-      '</div>'
-    ).join("") : '<div class="empty-inline">No agents for this account.</div>';
-    const userAction = !isAdmin() || account.userId === currentUser?.id
-      ? ""
-      : showDeleted
-        ? '<button type="button" class="usage-user-action" data-restore-user="' + esc(account.userId) + '" title="Restore user" aria-label="Restore ' + esc(account.name || account.userId) + '">' + icon("refresh") + '</button>'
-        : '<button type="button" class="usage-user-action danger" data-delete-user="' + esc(account.userId) + '" data-user-name="' + esc(account.name || account.userId) + '" title="Delete user" aria-label="Delete ' + esc(account.name || account.userId) + '">' + icon("trash") + '</button>';
-
-    return '<section class="panel account-agent-panel" data-live-key="' + esc(account.userId) + '">' +
-      '<div class="panel-heading"><div><div class="panel-kicker">Account</div><h2>' + esc(account.name || account.userId) +
-      '</h2><div class="secondary-text">' + esc(account.login || account.userId) + '</div></div>' +
-      '<div class="account-heading-actions"><div class="account-total"><strong>' + fmtNum(account.calls) + '</strong><span>tool calls</span></div>' + userAction + '</div></div>' +
-      '<div class="agent-usage-list">' + agentRows + '</div></section>';
-  }).join("") : '<section class="panel"><div class="empty-inline">' + (showDeleted ? "No deleted users." : "No usage in this period.") + '</div></section>';
-
-  const userTabs = isAdmin()
-    ? '<div class="usage-user-tabs" role="tablist" aria-label="User status"><button type="button" class="usage-user-tab ' + (usageUserMode === "active" ? "active" : "") + '" data-usage-user-mode="active" role="tab" aria-selected="' + String(usageUserMode === "active") + '">Active</button><button type="button" class="usage-user-tab ' + (usageUserMode === "deleted" ? "active" : "") + '" data-usage-user-mode="deleted" role="tab" aria-selected="' + String(usageUserMode === "deleted") + '">Deleted</button></div>'
-    : "";
-
-  renderContent(
-    '<div class="metric-grid usage-metric-grid">' +
-      metricCard(showDeleted ? "Deleted accounts" : "Accounts", fmtNum(accounts.length), "In selected period") +
-      metricCard("Tool invocations", fmtNum(totalCalls), "Across visible accounts") +
-      metricCard("Connected agents", fmtNum(onlineAgents) + " / " + fmtNum(totalAgents), "Account assignments") +
-    '</div>' +
-    '<div class="overview-toolbar"><div class="usage-toolbar-left">' + userTabs + periodChips(dashboardPeriod) + '</div>' +
-      '<span class="privacy-chip">' + icon("info") + periodDisplayLabel(dashboardRange) + "</span></div>" +
-    '<div class="account-agent-grid">' + accountMarkup + "</div>",
-    patch,
-  );
-
-  document.querySelectorAll("[data-usage-user-mode]").forEach((button) => {
-    button.onclick = async () => {
-      const nextMode = button.dataset.usageUserMode === "deleted" ? "deleted" : "active";
-      if (nextMode === usageUserMode) return;
-      usageUserMode = nextMode;
-      await loadUsage({ patch: true });
-    };
-  });
-  document.querySelectorAll("[data-delete-user]").forEach((button) => {
-    button.onclick = async () => {
-      const userId = button.dataset.deleteUser;
-      const name = button.dataset.userName || userId;
-      if (!userId || !window.confirm("Delete " + name + "? The account can be restored from the Deleted tab.")) return;
-      button.disabled = true;
-      try {
-        await api("/admin/api/users/soft-delete", { method: "POST", body: JSON.stringify({ userId }) });
-        await loadUsage({ patch: true });
-      } catch (error) {
-        button.disabled = false;
-        setNotice("Delete user failed: " + (error?.message || "request_failed"), true);
-      }
-    };
-  });
-  document.querySelectorAll("[data-restore-user]").forEach((button) => {
-    button.onclick = async () => {
-      const userId = button.dataset.restoreUser;
-      if (!userId) return;
-      button.disabled = true;
-      try {
-        await api("/admin/api/users/restore", { method: "POST", body: JSON.stringify({ userId }) });
-        await loadUsage({ patch: true });
-      } catch (error) {
-        button.disabled = false;
-        setNotice("Restore user failed: " + (error?.message || "request_failed"), true);
-      }
-    };
-  });
-  document.querySelectorAll("[data-overview-range]").forEach((button) => {
-    button.onclick = async () => {
-      const nextRange = button.dataset.overviewRange || "today";
-      if (nextRange === dashboardRange) return;
-      dashboardRange = nextRange;
-      dashboardPeriod = null;
-      await loadUsage({ patch: true });
-    };
-  });
-}
-
+const usageWorkspace = createUsageWorkspace({
+  api, renderContent, setHeader, setNotice, isAdmin,
+  getCurrentUser: () => currentUser,
+  getRange: () => dashboardRange,
+  setRange: (value) => { dashboardRange = value; dashboardPeriod = null; },
+  setPeriod: (value) => {
+    dashboardPeriod = value || { range: dashboardRange, label: periodDisplayLabel(dashboardRange) };
+    dashboardRange = dashboardPeriod.range || dashboardRange;
+  },
+  periodChips, periodDisplayLabel, metricCard, icon, esc, fmtNum, fmtMs, fmtPct,
+  openOverview: (userId) => { overviewUserId = isAdmin() ? userId : ""; void switchView("overview"); },
+});
+async function loadUsage(options = {}) { return usageWorkspace.load(options); }
 
 let sharedLearnActive = false;
 const sharedLearnUI = createSharedLearnUI({
@@ -763,6 +684,7 @@ let learnScopeKeyFilter = "";
 let learnSelectedMemoryId = null;
 let learnSearchQuery = "";
 let learnSortMode = "usage";
+let learnFocusMode = "review";
 const learnTreeExpanded = { global: true, project: true, agent: true, shared: true };
 let learnLibraryScrollTop = 0;
 const learnScopedTreeExpanded = new Set();
@@ -891,7 +813,17 @@ function learnVisibleItems(items) {
         .some((value) => String(value || "").toLowerCase().includes(query))
     );
   }
+  visible = learnFocusItems(visible, learnFocusMode);
   return [...visible].sort((a, b) => {
+    if (learnFocusMode === "review") {
+      const left = learnReviewReason(a)?.priority ?? 9;
+      const right = learnReviewReason(b)?.priority ?? 9;
+      if (left !== right) return left - right;
+    }
+    if (learnFocusMode === "used") {
+      const usageDelta = Number(b.usage?.applied || 0) - Number(a.usage?.applied || 0);
+      if (usageDelta) return usageDelta;
+    }
     if (learnSortMode === "updated") {
       return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
     }
@@ -987,6 +919,74 @@ function openLearnProjectMerge() {
   };
   document.body.append(dialog);
   dialog.showModal();
+}
+
+async function openLearnRefine(memory) {
+  // Preserve the memory identity: this endpoint updates by key + kind + scope.
+  // Project-context summaries are compacted server-side, so the in-place editor
+  // intentionally excludes that special kind.
+  if (memory.kind === "project_context" || document.querySelector(".ux-refine-dialog")) return;
+  const dialog = document.createElement("dialog");
+  dialog.className = "ux-refine-dialog";
+  dialog.setAttribute("aria-labelledby", "learnRefineTitle");
+  dialog.innerHTML =
+    '<form class="ux-refine-form"><div class="ux-refine-header"><div class="panel-kicker">REFINE MEMORY</div>' +
+      '<h2 id="learnRefineTitle">' + esc(memory.key) + '</h2><p>Update this rule without changing its scope, usage evidence, or feedback.</p></div>' +
+    '<label for="learnRefineContent">Memory content</label>' +
+    '<textarea id="learnRefineContent" name="content" rows="12" maxlength="4000" required>' + esc(memory.content) + '</textarea>' +
+    '<div class="ux-refine-help"><span>Markdown supported · 4,000 characters max</span><span id="refineCount"></span></div>' +
+    '<p class="ux-refine-error" id="refineError" role="alert" hidden></p>' +
+    '<div class="ux-refine-actions"><button type="button" class="button" id="refineCancel">Cancel</button>' +
+      '<button type="submit" class="button primary" id="refineSave">Save changes</button></div></form>';
+  const form = dialog.querySelector("form");
+  const textarea = dialog.querySelector("textarea");
+  const save = dialog.querySelector("#refineSave");
+  const errorNode = dialog.querySelector("#refineError");
+  const count = dialog.querySelector("#refineCount");
+  const updateCount = () => { count.textContent = textarea.value.length + " / 4000"; };
+  textarea.addEventListener("input", updateCount);
+  dialog.querySelector("#refineCancel").onclick = () => dialog.close();
+  dialog.addEventListener("close", () => dialog.remove(), {once:true});
+  textarea.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const content = textarea.value.trim();
+    if (!content || content.length > 4000) {
+      errorNode.textContent = "Content must be between 1 and 4,000 characters.";
+      errorNode.hidden = false;
+      return;
+    }
+    if (content === String(memory.content || "").trim()) {
+      dialog.close();
+      return;
+    }
+    save.disabled = true;
+    textarea.disabled = true;
+    try {
+      const result = await api("/admin/api/learn/put", {method:"POST",body:JSON.stringify({
+        key:memory.key,kind:memory.kind,scope:memory.scope,scopeKey:memory.scopeKey,
+        content,confidence:memory.confidence,
+      })});
+      applyLearnMutation(result);
+      dialog.close();
+      renderLearnProfile({patch:true});
+      setNotice("Memory updated. Usage evidence and feedback were preserved.");
+    } catch {
+      textarea.disabled = false;
+      save.disabled = false;
+      errorNode.textContent = "Could not save changes. Your draft is still here; please retry.";
+      errorNode.hidden = false;
+    }
+  };
+  document.body.append(dialog);
+  dialog.showModal();
+  updateCount();
+  textarea.focus();
 }
 
 function rememberLearnLibraryScroll() {
@@ -1104,6 +1104,7 @@ function renderLearnProfile({ patch = false } = {}) {
   const data = learnProfileSnapshot || {};
   const items = Array.isArray(data.items) ? data.items : [];
   const visibleItems = learnVisibleItems(items);
+  const focusSummary = learnFocusSummary(items);
 
   if (!visibleItems.some((item) => item.id === learnSelectedMemoryId)) {
     learnSelectedMemoryId = visibleItems[0]?.id || null;
@@ -1112,16 +1113,18 @@ function renderLearnProfile({ patch = false } = {}) {
 
   const rowsHtml = visibleItems.length ? visibleItems.map((item) => {
     const active = selected?.id === item.id ? " active" : "";
+    const reason = learnReviewReason(item);
     return '<button class="learn-folder-row' + active + '" type="button" aria-pressed="' + String(Boolean(active)) + '" title="' + esc(item.key) + '" data-learn-memory="' + esc(item.id) + '" data-live-key="learn-row-' + esc(item.id) + '">' +
-      '<span class="learn-folder-file">' + icon("folder") + '</span>' +
-      '<span class="learn-folder-copy"><strong>' + esc(item.key) + '</strong><small>' + esc(learnKindLabel(item.kind)) + '</small></span>' +
+      '<span class="learn-folder-file' + (reason ? ' ux-needs-review' : '') + '">' + icon(reason ? "alert" : "folder") + '</span>' +
+      '<span class="learn-folder-copy"><strong>' + esc(item.key) + '</strong><small>' + esc(learnKindLabel(item.kind)) + (reason ? ' · ' + esc(reason.label) : '') + '</small></span>' +
       '<span class="learn-folder-confidence">' + esc(learnUsageLabel(item)) + '</span>' +
       '<span class="learn-folder-updated">' + esc(bkkDateTime(item.updatedAt)) + '</span>' +
     '</button>';
-  }).join("") : '<div class="learn-folder-empty">' + icon("search") + '<strong>No memories found</strong><span>Try another folder or search term.</span></div>';
+  }).join("") : '<div class="learn-folder-empty">' + icon("search") + '<strong>' + (learnFocusMode === "review" ? "No review signals here" : "No memories found") + '</strong><span>' + (learnFocusMode === "review" ? "Nothing in this scope is flagged for review. You can still inspect all memories." : "Try another folder or search term.") + '</span>' + (learnFocusMode === "review" ? '<button type="button" class="button small" id="learnShowAll">Browse all memories</button>' : '') + '</div>';
 
   let detailHtml = '<div class="learn-detail-empty">' + icon("info") + '<strong>Select a memory</strong><span>Choose a row to inspect its details.</span></div>';
   if (selected) {
+    const reviewReason = learnReviewReason(selected);
     const positive = Number(selected.positiveFeedback || 0);
     const negative = Number(selected.negativeFeedback || 0);
     const positiveChecked = positive > negative ? " checked" : "";
@@ -1133,6 +1136,8 @@ function renderLearnProfile({ patch = false } = {}) {
         '</div>' +
       '<h3>' + esc(selected.key) + '</h3>' +
       '<div class="learn-detail-path">' + icon("folder") + esc(scopePath) + ' / ' + esc(learnKindLabel(selected.kind)) + '</div>' +
+      '<div class="ux-review-context' + (reviewReason ? " flagged" : "") + '">' + icon(reviewReason ? "alert" : "check") +
+        '<span><strong>' + esc(reviewReason?.label || "Usage evidence") + '</strong><small>' + esc(reviewReason ? "Review suggestion, not an automatic quality judgment" : "Inspect actual usage and feedback before deciding") + '</small></span></div>' +
       '<div class="learn-detail-rule"></div>' +
       '<div class="learn-detail-section"><label>Memory</label><div class="learn-markdown">' + renderLearnMarkdown(selected.content) + '</div></div>' +
       '<div class="learn-detail-meta">' +
@@ -1152,17 +1157,21 @@ function renderLearnProfile({ patch = false } = {}) {
         '<label class="learn-detail-radio useful' + (positiveChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="positive" data-learn-feedback="positive" data-memory-id="' + esc(selected.id) + '"' + positiveChecked + '>' + icon("thumbUp") + '<span>Useful</span></label>' +
         '<label class="learn-detail-radio not-useful' + (negativeChecked ? " active" : "") + '"><input type="radio" name="' + esc(radioName) + '" value="negative" data-learn-feedback="negative" data-memory-id="' + esc(selected.id) + '"' + negativeChecked + '>' + icon("thumbDown") + '<span>Not useful</span></label>' +
       '</div></div></div>' +
-      '<div class="learn-detail-footer">' + (selected.scope === "project" ? '<button class="button small" id="sharePersonalMemory">Share to group</button>' : '') + '<button class="button danger learn-detail-remove" type="button" data-learn-delete="' + esc(selected.id) + '">' + icon("trash") + 'Remove memory</button></div>';
+      '<div class="learn-detail-footer ux-learn-actions">' +
+        (selected.kind !== "project_context" ? '<button class="button small primary" id="learnRefineMemory" type="button">' + icon("plus") + 'Refine memory</button>' : '<span class="ux-managed-note">Project context is consolidated automatically</span>') +
+        (selected.scope === "project" ? '<button class="button small" id="sharePersonalMemory" type="button">Share to group</button>' : '') +
+        '<button class="button small" id="learnNextMemory" type="button"' + (visibleItems.length < 2 ? ' disabled' : '') + '>Next memory ' + icon("chevron") + '</button>' +
+        '<button class="button danger learn-detail-remove" type="button" data-learn-delete="' + esc(selected.id) + '">' + icon("trash") + 'Remove</button></div>';
   }
 
   const scopeTitle = learnScopeFilter === "all"
     ? "All memories"
     : learnScopeKeyFilter || ({ global: "Global", project: "Projects", agent: "Agents" })[learnScopeFilter] || "Learn";
   const typeTitle = learnKindFilter === "all" ? "" : learnKindLabel(learnKindFilter);
-  const heading = typeTitle || scopeTitle;
+  const heading = typeTitle || (learnScopeFilter === "all" && learnFocusMode === "review" ? "Needs review" : learnScopeFilter === "all" && learnFocusMode === "used" ? "Applied memories" : scopeTitle);
   const subtitle = typeTitle
     ? (learnScopeKeyFilter ? "Reusable " + typeTitle.toLowerCase() + " patterns for " + learnScopeKeyFilter : typeTitle + " memories")
-    : "Your reusable preferences and working patterns";
+    : (learnFocusMode === "review" ? "Review evidence, give feedback, and refine rules without leaving this page" : "Your reusable preferences and working patterns");
 
   renderContent(
     '<section class="learn-folder-shell">' +
@@ -1170,11 +1179,18 @@ function renderLearnProfile({ patch = false } = {}) {
       '<div class="learn-folder-main">' +
         '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div>' +
           '<div class="learn-folder-heading-actions">' + (learnScopeFilter === "project" && !learnScopeKeyFilter ? '<button id="learnMergeProjects" class="button small" type="button">Merge projects</button>' : '') + '<span class="privacy-chip learn-profile-chip">' + icon("info") + 'Only your Learn profile</span><span class="learn-folder-count"><strong>' + esc(visibleItems.length) + '</strong> memories</span><button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
+        '<div class="ux-learn-focus"><div class="ux-learn-focus-tabs" role="group" aria-label="Learn review view">' +
+          [['review','Needs review',focusSummary.review],['all','All memories',focusSummary.total],['used','Applied',focusSummary.used]].map(([id,label,count]) =>
+            '<button type="button" data-learn-focus="' + id + '" class="ux-focus-tab' + (learnFocusMode === id ? ' active' : '') +
+            '" aria-pressed="' + (learnFocusMode === id) + '">' + esc(label) + '<span>' + esc(count) + '</span></button>').join('') +
+          '</div><div class="ux-learn-focus-description"><strong>' + (learnFocusMode === 'review' ? 'Review suggestions' : learnFocusMode === 'used' ? 'Evidence of application' : 'Complete library') +
+          '</strong><span>' + (learnFocusMode === 'review' ? 'Based on feedback and evidence gaps—not an automatic quality grade.' : learnFocusMode === 'used' ? 'Memories reported as applied during tasks.' : 'All memories in your current scope.') +
+          '</span></div></div>' +
         '<div class="learn-folder-list-toolbar"><div class="learn-folder-sort">' +
           '<button class="' + (learnSortMode === "name" ? "active" : "") + '" type="button" data-learn-sort="name">Name</button>' +
           '<button class="' + (learnSortMode === "updated" ? "active" : "") + '" type="button" data-learn-sort="updated">Updated</button>' +
           '<button class="' + (learnSortMode === "usage" ? "active" : "") + '" type="button" data-learn-sort="usage">Usage Score</button>' +
-        '</div><span>Folder view</span></div>' +
+        '</div><span class="ux-results-count">' + fmtNum(visibleItems.length) + ' results</span></div>' +
         '<div class="learn-folder-workspace">' +
           '<div class="learn-folder-list"><div class="learn-folder-list-head"><span>Name</span><span>Usage Score</span><span>Updated</span></div><div class="learn-folder-list-scroll">' + rowsHtml + '</div></div>' +
           '<aside class="learn-detail-pane">' + detailHtml + '</aside>' +
@@ -1194,6 +1210,32 @@ function renderLearnProfile({ patch = false } = {}) {
 
   bindLearnLibrarySidebar();
 
+  document.querySelectorAll("[data-learn-focus]").forEach((button) => {
+    button.onclick = () => {
+      learnFocusMode = ["review","all","used"].includes(button.dataset.learnFocus) ? button.dataset.learnFocus : "all";
+      learnSelectedMemoryId = null;
+      renderLearnProfile({ patch: true });
+    };
+  });
+  // Live DOM patching preserves buttons; reassign handlers rather than accumulating
+  // addEventListener closures that can act on a previously selected memory.
+  const showAll = document.getElementById("learnShowAll");
+  if (showAll) showAll.onclick = () => {
+    learnFocusMode = "all";
+    renderLearnProfile({ patch: true });
+  };
+  const nextMemory = document.getElementById("learnNextMemory");
+  if (nextMemory) nextMemory.onclick = () => {
+    const index = visibleItems.findIndex((item) => item.id === learnSelectedMemoryId);
+    learnSelectedMemoryId = visibleItems[(index + 1) % visibleItems.length]?.id || null;
+    renderLearnProfile({ patch: true });
+  };
+  const refineMemory = document.getElementById("learnRefineMemory");
+  if (refineMemory) refineMemory.onclick = () => {
+    const current = (learnProfileSnapshot?.items || []).find((item) => item.id === learnSelectedMemoryId);
+    if (current && current.kind !== "project_context") openLearnRefine(current);
+  };
+
   document.querySelectorAll("[data-learn-sort]").forEach((button) => {
     button.onclick = () => {
       learnSortMode = button.dataset.learnSort || "name";
@@ -1209,17 +1251,30 @@ function renderLearnProfile({ patch = false } = {}) {
   });
 
   document.querySelectorAll("input[data-learn-feedback]").forEach((input) => {
-    input.onchange = () => {
+    input.onchange = async () => {
       if (!input.checked) return;
-      mutateLearn("/admin/api/learn/feedback", {
-        id: input.dataset.memoryId,
-        value: input.dataset.learnFeedback,
-      });
+      input.disabled = true;
+      try {
+        await mutateLearn("/admin/api/learn/feedback", {
+          id: input.dataset.memoryId,
+          value: input.dataset.learnFeedback,
+        });
+      } catch {
+        input.disabled = false;
+        input.checked = false;
+        setNotice("Could not save feedback. Please retry.", true);
+      }
     };
   });
 
   document.querySelectorAll("[data-learn-delete]").forEach((button) => {
-    button.onclick = () => mutateLearn("/admin/api/learn/delete", { id: button.dataset.learnDelete });
+    button.onclick = async () => {
+      const memory = items.find((item) => item.id === button.dataset.learnDelete);
+      if (!memory || !window.confirm("Remove " + memory.key + " from Learn? This cannot be undone from this screen.")) return;
+      button.disabled = true;
+      try { await mutateLearn("/admin/api/learn/delete", { id: memory.id }); }
+      catch { button.disabled = false; setNotice("Could not remove this memory. Please retry.", true); }
+    };
   });
 }
 

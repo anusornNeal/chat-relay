@@ -27,8 +27,12 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
     return query ? rows.filter((item) => [item.key, item.kind, item.content]
       .some((value) => String(value || "").toLowerCase().includes(query))) : rows;
   };
-  const tabButton = (value,label) => '<button class="learn-shared-tab' + (tab === value ? ' active' : '') +
-    '" type="button" data-shared-tab="' + value + '">' + esc(label) + '</button>';
+  const tabButton = (value,label) => {
+    const pending = (detail?.proposals || []).filter((proposal) => proposal.status === "pending").length;
+    return '<button class="learn-shared-tab' + (tab === value ? ' active' : '') +
+      '" type="button" data-shared-tab="' + value + '" aria-pressed="' + (tab === value) + '">' +
+      esc(label) + (value === "pending" && pending ? '<span class="ux-pending-count">' + pending + '</span>' : '') + '</button>';
+  };
   function render() {
     const group = detail?.group;
     const rows = getRows();
@@ -104,9 +108,17 @@ export function createSharedLearnUI({api,renderContent,setHeader,setNotice,escap
     });
   }
   async function show(groupId) {
+    const switchingGroup = Boolean(groupId && groupId !== selectedGroupId);
     if (groupId) selectedGroupId = groupId;
     onSharedMode();
-    try {await refresh();render();}
+    try {
+      await refresh();
+      if (switchingGroup && canReview() && (detail?.proposals || []).some((p) => p.status === "pending")) {
+        tab = "pending";
+        selectedItemId = null;
+      }
+      render();
+    }
     catch(e) {
       setHeader("My Learn", "Your adaptive preferences and shared project knowledge");
       renderContent('<section class="learn-folder-shell learn-shared-shell">' + getSidebar() +
