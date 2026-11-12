@@ -23,7 +23,6 @@ let dataRetryAttempt = 0;
 const pendingLiveTopics = new Set();
 let dashboardPeriod = null;
 let dashboardRange = "today";
-let overviewUserId = "";
 
 const BKK_TZ = "Asia/Bangkok";
 const API_TIMEOUT_MS = 12000;
@@ -587,28 +586,20 @@ function chartMarkup(buckets = [], period = dashboardPeriod, {showStats = true} 
 async function loadOverview({ patch = false } = {}) {
   const requestedPeriodLabel = periodDisplayLabel(dashboardRange);
   setHeader(
-    isAdmin() ? (overviewUserId ? "User overview" : "System overview") : "My overview",
-    isAdmin() ? requestedPeriodLabel + (overviewUserId ? " · selected account" : " across Chat Relay") : requestedPeriodLabel + " \u00b7 your activity",
+    isAdmin() ? "System overview" : "My overview",
+    requestedPeriodLabel,
   );
-  const data = await api("/admin/api/summary?range=" + encodeURIComponent(dashboardRange) +
-    (isAdmin() && overviewUserId ? "&userId=" + encodeURIComponent(overviewUserId) : ""));
+  const data = await api("/admin/api/summary?range=" + encodeURIComponent(dashboardRange));
   dashboardPeriod = data.period || dashboardPeriod || { range: dashboardRange, label: "Today" };
   dashboardRange = dashboardPeriod.range || dashboardRange;
   const periodLabel = periodDisplayLabel(dashboardRange);
-  const accounts = isAdmin() ? (data.accountUsage || []) : [];
-  const userOptions = '<option value="">All users</option>' + accounts.map((account) =>
-    '<option value="' + esc(account.userId) + '"' + (overviewUserId === account.userId ? ' selected' : '') + '>' +
-    esc(account.name || account.login || account.userId) + '</option>').join('');
-  const userFilter = isAdmin()
-    ? '<label class="overview-user-filter">User <select id="overview-user-filter" aria-label="Filter overview by user">' + userOptions + '</select></label>'
-    : '';
   const m = data.usage || {};
   const exactMeta = data.bounded ? "partial \u2014 safety bound reached" : periodLabel.toLowerCase();
   const cards = [
-    metricCard(isAdmin() && overviewUserId ? "User tool invocations" : isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
+    metricCard(isAdmin() ? "Tool invocations" : "My tool invocations", fmtNum(m.calls), data.bounded ? exactMeta : "MCP tools only \u00b7 excludes Worker HTTP requests"),
     metricCard("Avg / p95 latency", fmtMs(m.avgDurationMs) + " / " + fmtMs(m.p95DurationMs), m.p95Approximate ? "p95 is approximate" : exactMeta),
     metricCard(
-      isAdmin() && overviewUserId ? "User operational error rate" : isAdmin() ? "Operational error rate" : "My operational error rate",
+      isAdmin() ? "Operational error rate" : "My operational error rate",
       fmtPct(m.operationalErrorRate ?? m.errorRate),
       fmtNum(m.operationalErrors ?? m.errors) + " infrastructure failures",
       Number(m.operationalErrors ?? m.errors ?? 0) ? "metric-alert" : "",
@@ -622,19 +613,14 @@ async function loadOverview({ patch = false } = {}) {
     : "";
   const chartUnit = dashboardRange === "today" ? "hour" : "day";
   const liveMarkup =
-    '<div class="overview-toolbar"><div class="overview-filters">' + periodChips(dashboardPeriod) + userFilter + '</div>' +
-      '<span class="privacy-chip">' + icon("info") + (isAdmin() ? (overviewUserId ? "Selected user metadata" : "System-wide safe metadata") : "Only your activity") + "</span></div>" +
+    '<div class="overview-toolbar"><div class="overview-filters">' + periodChips(dashboardPeriod) + '</div>' +
+      '<span class="privacy-chip">' + icon("info") + (isAdmin() ? "System-wide safe metadata" : "Only your activity") + "</span></div>" +
     boundedNotice +
     '<div class="metric-grid">' + cards.join("") + "</div>" +
     '<section class="panel overview-chart-panel"><div class="overview-chart-heading"><div><div class="panel-kicker">Activity</div><h2>Tool activity</h2><p>Invocations by ' + chartUnit + ' for ' + esc(periodLabel.toLowerCase()) + '.</p></div>' +
       '<div class="chart-legend"><span class="legend-invocations"><i></i>Invocations</span><span class="legend-errors"><i></i>Operational error</span></div></div>' +
       chartMarkup(data.buckets || [], dashboardPeriod) + "</section>";
   renderContent(liveMarkup, patch);
-  const overviewFilter = document.getElementById("overview-user-filter");
-  if (overviewFilter) overviewFilter.onchange = async () => {
-    overviewUserId = overviewFilter.value;
-    await loadOverview();
-  };
   document.querySelectorAll("[data-overview-range]").forEach((button) => {
     button.onclick = async () => {
       const nextRange = button.dataset.overviewRange || "today";
@@ -677,6 +663,8 @@ let learnScopeKeyFilter = "";
 let learnSelectedMemoryId = null;
 let learnSearchQuery = "";
 let learnSortMode = "usage";
+let learnSortDirection = "desc";
+let learnSortExplicit = false;
 let learnFocusMode = "review";
 const learnTreeExpanded = { global: true, project: true, agent: true, shared: true };
 let learnLibraryScrollTop = 0;
@@ -808,25 +796,27 @@ function learnVisibleItems(items) {
   }
   visible = learnFocusItems(visible, learnFocusMode);
   return [...visible].sort((a, b) => {
-    if (learnFocusMode === "review") {
+    if (!learnSortExplicit && learnFocusMode === "review") {
       const left = learnReviewReason(a)?.priority ?? 9;
       const right = learnReviewReason(b)?.priority ?? 9;
       if (left !== right) return left - right;
     }
-    if (learnFocusMode === "used") {
+    if (!learnSortExplicit && learnFocusMode === "used") {
       const usageDelta = Number(b.usage?.applied || 0) - Number(a.usage?.applied || 0);
       if (usageDelta) return usageDelta;
     }
+    const direction = learnSortDirection === "asc" ? 1 : -1;
     if (learnSortMode === "updated") {
-      return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+      return direction * String(a.updatedAt || "").localeCompare(String(b.updatedAt || "")) ||
+        String(a.key || "").localeCompare(String(b.key || ""));
     }
     if (learnSortMode === "usage") {
       const left = learnUsageSortValue(a);
       const right = learnUsageSortValue(b);
-      return right.tier - left.tier || right.score - left.score ||
+      return direction * (left.tier - right.tier || left.score - right.score) ||
         String(a.key || "").localeCompare(String(b.key || ""));
     }
-    return String(a.key || "").localeCompare(String(b.key || ""));
+    return direction * String(a.key || "").localeCompare(String(b.key || ""));
   });
 }
 
@@ -1182,13 +1172,15 @@ function renderLearnProfile({ patch = false } = {}) {
           '</div><div class="ux-learn-focus-description"><strong>' + (learnFocusMode === 'review' ? 'Review suggestions' : learnFocusMode === 'used' ? 'Evidence of application' : 'Complete library') +
           '</strong><span>' + (learnFocusMode === 'review' ? 'Based on feedback and evidence gaps—not an automatic quality grade.' : learnFocusMode === 'used' ? 'Memories reported as applied during tasks.' : 'All memories in your current scope.') +
           '</span></div></div>' +
-        '<div class="learn-folder-list-toolbar"><div class="learn-folder-sort">' +
-          '<button class="' + (learnSortMode === "name" ? "active" : "") + '" type="button" data-learn-sort="name">Name</button>' +
-          '<button class="' + (learnSortMode === "updated" ? "active" : "") + '" type="button" data-learn-sort="updated">Updated</button>' +
-          '<button class="' + (learnSortMode === "usage" ? "active" : "") + '" type="button" data-learn-sort="usage">Usage Score</button>' +
-        '</div><span class="ux-results-count">' + fmtNum(visibleItems.length) + ' results</span></div>' +
         '<div class="learn-folder-workspace">' +
-          '<div class="learn-folder-list"><div class="learn-folder-list-head"><span>Name</span><span>Usage Score</span><span>Updated</span></div><div class="learn-folder-list-scroll">' + rowsHtml + '</div></div>' +
+          '<div class="learn-folder-list"><div class="learn-folder-list-head" role="group" aria-label="Sort memories">' +
+            [['name','Name'],['usage','Usage Score'],['updated','Updated']].map(([key,label]) =>
+              '<button type="button" data-learn-sort="' + key + '" aria-pressed="' + (learnSortMode === key) +
+              '" class="learn-column-sort' + (learnSortMode === key ? ' active' : '') +
+              '" aria-label="Sort by ' + esc(label) + '">' + esc(label) +
+              (learnSortMode === key ? ' <span aria-hidden="true">' + (learnSortDirection === "asc" ? "↑" : "↓") + '</span>' : '') +
+              '</button>').join('') +
+          '</div><div class="learn-folder-list-scroll">' + rowsHtml + '</div></div>' +
           '<aside class="learn-detail-pane">' + detailHtml + '</aside>' +
         '</div>' +
       '</div>' +
@@ -1233,7 +1225,11 @@ function renderLearnProfile({ patch = false } = {}) {
 
   document.querySelectorAll("[data-learn-sort]").forEach((button) => {
     button.onclick = () => {
-      learnSortMode = button.dataset.learnSort || "name";
+      const key = button.dataset.learnSort || "name";
+      learnSortDirection = key === learnSortMode ? (learnSortDirection === "asc" ? "desc" : "asc") :
+        key === "name" ? "asc" : "desc";
+      learnSortMode = key;
+      learnSortExplicit = true;
       renderLearnProfile({ patch: true });
     };
   });

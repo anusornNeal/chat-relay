@@ -13,6 +13,7 @@ export function createUsageWorkspace({
   let sortBy = "calls";
   let sortDirection = "desc";
   const expandedIds = new Set();
+  const expandedMetricsIds = new Set();
   const loadingKeys = new Set();
   const detailErrors = new Map();
   let loadSequence = 0;
@@ -47,45 +48,61 @@ export function createUsageWorkspace({
   }
 
   function renderTimeline(summary, account) {
-    const period=summary.period||currentPeriod();
-    const daily=toolCallSeries(summary.buckets,period);
-    const byHour=period.range==="today";
-    const byWeek=period.range==="7d";
-    const max=Math.max(1,...daily.map(row=>row.calls));
-    const sum=Number.isFinite(Number(summary.usage?.calls))?Number(summary.usage.calls):daily.reduce((n,row)=>n+row.calls,0);
-    const shortDay=new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Bangkok",weekday:"short"});
-    const visualization=byHour
-      ? '<div class="ledger-hour-chart">'+renderHourlyChart(summary.buckets || [],period)+'</div>'
-      : byWeek
-      ? '<div class="daily-bars" role="list" aria-label="Tool Calls by day">' +
-        daily.map((row)=>{
-          const date=new Date(row.from),height=row.calls?Math.max(4,row.calls/max*100):0;
-          const label=bkkFull.format(date);
-          return '<div class="daily-column" role="listitem" aria-label="'+esc(label+": "+fmtNum(row.calls)+" Tool Calls")+'">' +
-            '<strong>'+fmtNum(row.calls)+'</strong><div class="daily-bar-area" aria-hidden="true"><span style="height:'+height.toFixed(2)+'%"></span></div>' +
-            '<span>'+esc(shortDay.format(date))+'</span><small>'+esc(bkkDate.format(date))+'</small></div>';
-        }).join("")+'</div>'
-      : '<div class="daily-table-scroll"><table class="daily-table"><caption class="sr-only">Tool Calls by '+(byHour?'hour':'day')+'</caption>' +
-        '<thead><tr><th scope="col">'+(byHour?'Time':'Date')+' (BKK)</th><th scope="col">Tool Calls</th></tr></thead><tbody>' +
-        daily.map(row=>'<tr class="ledger-day-row"><th scope="row" class="ledger-day-label">'+
-          esc(byHour?bkkTime.format(new Date(row.from)):bkkFull.format(new Date(row.from)))+
-          '</th><td class="ledger-day-value">'+fmtNum(row.calls)+'</td></tr>').join("")+'</tbody></table></div>';
-    const metrics=summary.usage||{};
-    const agentRows=agentsFor(account).map(agent=>'<div class="ledger-agent-row"><div><strong>'+esc(agent.name||agent.agentId)+'</strong>' +
-      '<span>'+esc(agent.agentId)+'</span></div><strong>'+fmtNum(agent.calls)+'</strong></div>').join("");
-    return '<div class="ledger-expanded-inner"><div class="ledger-timeline-top"><div><h3>'+
-      (byWeek?'Last 7 days':byHour?'Today by hour':'Daily Tool Calls')+'</h3></div>' +
-      '<div class="ledger-detail-total"><strong>'+fmtNum(sum)+'</strong><span>Total</span></div></div>' +
-      visualization+
-      '<div class="ledger-disclosures"><details><summary>Agents <span>'+fmtNum(agentsFor(account).length)+'</span></summary>' +
-        '<div class="ledger-agent-list">'+(agentRows||'<p class="ledger-muted">No agents</p>')+'</div></details>'+
-      '<details><summary>Performance <span>Advanced</span></summary><div class="ledger-diagnostic-grid">'+
-      [['Avg latency',fmtMs(metrics.avgDurationMs)],['p95 latency',fmtMs(metrics.p95DurationMs)],
-       ['Errors',fmtNum(metrics.operationalErrors||0)],['Error rate',fmtPct(metrics.operationalErrorRate)]]
-        .map(([label,value])=>'<div><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong></div>').join("")+
-      '</div></details></div>'+
-      (summary.bounded===true?'<p class="ledger-caveat">Partial history</p>':'')+
-      adminControls(account)+'</div>';
+    const period = summary.period || currentPeriod();
+    const daily = toolCallSeries(summary.buckets, period);
+    const byHour = period.range === "today";
+    const monthly = period.range === "30d";
+    const max = Math.max(1, ...daily.map(row => row.calls));
+    const total = Number.isFinite(Number(summary.usage?.calls)) ? Number(summary.usage.calls) :
+      daily.reduce((sum,row) => sum + row.calls,0);
+    const shortDay = new Intl.DateTimeFormat("en-GB", {timeZone:"Asia/Bangkok",weekday:"short"});
+    const visualization = byHour
+      ? '<div class="ledger-hour-chart">' + renderHourlyChart(summary.buckets || [], period) + '</div>'
+      : '<div class="daily-bars' + (monthly ? ' thirty' : '') + '" role="list" aria-label="Tool Calls by day">' +
+        daily.map((row,index) => {
+          const date = new Date(row.from);
+          const label = bkkFull.format(date);
+          const height = row.calls ? Math.max(4,row.calls/max*100) : 0;
+          const showTick = !monthly || index % 5 === 0 || index === daily.length-1;
+          const amount = showTick ? fmtNum(row.calls) : ' ';
+          return '<div class="daily-column" tabindex="0" role="listitem" title="' +
+            esc(label + ': ' + fmtNum(row.calls) + ' Tool Calls') + '" aria-label="' +
+            esc(label + ': ' + fmtNum(row.calls) + ' Tool Calls') + '">' +
+            '<strong>' + amount + '</strong><div class="daily-bar-area" aria-hidden="true"><span style="height:' +
+            height.toFixed(2) + '%"></span></div>' +
+            '<span aria-hidden="true">' + (showTick ? esc(shortDay.format(date)) : ' ') + '</span>' +
+            '<small aria-hidden="true">' + (showTick ? esc(bkkDate.format(date)) : ' ') + '</small></div>';
+        }).join('') + '</div>';
+    const metrics = summary.usage || {};
+    const metricsOpen = expandedMetricsIds.has(account.userId);
+    const agentRows = agentsFor(account).map(agent => {
+      const state = agent.online === true ? "online" : agent.online === false ? "offline" : "unknown";
+      const statusText = state === "online" ? "Online" : state === "offline" ? "Offline" : "Status unavailable";
+      return '<div class="ledger-agent-row"><div class="ledger-agent-name"><strong>' +
+        esc(agent.name || agent.agentId) + '</strong><small>' + esc(agent.agentId) + '</small></div>' +
+        '<span class="ledger-agent-status ' + state + '"><i aria-hidden="true"></i>' +
+        statusText + '</span><strong class="ledger-agent-calls">' + fmtNum(agent.calls) + '</strong></div>';
+    }).join('');
+    const performance = [['Avg latency',fmtMs(metrics.avgDurationMs)],['p95 latency',fmtMs(metrics.p95DurationMs)],
+      ['Errors',fmtNum(metrics.operationalErrors || 0)],['Error rate',fmtPct(metrics.operationalErrorRate)]]
+      .map(([label,value])=>'<div><span>' + esc(label) + '</span><strong>' + esc(value) + '</strong></div>').join('');
+    const toggle = (label,meta) => '<button type="button" class="ledger-metrics-button" data-ledger-metrics="' +
+      esc(account.userId) + '" aria-expanded="' + metricsOpen + '">' +
+      '<span>' + esc(label) + '</span><span class="ledger-metrics-meta">' + esc(meta) + '</span>' +
+      '<span class="ledger-metrics-chevron" aria-hidden="true">' + (metricsOpen ? '−' : '+') + '</span></button>';
+    return '<div class="ledger-expanded-inner"><div class="ledger-timeline-top"><div><h3>' +
+      (byHour ? 'Today by hour' : monthly ? 'Last 30 days' : 'Last 7 days') + '</h3></div>' +
+      '<div class="ledger-detail-total"><strong>' + fmtNum(total) + '</strong><span>Total</span></div></div>' +
+      visualization +
+      '<div class="ledger-disclosures">' +
+      '<section class="ledger-metrics-card">' + toggle('Agents',fmtNum(agentsFor(account).length)) +
+      (metricsOpen ? '<div class="ledger-agent-list">' + (agentRows || '<p class="ledger-muted">No agents</p>') + '</div>' : '') +
+      '</section>' +
+      '<section class="ledger-metrics-card">' + toggle('Performance','Details') +
+      (metricsOpen ? '<div class="ledger-diagnostic-grid">' + performance + '</div>' : '') +
+      '</section></div>' +
+      (summary.bounded === true ? '<p class="ledger-caveat">Partial history</p>' : '') +
+      adminControls(account) + '</div>';
   }
 
   function renderExpanded(account) {
@@ -110,6 +127,7 @@ export function createUsageWorkspace({
     const total = accounts.reduce((sum, x) => sum + Math.max(0, Number(x.calls || 0)), 0);
     const allAgents = new Set(accounts.flatMap((entry) => agentsFor(entry).map((agent) => agent.agentId)));
     const members = accounts.length;
+    const highestCalls = Math.max(1,...accounts.map(account => Math.max(0,Number(account.calls || 0))));
     const admin = isAdmin();
     const header = scopeTitle();
     setHeader(header, "");
@@ -124,7 +142,10 @@ export function createUsageWorkspace({
           '<span class="ledger-rank" aria-hidden="true">' + String(index+1).padStart(2,'0') + '</span>' +
           '<span class="ledger-person-name"><strong>' + esc(titleFor(account)) + '</strong><span>' + esc(account.login || account.userId) + '</span></span>' +
           icon("chevron") + '</button></th>' +
-        '<td class="ledger-numeric ledger-call-count">' + fmtNum(calls) + '</td>' +
+        '<td class="ledger-numeric ledger-call-count"><span class="ledger-call-visual">' +
+          '<span class="ledger-volume-track" aria-hidden="true"><i style="width:' +
+          (calls/highestCalls*100).toFixed(2) + '%"></i></span><strong>' + fmtNum(calls) +
+          '</strong></span></td>' +
 
         '<td class="ledger-numeric ledger-agent-count">' + fmtNum(agentCount) + '</td>' +
       '</tr>' + (open ? '<tr class="ledger-detail-row"><td colspan="' + 3 +
@@ -186,6 +207,12 @@ export function createUsageWorkspace({
         if (expandedIds.has(nextId)) void loadDetails(nextId);
       };
     });
+    document.querySelectorAll("[data-ledger-metrics]").forEach((button) => button.onclick = () => {
+      const id = button.dataset.ledgerMetrics;
+      if (expandedMetricsIds.has(id)) expandedMetricsIds.delete(id);
+      else expandedMetricsIds.add(id);
+      render({patch:true});
+    });
     document.querySelectorAll("[data-ledger-retry]").forEach((button) => button.onclick = () =>
       void loadDetails(button.dataset.ledgerRetry, true));
     document.querySelectorAll("[data-ledger-delete],[data-ledger-restore]").forEach((button) => {
@@ -201,6 +228,7 @@ export function createUsageWorkspace({
           await api(restoring ? "/admin/api/users/restore" : "/admin/api/users/soft-delete",
             {method:"POST",body:JSON.stringify({userId})});
           expandedIds.delete(userId);
+          expandedMetricsIds.delete(userId);
           await load({patch:true});
         } catch {
           button.disabled = false;
@@ -260,6 +288,7 @@ export function createUsageWorkspace({
     const accounts = Array.isArray(response.accounts) ? response.accounts : [];
     const accountIds=new Set(accounts.map(account=>account.userId));
     for(const id of expandedIds) if(!accountIds.has(id)) expandedIds.delete(id);
+    for(const id of expandedMetricsIds) if(!accountIds.has(id)) expandedMetricsIds.delete(id);
     if(!isAdmin() && accounts[0]) expandedIds.add(accounts[0].userId);
     render({patch});
     for(const id of expandedIds) if(!detailsCache.has(cacheKey(id)) && !inFlight.has(cacheKey(id))) void loadDetails(id);

@@ -36,7 +36,7 @@ test("mock data is isolated from production assets and all data actions use exis
   assert.match(app, /\/admin\/api\/summary/);
   assert.match(usage, /\/admin\/api\/overview/);
   assert.match(app, /\/admin\/api\/learn/);
-  assert.match(app, /encodeURIComponent\(overviewUserId\)/);
+  assert.doesNotMatch(app, /overview-user-filter|overviewUserId/);
   assert.match(app, /const esc = /);
   assert.match(app, /credentials: "same-origin"/);
   assert.match(app, /"x-csrf-token"/);
@@ -60,7 +60,10 @@ test("Overview is first, normal users have no redundant Usage page", () => {
   assert.match(app, /if \(!navItems\(\)\.some\(\(\[id\]\) => id === activeView\)\) activeView = "overview"/);
   assert.doesNotMatch(usage, /SHARE OF LISTED|100% of listed Tool Calls/);
   assert.match(usage, /daily-bars/);
-  assert.match(usage, /daily-table/);
+  assert.match(usage, /daily-bars/);
+  assert.match(usage, /monthly \? ' thirty'/);
+  assert.match(usage, /data-ledger-metrics/);
+  assert.match(usage, /ledger-agent-status/);
 });
 
 test("independent Usage details reuse Overview's hourly chart without redundant controls", () => {
@@ -73,4 +76,18 @@ test("independent Usage details reuse Overview's hourly chart without redundant 
   assert.doesNotMatch(usage,/data-ledger-refresh|data-ledger-timeline|Open overview/);
   assert.match(css,/\.learn-review-board>\.learn-folder-tree\{[\s\S]*?position:static/);
   assert.doesNotMatch(app,/id="learnScopeToggle"|id="learnSearchTop"/);
+});
+
+test("usage status and linked account panels are grounded and the Learn sort strip is gone", () => {
+  assert.doesNotMatch(app, /overview-user-filter|overviewUserId/);
+  assert.match(usage, /const expandedMetricsIds = new Set\(\)/);
+  assert.match(usage, /data-ledger-metrics/);
+  assert.match(usage, /agent\.online === true/);
+  assert.match(usage, /agent\.online === false/);
+  assert.match(usage, /Status unavailable/);
+  assert.match(usage, /daily-bars/);
+  assert.match(usage, /monthly \? ' thirty'/);
+  assert.match(app, /learn-column-sort/);
+  assert.match(app, /learnSortDirection/);
+  assert.doesNotMatch(app, /class="learn-folder-sort"/);
 });

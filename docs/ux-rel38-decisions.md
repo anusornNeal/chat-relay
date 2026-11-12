@@ -57,3 +57,14 @@ The navigation layout, color palette, exact density and scope drawer are design 
 - NN/g, charts and graphs on dashboards: https://www.nngroup.com/articles/dashboards-preattentive/
 
 These are design references, not claims that copying their appearance guarantees better task performance. This round deliberately removes redundant controls and text rather than adding new dashboard features.
+
+## Feedback round: 6 production-facing refinements
+
+1. **Overview:** remove the admin User dropdown and selected-user state/API parameter entirely. This page is the system overview; per-user comparison belongs in Usage.
+2. **Usage density:** keep the same three-column table, bound its maximum width and center it. Fill the numeric column with a subtle Tool Calls magnitude track (relative to the largest listed user, without a redundant percent). No added API requests.
+3. **Agent online state:** display a small Online/Offline indicator only when the source returns an explicit boolean. A missing runtime status is shown as 'Status unavailable', not falsely labeled Offline. The admin API uses tri-state for agents excluded from bounded online lookups.
+4. **30 days:** use the same daily vertical-bar visual grammar as 7 days; 30 bars show spaced axis labels every 5 days plus the last. All 30 days expose exact counts in tooltips and keyboard-readable labels.
+5. **Linked details:** Agents and Performance expand or collapse together from either header. State is independent for each account and retained on time-range rerenders.
+6. **My Learn:** remove the duplicate Name/Updated/Usage Score sort strip. Actual column headings are keyboard-accessible buttons with direction indicators; explicit sorting overrides default review-priority ordering. Folder Explorer remains visible on desktop.
+
+Browser QA should verify 19 admin/user screens, Today/7d/30d values, linked detail panels, both known online/offline statuses, and absence of the Overview dropdown. All changes remain on the local REL-38 feature branch pending design review.

@@ -875,7 +875,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
           agentId,
           name: agent?.name || agentId,
           calls: Number(usageByUserAgent.get(JSON.stringify([user.id, agentId])) || 0),
-          online: onlineByAgentId.get(agentId) === true,
+          online: onlineByAgentId.has(agentId) ? onlineByAgentId.get(agentId) : null,
         };
       }).sort((a, b) => b.calls - a.calls || String(a.name).localeCompare(String(b.name)));
 
