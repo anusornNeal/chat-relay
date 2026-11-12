@@ -51,19 +51,17 @@ export function createUsageWorkspace({
     const byHour = period.range === "today";
     const monthly = period.range === "30d";
     const weekly = period.range === "7d";
-    const averageProfile = summary.hourlyAverage;
-    const hasAverage = weekly && averageProfile?.intervalHours === 4 && averageProfile?.days === 7 &&
-      Array.isArray(averageProfile.buckets) && averageProfile.buckets.length === 6;
+    const timeline = summary.fourHourTimeline;
+    const hasTimeline = weekly && timeline?.intervalHours === 4 && timeline?.days === 7 &&
+      Array.isArray(timeline.buckets) && timeline.buckets.length === 42;
     const total = Number.isFinite(Number(summary.usage?.calls)) ? Number(summary.usage.calls) :
       (summary.buckets || []).reduce((sum,row) => sum + Number(row.calls || 0),0);
-    // The 7-day chart uses six four-hour averages from real hourly SQL usage;
-    // never fabricate an hourly shape from daily totals when unavailable.
-    const visualization = weekly && !hasAverage
-      ? '<div class="ledger-inline-error" role="status">Hourly averages are unavailable for this history.</div>'
-      : '<div class="ledger-activity-chart">' + renderActivityChart(
-        weekly ? averageProfile.buckets : summary.buckets || [], period,
-        weekly ? { profile4h: true } : undefined,
-      ) + '</div>';
+    // Each of the seven days retains six chronological four-hour buckets.
+    // Old history without hourly detail falls back to real daily counts.
+    const visualization = '<div class="ledger-activity-chart">' + renderActivityChart(
+      hasTimeline ? timeline.buckets : summary.buckets || [], period,
+      hasTimeline ? { profile4h: true } : undefined,
+    ) + '</div>';
     const metrics = summary.usage || {};
     const metricsOpen = expandedMetricsIds.has(account.userId);
     const agentRows = agentsFor(account).map(agent => {
@@ -82,8 +80,10 @@ export function createUsageWorkspace({
       '<span>' + esc(label) + '</span><span class="ledger-metrics-meta">' + esc(meta) + '</span>' +
       '<span class="ledger-metrics-chevron" aria-hidden="true">' + (metricsOpen ? '−' : '+') + '</span></button>';
     return '<div class="ledger-expanded-inner"><div class="ledger-timeline-top"><div><h3>' +
-      (byHour ? 'Today by hour' : monthly ? 'Last 30 days' : '7-day hourly average') +
-      '</h3>' + (weekly ? '<p class="ledger-chart-subtitle">4-hour windows · avg per day over 7 days (including today)</p>' : '') + '</div>' +
+      (byHour ? 'Today by hour' : monthly ? 'Last 30 days' : 'Last 7 days') +
+      '</h3>' + (weekly ? '<p class="ledger-chart-subtitle">' +
+        (hasTimeline ? '7 days · 4-hour intervals · Bangkok time' : 'Daily totals · detailed hourly history unavailable') +
+        '</p>' : '') + '</div>' +
       '<div class="ledger-detail-total"><strong>' + fmtNum(total) + '</strong><span>Total</span></div></div>' +
       visualization +
       '<div class="ledger-disclosures">' +

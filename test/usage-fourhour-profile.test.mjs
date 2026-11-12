@@ -11,7 +11,7 @@ const { UsageAggregates } = await import(
   "data:text/javascript;base64," + Buffer.from(bundle.outputFiles[0].text).toString("base64")
 );
 
-test("7d four-hour average comes from recorded hourly counts, retains daily totals, and uses no extra SQL query", async () => {
+test("7d chronological four-hour buckets preserve every day, privacy, daily totals and SQL budget", async () => {
   const db = new DatabaseSync(":memory:");
   let sqlCount = 0;
   const storage = {
@@ -60,15 +60,21 @@ test("7d four-hour average comes from recorded hourly counts, retains daily tota
     assert.equal(profiled.metric.calls, 50);
     assert.deepEqual(profiled.buckets.map(bucket=>bucket.calls),[14,6,6,6,6,6,6]);
     assert.deepEqual(profiled.buckets.map(bucket=>bucket.calls),regular.buckets.map(bucket=>bucket.calls));
-    assert.equal(profiled.hourlyAverage.days,7);
-    assert.equal(profiled.hourlyAverage.intervalHours,4);
-    assert.deepEqual(profiled.hourlyAverage.buckets.map(bucket=>bucket.totalCalls),[7,7,15,7,7,7]);
-    assert.equal(profiled.hourlyAverage.buckets.reduce((total,bucket)=>total+bucket.totalCalls,0),50);
-    assert.equal(profiled.hourlyAverage.buckets[2].totalCalls/7,15/7);
-    assert.equal(regular.hourlyAverage,null, "Overview must not request this per-user profile");
+    assert.equal(profiled.fourHourTimeline.days,7);
+    assert.equal(profiled.fourHourTimeline.intervalHours,4);
+    const timeline=profiled.fourHourTimeline.buckets;
+    assert.equal(timeline.length,42, "must preserve six actual 4-hour windows for all seven dates");
+    assert.deepEqual(timeline.slice(0,6).map(bucket=>bucket.calls),[1,1,9,1,1,1]);
+    assert.deepEqual(timeline.slice(6,12).map(bucket=>bucket.calls),[1,1,1,1,1,1]);
+    assert.deepEqual(Array.from({length:7},(_,day)=>timeline.slice(day*6,day*6+6).reduce((sum,b)=>sum+b.calls,0)),[14,6,6,6,6,6,6]);
+    assert.equal(timeline.reduce((total,bucket)=>total+bucket.calls,0),50);
+    assert.deepEqual(timeline.map(bucket=>bucket.from), [...timeline.map(bucket=>bucket.from)].sort(), "chronological slots");
+    assert.equal(regular.fourHourTimeline,null, "Overview must not request this per-user timeline");
     const bob = await agg.window(from,to,{userId:"bob"},true,true);
     assert.equal(bob.metric.calls,3);
-    assert.deepEqual(bob.hourlyAverage.buckets.map(bucket=>bucket.totalCalls),[0,0,3,0,0,0]);
+    assert.equal(bob.fourHourTimeline.buckets.length,42);
+    assert.deepEqual(bob.fourHourTimeline.buckets.slice(0,6).map(bucket=>bucket.calls),[0,0,3,0,0,0]);
+    assert.equal(bob.fourHourTimeline.buckets.slice(6).reduce((sum,b)=>sum+b.calls,0),0);
   } finally {
     db.close();
   }

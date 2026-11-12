@@ -49,7 +49,7 @@ test("Review and investigation handlers cannot retain stale selection after DOM 
   assert.doesNotMatch(app, /learnRefineMemory"\)\?\.addEventListener/);
   assert.match(usage, /data-ledger-user/);
   assert.match(usage, /expandedIds\.has\(account\.userId\)/);
-  assert.match(usage, /weekly \? averageProfile\.buckets/);
+  assert.match(usage, /hasTimeline \? timeline\.buckets/);
   assert.doesNotMatch(usage, /data-ledger-refresh|data-ledger-timeline/);
   assert.match(usage, /if \(sequence !== loadSequence\) return/);
 });
@@ -84,7 +84,7 @@ test("usage status and linked account panels are grounded and the Learn sort str
   assert.match(usage, /agent\.online === true/);
   assert.match(usage, /agent\.online === false/);
   assert.match(usage, /Status unavailable/);
-  assert.match(usage, /weekly \? averageProfile\.buckets/);
+  assert.match(usage, /hasTimeline \? timeline\.buckets/);
   assert.doesNotMatch(usage, /daily-bars|daily-column/);
   assert.match(app, /learn-column-sort/);
   assert.match(app, /learnSortDirection/);
@@ -113,17 +113,21 @@ test("clicking anywhere on a user row expands it exactly once, while the name re
   assert.match(css, /\.ledger-person-row\{cursor:pointer\}/);
 });
 
-test("7d selected user average uses six real four-hour aggregates, not daily interpolation", () => {
+test("7d selected user chart retains all seven dates with six recorded four-hour buckets each", () => {
   const aggregates = readFileSync(new URL("../src/usage-aggregates.ts", import.meta.url), "utf8");
   const routes = readFileSync(new URL("../src/admin.ts", import.meta.url), "utf8");
   assert.match(usage, /range === "7d" \? "&profile=4h"/);
-  assert.match(usage, /averageProfile\.buckets\.length === 6/);
+  assert.match(usage, /timeline\.buckets\.length === 42/);
   assert.match(app, /profile4h \? items : chartDisplayBuckets/);
   assert.match(app, /chart-profile-4h/);
-  assert.match(aggregates, /fourHourTotals/);
+  assert.match(aggregates, /fourHourRows/);
   assert.match(aggregates, /profile4h \? \{/);
   assert.match(routes, /selectedUserId\)\)/);
   assert.match(css, /\.chart-profile-4h \.bar-fill/);
   assert.match(usage, /ledger-row-chevron/);
+  assert.match(aggregates, /length: 42/);
+  assert.match(app, /Array.from\(\{ length: 7 \}/);
+  assert.match(css, /\.chart-tooltip\{top:14px;bottom:auto/);
+  assert.doesNotMatch(app + usage, /avg calls\/day|hourlyAverage|averageProfile/);
   assert.doesNotMatch(usage, /icon\("chevron"\) \+ '<\/button>/);
 });

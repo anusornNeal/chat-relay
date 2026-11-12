@@ -122,10 +122,6 @@ input:focus,select:focus,button:focus-visible,[data-detail-id]:focus-visible{bor
 .chart-tooltip span{color:#e2e6e9}
 .chart-tooltip small{color:#aab2ba;margin-top:1px}
 .chart-bar:hover .chart-tooltip,.chart-bar:focus-visible .chart-tooltip{opacity:1;visibility:visible;transform:translate(-50%,0)}
-.chart-bar:first-child .chart-tooltip{left:0;transform:translate(0,8px)}
-.chart-bar:first-child:hover .chart-tooltip,.chart-bar:first-child:focus-visible .chart-tooltip{transform:translate(0,0)}
-.chart-bar:last-child .chart-tooltip{left:auto;right:0;transform:translate(0,8px)}
-.chart-bar:last-child:hover .chart-tooltip,.chart-bar:last-child:focus-visible .chart-tooltip{transform:translate(0,0)}
 .input-with-icon>.icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:#89929c;pointer-events:none}
 
 table{width:100%;border-collapse:collapse;font-size:12px;min-width:760px}
@@ -549,9 +545,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .learn-review-board .ux-focus-tab{color:#64748b;font-size:11px}
 .learn-review-board .ux-focus-tab.active{background:#eef2ff;color:#3730a3;box-shadow:none}
 .learn-review-board .ux-focus-tab.active span{color:#4f46e5}
-.learn-review-board .learn-folder-list-toolbar{
- height:42px;padding:0 18px;border:0;background:#fff
-}
 .learn-review-board .learn-folder-workspace{
  min-height:0;border:0;border-top:1px solid var(--line);border-radius:0;
  grid-template-columns:minmax(275px,43%) minmax(0,1fr)
@@ -577,7 +570,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 @media(max-width:550px){
  .learn-review-board .learn-folder-heading{padding:12px}
  .learn-review-board .ux-learn-focus{padding:8px 12px}
- .learn-review-board .learn-folder-list-toolbar{padding:0 12px}
 }
 
 /* Usage: compact, readable aligned metrics; expand any number of rows. */
@@ -591,7 +583,6 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .ledger-table thead th:first-child{width:42%}
 .ledger-table thead th:nth-child(2){width:37%}
 .ledger-table thead th:nth-child(3){width:21%}
-.ledger-day-value{font-variant-numeric:tabular-nums}
 @media(max-width:650px){
  .ledger-table{table-layout:auto}
  .ledger-activity-chart{overflow-x:auto}
@@ -765,7 +756,7 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .ledger-metrics-card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;min-width:0;overflow:hidden}
 .ledger-metrics-button{display:flex;align-items:center;justify-content:space-between;gap:9px;width:100%;background:transparent;border:0;padding:12px 13px;min-height:40px;text-align:left;color:#334155;font-size:11px;font-weight:700;cursor:pointer}
 .ledger-metrics-button:hover{background:#f8fafc}
-.ledger-metrics-button:focus-visible,.daily-column:focus-visible{outline:2px solid #4f46e5;outline-offset:-2px}
+.ledger-metrics-button:focus-visible{outline:2px solid #4f46e5;outline-offset:-2px}
 .ledger-metrics-button[aria-expanded=true]{border-bottom:1px solid #f1f5f9;background:#fafbff}
 .ledger-metrics-meta{margin-left:auto;color:#94a3b8;font-size:10px;font-weight:550}
 .ledger-metrics-chevron{width:14px;color:#6366f1;text-align:center;font-size:14px}
@@ -801,13 +792,37 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 }
 
 
-/* Seven-day profile: six wide four-hour bars using the shared chart renderer. */
-.ledger-activity-chart .chart-profile-4h .chart-bars{gap:15px}
-.ledger-activity-chart .chart-profile-4h .bar-fill{width:min(114px,82%);min-width:16px}
 .ledger-chart-subtitle{margin:4px 0 0;color:#64748b;font-size:10px;line-height:1.4}
 .ledger-agent-final{display:flex;align-items:center;justify-content:flex-end;gap:15px;white-space:nowrap}
 .ledger-row-chevron{display:inline-flex;align-items:center;justify-content:center;color:#94a3b8;flex:0 0 16px}
 .ledger-row-chevron .icon{width:13px;height:13px;transform:rotate(90deg)}
 .ledger-person-row.selected .ledger-row-chevron .icon{transform:rotate(-90deg);color:#4f46e5}
 .ledger-person-row:hover .ledger-row-chevron{color:#4f46e5}
-@media(max-width:640px){.ledger-agent-final{gap:6px}.ledger-activity-chart .chart-profile-4h .chart-bars{gap:6px}}
+@media(max-width:640px){.ledger-agent-final{gap:6px}}
+
+
+/* Keep every tooltip within the plot: tall bars must never push it above the frame. */
+.chart-tooltip{top:14px;bottom:auto;width:188px;max-width:calc(100vw - 32px);min-width:0;box-sizing:border-box}
+.chart-bar:nth-child(-n+8) .chart-tooltip{left:0;right:auto;transform:translate(0,8px)}
+.chart-bar:nth-child(-n+8):hover .chart-tooltip,
+.chart-bar:nth-child(-n+8):focus-visible .chart-tooltip{transform:translate(0,0)}
+.chart-bar:nth-last-child(-n+8) .chart-tooltip{left:auto;right:0;transform:translate(0,8px)}
+.chart-bar:nth-last-child(-n+8):hover .chart-tooltip,
+.chart-bar:nth-last-child(-n+8):focus-visible .chart-tooltip{transform:translate(0,0)}
+/* Six chronological four-hour windows per Bangkok date, seven labelled days. */
+.ledger-activity-chart .chart-profile-4h .chart-bars{gap:2px}
+.ledger-activity-chart .chart-profile-4h .bar-fill{width:min(21px,84%);min-width:3px;border-radius:5px 5px 2px 2px}
+.chart-profile-4h .chart-bar:nth-child(6n+1):not(:first-child)::before{
+ content:"";position:absolute;left:-2px;top:3px;bottom:0;border-left:1px dashed #cbd5e1;pointer-events:none
+}
+.chart-profile-4h .chart-x-axis span{font-weight:650;color:#6b7280;font-size:10px}
+.chart-profile-4h .chart-bar:nth-child(-n+14) .chart-tooltip{left:0;right:auto;transform:translate(0,8px)}
+.chart-profile-4h .chart-bar:nth-child(-n+14):hover .chart-tooltip,
+.chart-profile-4h .chart-bar:nth-child(-n+14):focus-visible .chart-tooltip{transform:translate(0,0)}
+.chart-profile-4h .chart-bar:nth-last-child(-n+14) .chart-tooltip{left:auto;right:0;transform:translate(0,8px)}
+.chart-profile-4h .chart-bar:nth-last-child(-n+14):hover .chart-tooltip,
+.chart-profile-4h .chart-bar:nth-last-child(-n+14):focus-visible .chart-tooltip{transform:translate(0,0)}
+@media(max-width:640px){
+ .ledger-activity-chart .chart-profile-4h .chart-bars{gap:1px}
+ .chart-profile-4h .chart-x-axis span{font-size:9px}
+}

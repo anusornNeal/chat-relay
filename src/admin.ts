@@ -271,12 +271,12 @@ async function usageWindow(
   period: ReturnType<typeof dashboardPeriod>,
   userId?: string,
   includeDetails = false,
-  includeHourlyProfile = false,
+  includeFourHourTimeline = false,
 ) {
   const query = new URLSearchParams({ from: period.from, to: period.to });
   if (userId) query.set("userId", userId);
   if (includeDetails) query.set("details", "1");
-  if (includeHourlyProfile) query.set("profile", "4h");
+  if (includeFourHourTimeline) query.set("profile", "4h");
   const response = await usageStub(env).fetch("https://usage.internal/window?" + query);
   if (!response.ok) throw new Error("usage_window_failed");
   return response.json<any>();
@@ -747,7 +747,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
         period,
         usage: usage.metric ?? null,
         buckets: usage.buckets ?? [],
-        hourlyAverage: profile4h ? usage.hourlyAverage ?? null : undefined,
+        fourHourTimeline: profile4h ? usage.fourHourTimeline ?? null : undefined,
         topTools: usage.topTools ?? [],
         accountUsage: usage.users ?? [],
         bounded: usage.bounded === true,
@@ -797,7 +797,7 @@ export async function handleAdmin(request: Request, env: AdminEnv): Promise<Resp
       grants: { total: (state.grants ?? []).length },
       usage: usage.metric ?? null,
       buckets: usage.buckets ?? [],
-      hourlyAverage: profile4h ? usage.hourlyAverage ?? null : undefined,
+      fourHourTimeline: profile4h ? usage.fourHourTimeline ?? null : undefined,
       topTools: usage.topTools ?? [],
       accountUsage,
       bounded: usage.bounded === true,
