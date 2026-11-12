@@ -5,22 +5,21 @@ import { usageDirectory, toolCallSeries } from "./ux-insights.js";
 export function createUsageWorkspace({
   api, renderContent, setHeader, setNotice, isAdmin, isActive, getCurrentUser, getRange,
   setRange, setPeriod, periodChips, periodDisplayLabel, icon, esc,
-  fmtNum, fmtMs, fmtPct, openOverview,
+  fmtNum, fmtMs, fmtPct, renderHourlyChart,
 }) {
   let snapshot = null;
   let mode = "active";
   let query = "";
   let sortBy = "calls";
   let sortDirection = "desc";
-  let selectedId = "";
-  let loadingDetails = "";
-  let detailError = "";
+  const expandedIds = new Set();
+  const loadingKeys = new Set();
+  const detailErrors = new Map();
   let loadSequence = 0;
   const detailsCache = new Map();
   const inFlight = new Set();
   const bkkDate = new Intl.DateTimeFormat("en-GB", {timeZone: "Asia/Bangkok", day: "numeric", month: "short"});
   const bkkFull = new Intl.DateTimeFormat("en-GB", {timeZone: "Asia/Bangkok", weekday: "short", day: "numeric", month: "short"});
-  const bkkTime = new Intl.DateTimeFormat("en-GB", {timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit", hour12: false});
 
   const titleFor = (account) => String(account.name || account.login || account.userId || "Unknown");
   const agentsFor = (account) => Array.isArray(account.agents) ? account.agents : [];
@@ -38,7 +37,7 @@ export function createUsageWorkspace({
     const arranged = usageDirectory(items, query, sortBy);
     return sortDirection === "asc" ? arranged.reverse() : arranged;
   };
-  const activeCache = () => detailsCache.get(cacheKey(selectedId));
+  const activeCache = (userId) => detailsCache.get(cacheKey(userId));
 
   function adminControls(account) {
     if (!isAdmin() || account.userId === getCurrentUser()?.id) return "";
@@ -55,7 +54,9 @@ export function createUsageWorkspace({
     const max=Math.max(1,...daily.map(row=>row.calls));
     const sum=Number.isFinite(Number(summary.usage?.calls))?Number(summary.usage.calls):daily.reduce((n,row)=>n+row.calls,0);
     const shortDay=new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Bangkok",weekday:"short"});
-    const visualization=byWeek
+    const visualization=byHour
+      ? '<div class="ledger-hour-chart">'+renderHourlyChart(summary.buckets || [],period)+'</div>'
+      : byWeek
       ? '<div class="daily-bars" role="list" aria-label="Tool Calls by day">' +
         daily.map((row)=>{
           const date=new Date(row.from),height=row.calls?Math.max(4,row.calls/max*100):0;
@@ -84,8 +85,6 @@ export function createUsageWorkspace({
         .map(([label,value])=>'<div><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong></div>').join("")+
       '</div></details></div>'+
       (summary.bounded===true?'<p class="ledger-caveat">Partial history</p>':'')+
-      '<div class="ledger-expanded-actions"><button type="button" class="ledger-link" data-ledger-refresh="'+esc(account.userId)+'">Refresh</button>'+
-      '<button type="button" class="ledger-link" data-ledger-timeline="'+esc(account.userId)+'">Open overview</button></div>'+
       adminControls(account)+'</div>';
   }
 
@@ -93,14 +92,14 @@ export function createUsageWorkspace({
     if (mode === "deleted") return '<div class="ledger-inline-error">' +
       '<p>This account is deleted. Restore it before viewing its detailed activity.</p>' +
       '<button type="button" class="button small" data-ledger-restore="' + esc(account.userId) + '">Restore account</button></div>';
-    const detail = activeCache();
+    const detail = activeCache(account.userId);
     if (detail) return renderTimeline(detail, account);
-    if (loadingDetails === account.userId) return '<div class="ledger-loading" role="status">' +
+    if (loadingKeys.has(cacheKey(account.userId))) return '<div class="ledger-loading" role="status">' +
       '<div class="skeleton" style="width:220px;height:16px"></div>' +
       '<div class="skeleton" style="width:100%;height:76px"></div>' +
       '<span>Loading ' + esc(account.name || account.login || "user") + ' daily usage…</span></div>';
     return '<div class="ledger-inline-error" role="status">' +
-      '<p>' + esc(detailError || "Daily breakdown is not loaded.") + '</p>' +
+      '<p>' + esc(detailErrors.get(cacheKey(account.userId)) || "Daily breakdown is not loaded.") + '</p>' +
       '<button class="button small" type="button" data-ledger-retry="' + esc(account.userId) + '">Load breakdown</button></div>';
   }
 
@@ -108,19 +107,16 @@ export function createUsageWorkspace({
     if (!isActive()) return;
     const accounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts : [];
     const matched = accountSort(accounts);
-    const selected = matched.find((item) => item.userId === selectedId);
     const total = accounts.reduce((sum, x) => sum + Math.max(0, Number(x.calls || 0)), 0);
     const allAgents = new Set(accounts.flatMap((entry) => agentsFor(entry).map((agent) => agent.agentId)));
     const members = accounts.length;
     const admin = isAdmin();
-    const hasDeleted = admin && mode === "deleted";
-    const range = getRange();
     const header = scopeTitle();
     setHeader(header, "");
 
     const rows = matched.map((account, index) => {
       const calls = Math.max(0, Number(account.calls || 0));
-      const open = selectedId === account.userId;
+      const open = expandedIds.has(account.userId);
       const agentCount = agentsFor(account).length;
       return '<tr class="ledger-person-row' + (open ? ' selected' : '') + '" data-live-key="ledger-user-' + esc(account.userId) + '">' +
         '<th scope="row"><button type="button" class="ledger-person" data-ledger-user="' + esc(account.userId) +
@@ -135,7 +131,7 @@ export function createUsageWorkspace({
         '" class="ledger-detail-cell">' + renderExpanded(account) + '</td></tr>' : '');
     }).join("");
 
-    const adminControls = admin
+    const accountStatusControls = admin
       ? '<div class="ledger-role-tabs" role="group" aria-label="Account status">' +
         [['active','Active'],['deleted','Deleted']].map(([value,label]) =>
           '<button type="button" class="' + (mode===value?' active':'') + '" data-usage-user-mode="' + value +
@@ -144,7 +140,6 @@ export function createUsageWorkspace({
 
     const period = currentPeriod();
     const windowLabel = dateWindow();
-    const caption = hasDeleted ? "Deleted accounts only" : admin ? "Active accounts only" : "Your account";
     renderContent(
       '<div class="ledger-heading"><span class="ledger-kicker">TOOL CALLS · BKK</span><div class="ledger-period">' + periodChips(period) + '</div></div>' +
       '<section class="ledger-summary" aria-label="Usage summary"><div class="ledger-main-number"><span>Tool Calls</span><strong>'+fmtNum(total)+'</strong></div>' +
@@ -153,7 +148,7 @@ export function createUsageWorkspace({
       '<span class="ledger-window-label">'+esc(windowLabel)+'</span></section>' +
       '<section class="ledger-table-section" aria-label="User Tool Calls comparison">' +
         '<div class="ledger-table-heading"><div><h3>' + (admin ? "By user" : "Your activity") + '</h3></div>' +
-          '<div class="ledger-table-actions">' + adminControls +
+          '<div class="ledger-table-actions">' + accountStatusControls +
             '<label class="ledger-search"><span class="sr-only">Search users or agents</span>' + icon("search") +
             '<input type="search" id="usageSearch" value="' + esc(query) + '" placeholder="Find a person or agent..." aria-label="Search users or agents"></label></div></div>' +
         '<div class="ledger-table-scroll"><table class="ledger-table">' +
@@ -185,18 +180,14 @@ export function createUsageWorkspace({
     document.querySelectorAll("[data-ledger-user]").forEach((button) => {
       button.onclick = () => {
         const nextId = button.dataset.ledgerUser;
-        selectedId = selectedId === nextId ? "" : nextId;
-        detailError = "";
+        if (expandedIds.has(nextId)) expandedIds.delete(nextId);
+        else expandedIds.add(nextId);
         render({patch:true});
-        if (selectedId) void loadDetails(selectedId);
+        if (expandedIds.has(nextId)) void loadDetails(nextId);
       };
     });
     document.querySelectorAll("[data-ledger-retry]").forEach((button) => button.onclick = () =>
       void loadDetails(button.dataset.ledgerRetry, true));
-    document.querySelectorAll("[data-ledger-refresh]").forEach((button) => button.onclick = () =>
-      void loadDetails(button.dataset.ledgerRefresh, true));
-    document.querySelectorAll("[data-ledger-timeline]").forEach((button) => button.onclick = () =>
-      openOverview(button.dataset.ledgerTimeline));
     document.querySelectorAll("[data-ledger-delete],[data-ledger-restore]").forEach((button) => {
       button.onclick = async () => {
         const userId = button.dataset.ledgerDelete || button.dataset.ledgerRestore;
@@ -209,7 +200,7 @@ export function createUsageWorkspace({
         try {
           await api(restoring ? "/admin/api/users/restore" : "/admin/api/users/soft-delete",
             {method:"POST",body:JSON.stringify({userId})});
-          selectedId = "";
+          expandedIds.delete(userId);
           await load({patch:true});
         } catch {
           button.disabled = false;
@@ -222,7 +213,6 @@ export function createUsageWorkspace({
         const range = button.dataset.overviewRange;
         if (range === getRange()) return;
         setRange(range);
-        selectedId = "";
         void load({patch:true});
       };
     });
@@ -231,31 +221,31 @@ export function createUsageWorkspace({
         const next = button.dataset.usageUserMode;
         if (next === mode) return;
         mode = next === "deleted" ? "deleted" : "active";
-        selectedId = "";
         void load({patch:true});
       };
     });
   }
 
   async function loadDetails(userId, force = false) {
-    const key = cacheKey(userId);
+    const range = getRange();
+    const key = cacheKey(userId, range);
     if (mode === "deleted" || inFlight.has(key)) return;
     if (!force && detailsCache.has(key)) return;
     inFlight.add(key);
-    loadingDetails = userId;
-    detailError = "";
+    loadingKeys.add(key);
+    detailErrors.delete(key);
     render({patch:true});
     try {
-      const result = await api("/admin/api/summary?range=" + encodeURIComponent(getRange()) +
+      const result = await api("/admin/api/summary?range=" + encodeURIComponent(range) +
         (isAdmin() ? "&userId=" + encodeURIComponent(userId) : ""));
       detailsCache.set(key, result);
     } catch {
-      detailError = "Unable to load this user's breakdown. Your comparison table remains available.";
+      detailErrors.set(key,"Unable to load this user's breakdown.");
       setNotice("Could not load the daily Tool Calls breakdown. Please retry.", true);
     } finally {
       inFlight.delete(key);
-      if (loadingDetails === userId) loadingDetails = "";
-      if (selectedId === userId && key === cacheKey(userId)) render({patch:true});
+      loadingKeys.delete(key);
+      if (expandedIds.has(userId) && key === cacheKey(userId)) render({patch:true});
     }
   }
 
@@ -268,11 +258,11 @@ export function createUsageWorkspace({
     setPeriod(response.period);
     snapshot = response;
     const accounts = Array.isArray(response.accounts) ? response.accounts : [];
-    if (selectedId && !accounts.some((account) => account.userId === selectedId)) selectedId = "";
-    // A regular user has only their own row; show their time series without a second click.
-    if (!isAdmin() && !selectedId) selectedId = accounts[0]?.userId || "";
+    const accountIds=new Set(accounts.map(account=>account.userId));
+    for(const id of expandedIds) if(!accountIds.has(id)) expandedIds.delete(id);
+    if(!isAdmin() && accounts[0]) expandedIds.add(accounts[0].userId);
     render({patch});
-    if (selectedId && !detailsCache.has(cacheKey(selectedId))) void loadDetails(selectedId);
+    for(const id of expandedIds) if(!detailsCache.has(cacheKey(id)) && !inFlight.has(cacheKey(id))) void loadDetails(id);
   }
   return {load};
 }

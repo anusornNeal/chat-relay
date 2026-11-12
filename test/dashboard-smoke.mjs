@@ -16,7 +16,7 @@ if(!js.response.ok || !usageAsset.response.ok || !insightsAsset.response.ok) thr
 const expectedApp = ["/admin/api/summary", "/admin/api/learn", "My Learn", "loadLearn", "learn-folder-shell", "learn-tree-row", "learnTreeExpanded", "learnScopedTreeExpanded", "data-learn-tree-toggle", 'role="radiogroup"', "Useful", "Not useful", "learnRefineMemory", "ux-learn-focus", "loadUsage", "System overview", "Operational error rate", "Tool activity", "/admin/ws", "fallbackPollTimer = setInterval", 'activeView !== "learn"'];
 for(const marker of expectedApp) if(!js.text.includes(marker)) throw Error("Dashboard app missing " + marker);
 for(const marker of ["Recent Learn changes", "Top tools", "/admin/api/errors", "/admin/api/tool-calls", "loadErrors", "ADMIN_TOKEN"]) if(js.text.includes(marker)) throw Error("Dashboard app contains obsolete or secret marker " + marker);
-const expectedUsage = ["createUsageWorkspace", "/admin/api/overview", "/admin/api/summary", "Find a person or agent", "ledger-table", "data-ledger-user", "toolCallSeries", "usageSearch", "data-ledger-refresh"];
+const expectedUsage = ["createUsageWorkspace", "/admin/api/overview", "/admin/api/summary", "Find a person or agent", "ledger-table", "data-ledger-user", "toolCallSeries", "usageSearch", "renderHourlyChart"];
 for(const marker of expectedUsage) if(!usageAsset.text.includes(marker)) throw Error("Usage workspace missing " + marker);
 for(const marker of ["learnReviewReason","learnFocusItems","usageDirectory"]) if(!insightsAsset.text.includes(marker)) throw Error("UX helpers missing " + marker);
 

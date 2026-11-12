@@ -529,71 +529,87 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 @media(max-width:900px){.ux-next-actions{grid-template-columns:repeat(2,minmax(0,1fr))}.ux-next-copy{grid-column:1/-1}}
 @media(max-width:540px){.ux-next-actions{grid-template-columns:1fr}.ux-next-copy{grid-column:auto}}
 
-/* Knowledge Review Desk: task-first queue with on-demand scope drawer.
-   Shared Learn keeps its own library navigation and access controls. */
-.learn-folder-shell.learn-review-board{position:relative;display:grid;grid-template-columns:minmax(0,1fr);min-height:650px;flex:1;width:100%;max-width:100%;overflow:visible;background:transparent;border:0;box-shadow:none}
-.learn-review-board>.learn-folder-tree{display:none;position:absolute;z-index:8;top:80px;left:22px;width:min(285px,calc(100vw - 38px));height:min(620px,75vh);border:1px solid #dbe7dc;border-radius:13px;background:#fff;box-shadow:0 25px 70px rgba(22,50,27,.19)}
-.learn-review-board.show-scopes>.learn-folder-tree{display:flex}
-.learn-review-board>.learn-folder-main{padding:0;min-height:0;overflow:visible;grid-template-rows:auto auto auto minmax(0,1fr);background:transparent}
-.learn-review-board .learn-folder-heading{align-items:center;gap:17px;padding:22px 24px;background:#fff;border:1px solid #e2e9e0;border-radius:14px 14px 0 0}
-.learn-review-board .learn-folder-breadcrumbs{font-size:10px;letter-spacing:.06em;color:#819883}
-.learn-review-board .learn-folder-heading h2{font-size:clamp(21px,2.1vw,29px);margin:6px 0 4px;letter-spacing:-.045em;color:#203b28}
-.learn-review-board .learn-folder-heading p{color:#7e8c80;font-size:11px;max-width:440px;line-height:1.5}
-.learn-review-board .learn-folder-heading-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
-.learn-review-search{display:flex;align-items:center;gap:7px;min-width:190px;max-width:285px;border:1px solid #d8e4d7;border-radius:9px;padding:0 10px;background:#fdfefc}
-.learn-review-search .icon{color:#839b8a;width:15px;height:15px}
-.learn-review-search input{min-width:0;border:0;min-height:37px;padding:0;box-shadow:none!important;outline:none;font-size:11px;background:transparent}
-.learn-review-search:focus-within{border-color:#3b8c60;outline:2px solid #d7ebdb}
-.learn-scope-toggle{font-size:11px!important;border-color:#d5e5d5!important;background:#f0f6ed!important;color:#386044!important;min-height:37px}
-.learn-scope-toggle[aria-expanded=true]{background:#dbedcb!important;color:#224b30!important}
-.learn-scope-toggle .icon{width:14px;height:14px}
-.learn-review-board .ux-learn-focus{padding:15px 24px;background:#fff;border:1px solid #e2e9e0;border-top:0;gap:10px}
-.learn-review-board .ux-learn-focus-tabs{background:#f0f5ee;border-radius:8px}
-.learn-review-board .ux-focus-tab{border-radius:6px;color:#69806c;font-size:11px;font-weight:620}
-.learn-review-board .ux-focus-tab.active{background:#dceecb;color:#2c5339;box-shadow:none}
-.learn-review-board .ux-focus-tab.active span{color:#507859}
-.learn-review-board .ux-learn-focus-description strong{color:#3e6349}
-.learn-review-board .learn-folder-list-toolbar{height:44px;padding:0 24px;background:#fff;border-left:1px solid #e2e9e0;border-right:1px solid #e2e9e0}
-.learn-review-board .learn-folder-sort{background:transparent;border:0;padding:0}
-.learn-review-board .learn-folder-sort button{border:0;border-radius:5px;font-size:10px;color:#738875}
-.learn-review-board .learn-folder-sort button.active{background:#eef5e9;color:#365c40;box-shadow:none}
-.learn-review-board .ux-results-count{font-size:11px;color:#829681}
-.learn-review-board .learn-folder-workspace{min-height:445px;border-radius:0 0 14px 14px;border-color:#e5e7eb;background:#fff;grid-template-columns:minmax(285px,42%) minmax(0,1fr)}
-.learn-review-board .learn-folder-list-head{background:#f8fbf6;color:#819584;border-bottom-color:#e4ede1}
-.learn-review-board .learn-folder-list{border-right-color:#e2eae1}
-.learn-review-board .learn-folder-row{border-bottom-color:#edf2ea}
-.learn-review-board .learn-folder-row:hover{background:#f7faf4}
-.learn-review-board .learn-folder-row.active{background:#eaf4e5;box-shadow:inset 3px 0 0 #347a52}
-.learn-review-board .learn-folder-file.ux-needs-review{background:#fdf7e8;color:#a87d39}
-.learn-review-board .learn-detail-pane{background:#fdfefb}
-.learn-review-board .ux-review-context{background:#f8fafc;border-color:#e3eadf}
-.learn-review-board .ux-review-context.flagged{background:#fff8e9;border-color:#f0e1bd}
-.learn-review-board .ux-learn-actions .button.primary{background:#277a55;border-color:#277a55;color:#fff}
-.learn-review-board .ux-learn-actions .button.primary:hover{background:#1f6544}
-.learn-review-board .learn-folder-heading .learn-export-button{border:1px solid #dae5d9}
-.learn-review-board .learn-detail-usage div:last-child{background:#edf6e9;border-color:#d9e6d7}
-.learn-review-board.show-scopes:before{content:"";position:absolute;z-index:7;inset:0;background:transparent;pointer-events:none}
-@media(max-width:1150px){
- .learn-review-board .learn-folder-heading{align-items:flex-start;flex-direction:column}
- .learn-review-board .learn-folder-heading-actions{justify-content:flex-start}
- .learn-review-board>.learn-folder-tree{top:134px}
+/* Personal Learn keeps the folder explorer visible as a permanent column. */
+.learn-folder-shell.learn-review-board{
+ display:grid;grid-template-columns:245px minmax(0,1fr);grid-template-rows:minmax(0,1fr);
+ min-height:0;height:100%;width:100%;max-width:100%;flex:1;
+ overflow:hidden;background:#fff;border:1px solid var(--line);border-radius:11px
+}
+.learn-review-board>.learn-folder-tree{
+ position:static;display:flex;top:auto;left:auto;width:auto;height:auto;max-height:none;min-height:0;
+ border:0;border-right:1px solid var(--line);border-radius:0;
+ background:#f8fafc;box-shadow:none
+}
+.learn-review-board>.learn-folder-main{
+ display:grid;grid-template-rows:auto auto 42px minmax(0,1fr);
+ min-width:0;min-height:0;padding:0;overflow:hidden;background:#fff
+}
+.learn-review-board .learn-folder-heading{
+ padding:15px 19px;border:0;border-bottom:1px solid var(--line);background:#fff;gap:12px
+}
+.learn-review-board .learn-folder-heading h2{font-size:19px;letter-spacing:-.04em}
+.learn-review-board .learn-folder-heading p{display:none}
+.learn-review-board .ux-learn-focus{
+ padding:9px 18px;background:#fff;border-bottom:1px solid var(--line);gap:9px
+}
+.learn-review-board .ux-learn-focus-tabs{background:#f3f4f6}
+.learn-review-board .ux-focus-tab{color:#64748b;font-size:11px}
+.learn-review-board .ux-focus-tab.active{background:#eef2ff;color:#3730a3;box-shadow:none}
+.learn-review-board .ux-focus-tab.active span{color:#4f46e5}
+.learn-review-board .learn-folder-list-toolbar{
+ height:42px;padding:0 18px;border:0;background:#fff
+}
+.learn-review-board .learn-folder-sort{padding:0;background:transparent;border:0}
+.learn-review-board .learn-folder-sort button{font-size:11px;border-radius:6px}
+.learn-review-board .learn-folder-sort button.active{background:#eef2ff;color:#3730a3;box-shadow:none}
+.learn-review-board .learn-folder-workspace{
+ min-height:0;border:0;border-top:1px solid var(--line);border-radius:0;
+ grid-template-columns:minmax(275px,43%) minmax(0,1fr)
+}
+.learn-review-board .learn-folder-list-head{background:#f8fafc}
+.learn-review-board .learn-folder-row.active{background:#eef2ff;box-shadow:inset 3px 0 0 #4f46e5}
+.learn-review-board .learn-detail-pane{background:#fff}
+.learn-review-board .ux-review-context{background:#f8fafc;border-color:#e5e7eb}
+.learn-review-board .ux-review-context.flagged{background:#fff9ed;border-color:#f2dfb8}
+.learn-review-board .ux-learn-actions .button.primary{background:#4f46e5;border-color:#4f46e5}
+@media(max-width:1140px){
+ .learn-folder-shell.learn-review-board{grid-template-columns:210px minmax(0,1fr)}
+ .learn-review-board .learn-folder-workspace{grid-template-columns:minmax(235px,43%) minmax(0,1fr)}
 }
 @media(max-width:900px){
- .learn-folder-shell.learn-review-board{display:block;min-height:0}
- .learn-review-board>.learn-folder-main{display:flex;flex-direction:column;overflow:visible}
- .learn-review-board .learn-folder-workspace{grid-template-columns:1fr;grid-template-rows:270px 400px}
- .learn-review-board>.learn-folder-tree{top:135px}
+ .learn-folder-shell.learn-review-board{display:flex;flex-direction:column;height:auto;min-height:0;overflow:visible}
+ .learn-review-board>.learn-folder-tree{
+   display:flex;height:auto;min-height:190px;max-height:265px;border-right:0;border-bottom:1px solid var(--line)
+ }
+ .learn-review-board>.learn-folder-main{display:flex;flex-direction:column;overflow:visible;min-height:0}
+ .learn-review-board .learn-folder-workspace{display:grid;grid-template-columns:1fr;grid-template-rows:265px 420px;min-height:0}
 }
 @media(max-width:550px){
- .learn-review-board .learn-folder-heading{padding:16px}
- .learn-review-board .learn-folder-heading-actions{width:100%;justify-content:flex-start}
- .learn-review-search{min-width:0;max-width:100%;flex:1}
- .learn-scope-toggle{min-width:100px}
- .learn-review-board .ux-learn-focus{padding:11px 15px}
- .learn-review-board .learn-folder-list-toolbar{padding:0 15px}
- .learn-review-board .learn-folder-workspace{grid-template-rows:260px 405px}
+ .learn-review-board .learn-folder-heading{padding:12px}
+ .learn-review-board .ux-learn-focus{padding:8px 12px}
+ .learn-review-board .learn-folder-list-toolbar{padding:0 12px}
 }
 
+/* Usage: compact, readable aligned metrics; expand any number of rows. */
+.main:has(.ledger-table-section){max-width:1270px}
+.ledger-hour-chart{background:#fff;border:1px solid var(--line);border-radius:9px;min-width:0;overflow:hidden}
+.ledger-hour-chart .chart-frame{padding:8px 19px 18px}
+.ledger-hour-chart .chart-plot{height:180px}
+.ledger-hour-chart .chart-bars{height:100%}
+.ledger-hour-chart .chart-y-axis{font-size:10px}
+.ledger-hour-chart .chart-x-axis{font-size:10px}
+.ledger-expanded-inner{padding:14px 20px 16px}
+.ledger-detail-cell{min-width:0}
+.ledger-table thead th:first-child{width:51%}
+.ledger-table thead th:nth-child(2){width:28%}
+.ledger-table thead th:nth-child(3){width:21%}
+.ledger-day-value{font-variant-numeric:tabular-nums}
+@media(max-width:650px){
+ .ledger-table{table-layout:auto}
+ .ledger-hour-chart{overflow-x:auto}
+ .ledger-hour-chart .chart-frame{min-width:520px;padding:10px}
+ .ledger-hour-chart .chart-plot{height:160px}
+}
 /* REL-38: compact, neutral dashboard; a single indigo accent. */
 .app-shell{display:grid;grid-template-columns:184px minmax(0,1fr);min-height:100vh}
 .sidebar{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;align-items:stretch;gap:0;min-width:0;padding:19px 12px;background:#fff;color:#374151;border-right:1px solid #e5e7eb;border-bottom:0}
@@ -675,7 +691,7 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .ledger-search input{border:0;box-shadow:none!important;min-height:31px;padding:0;font-size:11px;outline:none;min-width:0}
 .ledger-search .icon{width:14px;height:14px;color:#9ca3af}
 .ledger-table-scroll{width:100%;overflow:auto}
-.ledger-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;text-align:left}
+.ledger-table{width:100%;border-collapse:collapse;table-layout:fixed;font-variant-numeric:tabular-nums;text-align:left}
 .ledger-table thead{background:#f9fafb}
 .ledger-table th,.ledger-table td{border-bottom:1px solid #f1f5f9;padding:10px 16px}
 .ledger-table thead th{font-size:10px;font-weight:700;letter-spacing:.06em;color:#64748b;white-space:nowrap}

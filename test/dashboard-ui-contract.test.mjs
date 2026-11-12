@@ -48,7 +48,9 @@ test("Review and investigation handlers cannot retain stale selection after DOM 
   assert.match(app, /const current = \(learnProfileSnapshot\?\.items \|\| \[\]\)\.find/);
   assert.doesNotMatch(app, /learnRefineMemory"\)\?\.addEventListener/);
   assert.match(usage, /data-ledger-user/);
-  assert.match(usage, /data-ledger-timeline/);
+  assert.match(usage, /expandedIds\.has\(account\.userId\)/);
+  assert.match(usage, /renderHourlyChart\(summary\.buckets/);
+  assert.doesNotMatch(usage, /data-ledger-refresh|data-ledger-timeline/);
   assert.match(usage, /if \(sequence !== loadSequence\) return/);
 });
 
@@ -59,4 +61,16 @@ test("Overview is first, normal users have no redundant Usage page", () => {
   assert.doesNotMatch(usage, /SHARE OF LISTED|100% of listed Tool Calls/);
   assert.match(usage, /daily-bars/);
   assert.match(usage, /daily-table/);
+});
+
+test("independent Usage details reuse Overview's hourly chart without redundant controls", () => {
+  assert.match(usage,/const expandedIds = new Set\(\)/);
+  assert.match(usage,/expandedIds\.add\(nextId\)/);
+  assert.match(usage,/expandedIds\.delete\(nextId\)/);
+  assert.match(usage,/const loadingKeys = new Set\(\)/);
+  assert.match(usage,/const detailErrors = new Map\(\)/);
+  assert.match(app,/renderHourlyChart: \(buckets, period\) => chartMarkup\(buckets, period, \{showStats:false\}\)/);
+  assert.doesNotMatch(usage,/data-ledger-refresh|data-ledger-timeline|Open overview/);
+  assert.match(css,/\.learn-review-board>\.learn-folder-tree\{[\s\S]*?position:static/);
+  assert.doesNotMatch(app,/id="learnScopeToggle"|id="learnSearchTop"/);
 });

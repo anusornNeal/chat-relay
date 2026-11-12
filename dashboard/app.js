@@ -536,7 +536,7 @@ function chartDisplayBuckets(buckets = [], period = dashboardPeriod) {
     };
   });
 }
-function chartMarkup(buckets = [], period = dashboardPeriod) {
+function chartMarkup(buckets = [], period = dashboardPeriod, {showStats = true} = {}) {
   const items = Array.isArray(buckets) ? buckets : [];
   const displayItems = chartDisplayBuckets(items, period);
   const byDay = period?.range === "7d" || period?.range === "30d";
@@ -579,7 +579,7 @@ function chartMarkup(buckets = [], period = dashboardPeriod) {
     '<div><span>Peak</span><strong>' + esc(peakLabel) + '</strong></div>' +
     "</div>";
 
-  return stats + '<div class="chart-frame">' + yLabels +
+  return (showStats ? stats : "") + '<div class="chart-frame">' + yLabels +
     '<div class="chart-main"><div class="chart-plot"><div class="chart-grid-lines"><i></i><i></i><i></i><i></i><i></i></div>' +
     '<div class="chart-bars">' + bars + '</div></div><div class="chart-x-axis" aria-hidden="true">' + xLabels + "</div></div></div>";
 }
@@ -656,8 +656,8 @@ const usageWorkspace = createUsageWorkspace({
     dashboardPeriod = value || { range: dashboardRange, label: periodDisplayLabel(dashboardRange) };
     dashboardRange = dashboardPeriod.range || dashboardRange;
   },
-  periodChips, periodDisplayLabel, metricCard, icon, esc, fmtNum, fmtMs, fmtPct,
-  openOverview: (userId) => { overviewUserId = isAdmin() ? userId : ""; void switchView("overview"); },
+  periodChips, periodDisplayLabel, icon, esc, fmtNum, fmtMs, fmtPct,
+  renderHourlyChart: (buckets, period) => chartMarkup(buckets, period, {showStats:false}),
 });
 async function loadUsage(options = {}) { return usageWorkspace.load(options); }
 
@@ -677,7 +677,6 @@ let learnScopeKeyFilter = "";
 let learnSelectedMemoryId = null;
 let learnSearchQuery = "";
 let learnSortMode = "usage";
-let learnScopeDrawerOpen = false;
 let learnFocusMode = "review";
 const learnTreeExpanded = { global: true, project: true, agent: true, shared: true };
 let learnLibraryScrollTop = 0;
@@ -1043,7 +1042,7 @@ function bindLearnLibrarySidebar() {
     scroll.scrollTop = learnLibraryScrollTop;
     scroll.onscroll = () => { learnLibraryScrollTop = scroll.scrollTop; };
   }
-  for (const input of document.querySelectorAll("#learnSearch, #learnSearchTop")) {
+  for (const input of document.querySelectorAll("#learnSearch")) {
     input.oninput = () => {
       learnSearchQuery = input.value;
       if (sharedLearnActive) sharedLearnUI.rerender();
@@ -1169,13 +1168,11 @@ function renderLearnProfile({ patch = false } = {}) {
     : (learnFocusMode === "review" ? "Review evidence, give feedback, and refine rules without leaving this page" : "Your reusable preferences and working patterns");
 
   renderContent(
-    '<section class="learn-folder-shell learn-review-board' + (learnScopeDrawerOpen ? ' show-scopes' : '') + '">' +
+    '<section class="learn-folder-shell learn-review-board">' +
       renderLearnLibrarySidebar() +
       '<div class="learn-folder-main">' +
         '<div class="learn-folder-heading"><div><div class="learn-folder-breadcrumbs"><span>Learn</span><b>/</b><strong>' + esc(heading) + '</strong></div><h2>' + esc(heading) + '</h2><p>' + esc(subtitle) + '</p></div>' +
           '<div class="learn-folder-heading-actions">' +
-            '<label class="learn-review-search">' + icon("search") + '<input id="learnSearchTop" type="search" aria-label="Search Learn rules" placeholder="Search rules…" value="' + esc(learnSearchQuery) + '"></label>' +
-            '<button type="button" id="learnScopeToggle" class="button learn-scope-toggle" aria-expanded="' + learnScopeDrawerOpen + '">' + icon("filter") + 'Scopes & groups</button>' +
             (learnScopeFilter === "project" && !learnScopeKeyFilter ? '<button id="learnMergeProjects" class="button small" type="button">Merge projects</button>' : '') +
             '<button id="learnExport" class="button small learn-export-button" type="button">' + icon("download") + 'Export JSON</button></div></div>' +
         '<div class="ux-learn-focus"><div class="ux-learn-focus-tabs" role="group" aria-label="Learn review view">' +
@@ -1208,14 +1205,6 @@ function renderLearnProfile({ patch = false } = {}) {
   if (exportButton) exportButton.onclick = exportLearnProfile;
 
   bindLearnLibrarySidebar();
-  const scopeToggle = document.getElementById("learnScopeToggle");
-  if (scopeToggle) scopeToggle.onclick = () => {
-    learnScopeDrawerOpen = !learnScopeDrawerOpen;
-    renderLearnProfile({patch:true});
-    if (learnScopeDrawerOpen) document.getElementById("learnSearch")?.focus();
-    else document.getElementById("learnScopeToggle")?.focus();
-  };
-
   document.querySelectorAll("[data-learn-focus]").forEach((button) => {
     button.onclick = () => {
       learnFocusMode = ["review","all","used"].includes(button.dataset.learnFocus) ? button.dataset.learnFocus : "all";
