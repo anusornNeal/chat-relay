@@ -1,5 +1,7 @@
 import { usageDirectory } from "./ux-insights.js";
 
+const PAGE_SIZE = 10;
+
 // A comparison-first Tool Calls workspace. One overview request per period;
 // a user-specific time series is fetched only when a row is opened.
 export function createUsageWorkspace({
@@ -12,6 +14,7 @@ export function createUsageWorkspace({
   let query = "";
   let sortBy = "calls";
   let sortDirection = "desc";
+  let visibleCount = PAGE_SIZE;
   const expandedIds = new Set();
   const expandedMetricsIds = new Set();
   const loadingKeys = new Set();
@@ -35,7 +38,7 @@ export function createUsageWorkspace({
   };
   const accountSort = (items) => {
     const arranged = usageDirectory(items, query, sortBy);
-    return sortDirection === "asc" ? arranged.reverse() : arranged;
+    return sortDirection === (sortBy === "name" ? "asc" : "desc") ? arranged : arranged.reverse();
   };
   const activeCache = (userId) => detailsCache.get(cacheKey(userId));
 
@@ -116,6 +119,8 @@ export function createUsageWorkspace({
     if (!isActive()) return;
     const accounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts : [];
     const matched = accountSort(accounts);
+    const visible = matched.slice(0, visibleCount);
+    const remaining = matched.length - visible.length;
     const total = accounts.reduce((sum, x) => sum + Math.max(0, Number(x.calls || 0)), 0);
     const allAgents = new Set(accounts.flatMap((entry) => agentsFor(entry).map((agent) => agent.agentId)));
     const members = accounts.length;
@@ -124,14 +129,15 @@ export function createUsageWorkspace({
     const header = scopeTitle();
     setHeader(header, "");
 
-    const rows = matched.map((account, index) => {
+    const rows = visible.map((account, index) => {
       const calls = Math.max(0, Number(account.calls || 0));
       const open = expandedIds.has(account.userId);
       const agentCount = agentsFor(account).length;
+      const hasOnlineAgent = agentsFor(account).some((agent) => agent.online === true);
       return '<tr class="ledger-person-row' + (open ? ' selected' : '') + '" data-live-key="ledger-user-' + esc(account.userId) + '">' +
         '<th scope="row"><button type="button" class="ledger-person" data-ledger-user="' + esc(account.userId) +
-          '" aria-expanded="' + open + '" aria-label="' + esc((open ? 'Collapse' : 'Show') + ' Tool Calls activity for ' + titleFor(account)) + '">' +
-          '<span class="ledger-rank" aria-hidden="true">' + String(index+1).padStart(2,'0') + '</span>' +
+          '" aria-expanded="' + open + '" aria-label="' + esc((open ? 'Collapse' : 'Show') + ' Tool Calls activity for ' + titleFor(account) + (hasOnlineAgent ? ' (agent online)' : '')) + '">' +
+          '<span class="ledger-rank' + (hasOnlineAgent ? ' online' : '') + '" aria-hidden="true">' + String(index+1).padStart(2,'0') + '</span>' +
           '<span class="ledger-person-name"><strong>' + esc(titleFor(account)) + '</strong><span>' + esc(account.login || account.userId) + '</span></span>' +
           '</button></th>' +
         '<td class="ledger-numeric ledger-call-count"><span class="ledger-call-visual">' +
@@ -174,6 +180,7 @@ export function createUsageWorkspace({
           '<th scope="col" class="ledger-numeric">AGENTS</th></tr></thead>' +
           '<tbody>' + (rows || '<tr><td colspan="' + 3 +
             '"><div class="ledger-empty"><strong>No matching users</strong><span>Try changing your search or account status.</span></div></td></tr>') +
+          (remaining > 0 ? '<tr class="ledger-show-more"><td colspan="3"><button type="button" class="button small" data-ledger-show-more>Show more (' + fmtNum(Math.min(PAGE_SIZE, remaining)) + ')</button></td></tr>' : '') +
           '</tbody><tfoot><tr><th scope="row">TOTAL · ' + fmtNum(accounts.length) + ' ' + (admin ? "users":"user") + '</th>' +
             '<td class="ledger-numeric">' + fmtNum(total) + '</td>' +
             '<td class="ledger-numeric">' + fmtNum(allAgents.size) + '</td></tr></tfoot></table></div></section>' +
@@ -182,12 +189,15 @@ export function createUsageWorkspace({
     );
 
     const search = document.getElementById("usageSearch");
-    if (search) search.oninput = () => {query = search.value;render({patch:true})};
+    if (search) search.oninput = () => {query = search.value;visibleCount = PAGE_SIZE;render({patch:true})};
+    const showMore = document.querySelector("[data-ledger-show-more]");
+    if (showMore) showMore.onclick = () => {visibleCount += PAGE_SIZE;render({patch:true})};
     document.querySelectorAll("[data-ledger-sort]").forEach((button) => {
       button.onclick = () => {
         const key = button.dataset.ledgerSort;
         if (sortBy === key) sortDirection = sortDirection === "asc" ? "desc" : "asc";
         else {sortBy = key; sortDirection = key === "calls" ? "desc" : "asc";}
+        visibleCount = PAGE_SIZE;
         render({patch:true});
       };
     });
@@ -237,6 +247,7 @@ export function createUsageWorkspace({
         const range = button.dataset.overviewRange;
         if (range === getRange()) return;
         setRange(range);
+        visibleCount = PAGE_SIZE;
         void load({patch:true});
       };
     });
@@ -245,6 +256,7 @@ export function createUsageWorkspace({
         const next = button.dataset.usageUserMode;
         if (next === mode) return;
         mode = next === "deleted" ? "deleted" : "active";
+        visibleCount = PAGE_SIZE;
         void load({patch:true});
       };
     });

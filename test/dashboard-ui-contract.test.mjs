@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
+import { createUsageWorkspace } from "../dashboard/usage-workspace.js";
 
 const html = readFileSync(new URL("../dashboard/index.html", import.meta.url), "utf8");
 const css = readFileSync(new URL("../dashboard/styles.css", import.meta.url), "utf8");
@@ -130,4 +131,90 @@ test("7d selected user chart retains all seven dates with six recorded four-hour
   assert.match(css, /\.chart-tooltip\{top:14px;bottom:auto/);
   assert.doesNotMatch(app + usage, /avg calls\/day|hourlyAverage|averageProfile/);
   assert.doesNotMatch(usage, /icon\("chevron"\) \+ '<\/button>/);
+});
+
+
+test("Usage limits initial rows to ten, reveals more without refetching, and highlights only online agents", async () => {
+  const accounts = Array.from({length: 12}, (_, i) => ({
+    userId: "user-" + i,
+    name: "Member " + String(i).padStart(2, "0"),
+    login: "member" + i + "@example.test",
+    calls: i * 10,
+    agents: i === 11 ? [{agentId: "a11", online: true}] :
+      i === 10 ? [{agentId: "a10", online: false}] :
+      i === 9 ? [{agentId: "a09", online: null}] : [],
+  }));
+  let markup = "";
+  let moreButton = null;
+  let requests = 0;
+  const search = {value: "", oninput: null};
+  const sortName = {dataset: {ledgerSort: "name"}, onclick: null};
+  const fakeDocument = {
+    getElementById: (id) => id === "usageSearch" ? search : null,
+    querySelector: (selector) => {
+      if (selector !== "[data-ledger-show-more]" || !markup.includes("data-ledger-show-more")) return null;
+      moreButton = {onclick: null};
+      return moreButton;
+    },
+    querySelectorAll: (selector) => selector === "[data-ledger-sort]" ? [sortName] : [],
+  };
+  const previousDocument = globalThis.document;
+  globalThis.document = fakeDocument;
+  try {
+    const workspace = createUsageWorkspace({
+      api: async (url) => {
+        assert.match(url, /^\/admin\/api\/overview\?/);
+        requests++;
+        return {period: {range: "today"}, accounts};
+      },
+      renderContent: (html) => { markup = html; },
+      setHeader: () => {},
+      setNotice: () => {},
+      isAdmin: () => true,
+      isActive: () => true,
+      getCurrentUser: () => ({id: "admin"}),
+      getRange: () => "today",
+      setRange: () => {},
+      setPeriod: () => {},
+      periodChips: () => "",
+      periodDisplayLabel: () => "Today",
+      icon: () => "",
+      esc: (value) => String(value ?? ""),
+      fmtNum: (value) => String(value),
+      fmtMs: () => "",
+      fmtPct: () => "",
+      renderActivityChart: () => "",
+    });
+    const names = () => [...markup.matchAll(/class="ledger-person-name"><strong>([^<]+)/g)].map((match) => match[1]);
+    const rankClasses = () => [...markup.matchAll(/class="ledger-rank([^"]*)" aria-hidden="true"/g)].map((match) => match[1]);
+
+    await workspace.load();
+    assert.deepEqual(names(), Array.from({length: 10}, (_, i) => "Member " + String(11 - i).padStart(2, "0")));
+    assert.deepEqual(rankClasses(), [" online", "", "", "", "", "", "", "", "", ""]);
+    assert.match(markup, /aria-label="Show Tool Calls activity for Member 11 \(agent online\)"/);
+    assert.match(markup, /Show more \(2\)/);
+    assert.match(markup, /TOTAL · 12 users/);
+    assert.equal(requests, 1);
+
+    moreButton.onclick();
+    assert.equal(names().length, 12);
+    assert.equal(names().at(-1), "Member 00");
+    assert.doesNotMatch(markup, /data-ledger-show-more/);
+    assert.equal(requests, 1, "Show more must not request any additional data");
+
+    search.value = "Member";
+    search.oninput();
+    assert.equal(names().length, 10, "Searching resets pagination");
+    assert.match(markup, /Show more \(2\)/);
+
+    sortName.onclick();
+    assert.equal(names().length, 10, "Sorting resets pagination");
+    assert.equal(names()[0], "Member 00");
+    assert.equal(requests, 1);
+    assert.match(css, /\.ledger-rank\.online\{/);
+    assert.match(css, /\.ledger-person-row td:last-child/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
 });
