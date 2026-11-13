@@ -11,8 +11,11 @@ for(const path of ["/","/admin","/dashboard"]){const redirect=await req(path);if
 const page=await req("/dashboard/");if(!page.response.ok||!page.text.includes("Chat Relay")||!page.text.includes("/dashboard/app.js")||page.text.includes("detailDialog")||!page.text.includes("liveStatus")||!page.text.includes("Connecting realtime updates")||!page.text.includes("/admin/google/start")||page.text.includes("userDialog")||page.text.includes("Sign in with password")||page.text.includes("Refreshes every 5 seconds"))throw Error("dashboard html failed");
 const js=await req("/dashboard/app.js");
 const usageAsset = await req("/dashboard/usage-workspace.js");
+const themeJs = await req("/dashboard/theme.js");
+const themeCss = await req("/dashboard/theme.css");
 const insightsAsset = await req("/dashboard/ux-insights.js");
 if(!js.response.ok || !usageAsset.response.ok || !insightsAsset.response.ok) throw Error("Dashboard modules unavailable");
+if(!themeJs.response.ok || !themeCss.response.ok || !themeJs.text.includes("chat_relay_theme") || !themeCss.text.includes('html[data-theme="dark"]') || !page.text.includes('/dashboard/theme.js') || !page.text.includes('/dashboard/theme.css')) throw Error("Dashboard appearance assets missing");
 const expectedApp = ["/admin/api/summary", "/admin/api/learn", "My Learn", "loadLearn", "learn-folder-shell", "learn-tree-row", "learnTreeExpanded", "learnScopedTreeExpanded", "data-learn-tree-toggle", 'role="radiogroup"', "Useful", "Not useful", "learnRefineMemory", "ux-learn-focus", "loadUsage", "System overview", "Operational error rate", "Tool activity", "/admin/ws", "fallbackPollTimer = setInterval", 'activeView !== "learn"'];
 for(const marker of expectedApp) if(!js.text.includes(marker)) throw Error("Dashboard app missing " + marker);
 for(const marker of ["Recent Learn changes", "Top tools", "/admin/api/errors", "/admin/api/tool-calls", "loadErrors", "ADMIN_TOKEN"]) if(js.text.includes(marker)) throw Error("Dashboard app contains obsolete or secret marker " + marker);

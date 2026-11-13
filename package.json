@@ -47,7 +47,7 @@
         "test:no-quota": "node test/no-quota-regression.test.mjs",
         "test:admin-api": "node test/admin-api-smoke.mjs",
         "test:admin-auth": "node test/admin-auth-smoke.mjs",
-        "test:dashboard": "node --test test/dashboard-ui-contract.test.mjs && node test/dashboard-smoke.mjs",
+        "test:dashboard": "node --test test/dashboard-ui-contract.test.mjs test/dashboard-theme.test.mjs && node test/dashboard-smoke.mjs",
         "test:dashboard-timers": "node test/dashboard-timers.test.mjs",
         "test:ops": "node test/ops-smoke.mjs",
         "test:desktop": "node --test test/agent-desktop-adapter.test.mjs && node test/mcp-desktop-smoke.mjs",

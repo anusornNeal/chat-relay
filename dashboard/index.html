@@ -5,11 +5,18 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#18251e">
   <title>Chat Relay · Workspace</title>
+  <script src="/dashboard/theme.js"></script>
   <link rel="stylesheet" href="/dashboard/styles.css">
   <link rel="stylesheet" href="/dashboard/shared-learn.css">
+  <link rel="stylesheet" href="/dashboard/theme.css">
 </head>
 <body>
   <section id="loginView" class="auth-shell">
+    <label class="theme-picker auth-theme-picker">Appearance
+      <select data-theme-control aria-label="Appearance on sign in">
+        <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+      </select>
+    </label>
     <div class="auth-card">
       <div class="brand-row">
         <span class="brand-mark">CR</span>
@@ -48,6 +55,11 @@
           <p id="pageSubtitle" class="subtitle"></p>
         </div>
         <div class="top-actions">
+          <label class="theme-picker">Appearance
+            <select data-theme-control aria-label="Appearance">
+              <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+            </select>
+          </label>
           <span id="freshness" class="soft-pill">Waiting for data</span>
         </div>
       </header>
