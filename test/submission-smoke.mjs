@@ -98,6 +98,7 @@ const byName = new Map(tools.map((tool) => [tool.name, tool.annotations]));
 const expected = {
   read_file: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   write_file: { readOnlyHint: false, openWorldHint: false, destructiveHint: true },
+  edit_files: { readOnlyHint: false, openWorldHint: false, destructiveHint: true },
   terminal_exec: { readOnlyHint: false, openWorldHint: true, destructiveHint: true },
   screenshot: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   mouse_click: { readOnlyHint: false, openWorldHint: true, destructiveHint: true },

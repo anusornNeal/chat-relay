@@ -30,7 +30,7 @@ export function preflightScope(args) {
   if (!args || typeof args !== "object") return PREFLIGHT_SCOPE_GLOBAL;
   const key = typeof args.projectKey === "string" ? args.projectKey.trim() : "";
   if (key && key.length <= 200) return "project:" + key.toLowerCase();
-  for (const property of ["cwd", "root", "rootPath", "repoPath", "workspacePath", "path"]) {
+  for (const property of ["cwd", "root", "rootPath", "repoPath", "workspacePath", "basePath", "path"]) {
     const value = args[property];
     if (typeof value !== "string" || value.length > 2048) continue;
     const normalized = value.replace(/\\/g, "/");

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { deduplicateSearchPreviews } from "./fs-batch-preview.mjs";
 
 const MAX_READ_BYTES = 256 * 1024;
 const DEFAULT_READ_RESPONSE_BYTES = 32 * 1024;
@@ -8,6 +9,8 @@ const DEFAULT_MULTI_READ_RESPONSE_BYTES = 48 * 1024;
 const DEFAULT_BATCH_RESPONSE_BYTES = 48 * 1024;
 const MAX_BATCH_OPERATIONS = 20;
 const MAX_BATCH_SEARCHES = 8;
+const MAX_BATCH_EDIT_BYTES = 48 * 1024;
+const MAX_BATCH_EDITS = 100;
 const MAX_ARTIFACT_BYTES = 40 * 1024;
 const ARTIFACT_MIME_TYPES = new Map([
   [".txt", "text/plain; charset=utf-8"],
@@ -93,10 +96,24 @@ function normalizeReadRequest(input) {
   return typeof input === "string" ? { path: input } : { ...(input || {}) };
 }
 
+function utf8Bytes(text, max) {
+  if (typeof text !== "string" || !text.isWellFormed() || text.includes("\0")) throw new Error("invalid_utf8");
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length > max) throw new Error("file_too_large");
+  return bytes;
+}
+
+function editError(error) {
+  // Return a compact stable error, not paths or an arbitrary OS exception string.
+  const code = typeof error?.code === "string" ? error.code : error?.message;
+  return typeof code === "string" && /^[a-zA-Z0-9_:-]{1,100}$/.test(code) ? code : "batch_edit_failed";
+}
+
 export class FileManager {
   constructor(rootSpec) {
     this.roots = splitRoots(rootSpec);
     this.searches = new Map();
+    this.editBatchTail = Promise.resolve();
   }
 
   getRoots() {
@@ -121,6 +138,35 @@ export class FileManager {
       if (within(canonicalRoot, parent)) return target;
     }
     throw new Error("path_not_allowed");
+  }
+
+  async #resolveBatchBase(basePath) {
+    if (basePath === undefined || basePath === null) return null;
+    if (typeof basePath !== "string" || !path.isAbsolute(basePath)) throw new Error("invalid_base_path");
+    const base = await this.#resolveExisting(basePath);
+    if (!(await fs.stat(base)).isDirectory()) throw new Error("base_not_directory");
+    return base;
+  }
+
+  async #batchPath(input, base, create = false) {
+    if (typeof input !== "string" || !input || input.includes("\0")) throw new Error("invalid_path");
+    if (process.platform === "win32" && input.replace(/^[a-z]:/i, "").includes(":")) {
+      throw new Error("invalid_path");
+    }
+    if (!base && !create) return input;
+    if (base && (path.isAbsolute(input) || path.win32.isAbsolute(input) || /^[a-z]:/i.test(input))) {
+      throw new Error("relative_path_required");
+    }
+    const target = path.resolve(base || process.cwd(), input);
+    if (base && !within(base, target)) throw new Error("path_outside_base");
+    if (create) {
+      const parent = await this.#resolveExisting(path.dirname(target));
+      if (base && !within(base, parent)) throw new Error("path_outside_base");
+      return path.join(parent, path.basename(target));
+    }
+    const canonical = await this.#resolveExisting(target);
+    if (base && !within(base, canonical)) throw new Error("path_outside_base");
+    return canonical;
   }
 
   async stat(input) {
@@ -221,11 +267,12 @@ export class FileManager {
     };
   }
 
-  async readMany(paths, maxTotalBytes = DEFAULT_MULTI_READ_RESPONSE_BYTES) {
+  async readMany(paths, maxTotalBytes = DEFAULT_MULTI_READ_RESPONSE_BYTES, basePath) {
     if (!Array.isArray(paths) || paths.length === 0 || paths.length > 20) {
       throw new Error("invalid_paths");
     }
 
+    const base = basePath == null ? null : await this.#resolveBatchBase(basePath);
     const requests = paths.map(normalizeReadRequest);
     if (requests.some((entry) => typeof entry.path !== "string" || entry.path.length === 0)) {
       throw new Error("invalid_paths");
@@ -247,8 +294,9 @@ export class FileManager {
       let candidate;
 
       try {
+        const target = base ? await this.#batchPath(request.path, base) : request.path;
         for (let attempt = 0; attempt < 8; attempt++) {
-          const result = await this.read(request.path, start, length, fileBudget);
+          const result = await this.read(target, start, length, fileBudget);
           candidate = { ok: true, ...result };
           const projected = {
             files: [...files, candidate],
@@ -301,17 +349,24 @@ export class FileManager {
   }
 
 
-  async batch(operations, maxTotalBytes = DEFAULT_BATCH_RESPONSE_BYTES) {
+  async batch(operations, maxTotalBytes = DEFAULT_BATCH_RESPONSE_BYTES, options = {}) {
     if (!Array.isArray(operations) || operations.length === 0 || operations.length > MAX_BATCH_OPERATIONS) {
       throw new Error("invalid_batch");
     }
-
     if (operations.filter((item) => item?.op === "search").length > MAX_BATCH_SEARCHES) {
       throw new Error("too_many_batch_searches");
     }
+    const batchBase = options.basePath == null ? null : await this.#resolveBatchBase(options.basePath);
     const totalBudget = boundedReadBytes(maxTotalBytes, DEFAULT_BATCH_RESPONSE_BYTES, 4 * 1024);
     const results = [];
     let nextIndex = null;
+    const payloadFor = (rows, next, truncated = false) => ({
+      ...(options.deduplicatePreviews === true ? deduplicateSearchPreviews(rows) : { results: rows }),
+      totalOperations: operations.length,
+      nextIndex: next,
+      truncated,
+      maxTotalBytes: totalBudget,
+    });
 
     for (let index = 0; index < operations.length; index++) {
       const operation = operations[index] || {};
@@ -322,106 +377,157 @@ export class FileManager {
         op,
         ...(typeof operation.path === "string" ? { path: operation.path } : {}),
       };
+      const next = index + 1 < operations.length ? index + 1 : null;
+      const fits = candidate => byteSize(payloadFor([...results, candidate], next)) <= totalBudget;
       const minimumBudget = op === "list" ? 4 * 1024 : MIN_READ_RESPONSE_BYTES;
       const fallbackBudget = op === "list" ? DEFAULT_LIST_RESPONSE_BYTES : DEFAULT_READ_RESPONSE_BYTES;
       let operationBudget = boundedReadBytes(operation.maxBytes, fallbackBudget, minimumBudget);
       let candidate;
-
       try {
-        if (typeof operation.path !== "string" || operation.path.length === 0) {
-          throw new Error("invalid_path");
-        }
-
+        if (typeof operation.path !== "string" || !operation.path) throw new Error("invalid_path");
+        const target = batchBase ? await this.#batchPath(operation.path, batchBase) : operation.path;
         for (let attempt = 0; attempt < 8; attempt++) {
           let result;
-          if (op === "stat") {
-            result = await this.stat(operation.path);
-          } else if (op === "read") {
-            result = await this.read(operation.path, operation.offset, operation.length, operationBudget);
-          } else if (op === "list") {
-            result = await this.list(operation.path, operation.depth, operation.offset, operation.limit, operationBudget);
-          } else if (op === "search") {
-            result = await this.startSearch(operation.path, operation.pattern, operation.searchType, operation.maxResults ?? 10, operation.previewLines);
-          } else {
-            throw new Error("invalid_batch_operation");
-          }
+          if (op === "stat") result = await this.stat(target);
+          else if (op === "read") result = await this.read(target, operation.offset, operation.length, operationBudget);
+          else if (op === "list") result = await this.list(target, operation.depth, operation.offset, operation.limit, operationBudget);
+          else if (op === "search") result = await this.startSearch(target, operation.pattern, operation.searchType, operation.maxResults ?? 10, operation.previewLines);
+          else throw new Error("invalid_batch_operation");
 
           candidate = { ...base, ok: true, result };
-          const projected = {
-            results: [...results, candidate],
-            totalOperations: operations.length,
-            nextIndex: index + 1 < operations.length ? index + 1 : null,
-            truncated: false,
-            maxTotalBytes: totalBudget,
-          };
-          if (byteSize(projected) <= totalBudget) break;
+          if (fits(candidate)) break;
+          candidate = undefined;
           if (op === "search") {
-            // Keep the session usable even when first-page previews exceed
-            // the aggregate response budget. The caller can continue from
-            // sessionId + nextOffset without repeating the scan.
-            candidate = undefined;
+            // Do not repeat a scan just to fit its initial response page.
             for (let keep = result.results.length - 1; keep >= 0; keep--) {
-              const page = {
-                ...result,
-                results: result.results.slice(0, keep),
-                nextOffset: keep < result.totalResults ? keep : null,
-              };
+              const page = { ...result, results: result.results.slice(0, keep),
+                nextOffset: keep < result.totalResults ? keep : null };
               const reduced = { ...base, ok: true, result: page };
-              if (byteSize({ ...projected, results: [...results, reduced] }) <= totalBudget) {
-                candidate = reduced;
-                break;
-              }
+              if (fits(reduced)) { candidate = reduced; break; }
             }
             break;
           }
-          if (op === "stat") {
-            candidate = undefined;
-            break;
-          }
-
+          if (op === "stat") break;
           operationBudget = Math.floor(operationBudget * 0.65);
-          candidate = undefined;
           if (operationBudget < minimumBudget) break;
         }
       } catch (error) {
-        candidate = {
-          ...base,
-          ok: false,
-          error: error instanceof Error ? error.message : "batch_operation_failed",
-        };
+        candidate = { ...base, ok: false, error: error instanceof Error ? error.message : "batch_operation_failed" };
       }
-
-      if (!candidate) {
-        nextIndex = index;
-        break;
-      }
-
-      const projected = {
-        results: [...results, candidate],
-        totalOperations: operations.length,
-        nextIndex: index + 1 < operations.length ? index + 1 : null,
-        truncated: false,
-        maxTotalBytes: totalBudget,
-      };
-      if (byteSize(projected) > totalBudget) {
-        nextIndex = index;
-        break;
-      }
+      if (!candidate || !fits(candidate)) { nextIndex = index; break; }
       results.push(candidate);
     }
 
-    const nestedTruncated = results.some((entry) => entry.ok && (
+    const nestedTruncated = results.some(entry => entry.ok && (
       entry.result?.truncated === true || (entry.op === "search" && entry.result?.nextOffset !== null)
     ));
-    return {
-      results,
-      totalOperations: operations.length,
-      nextIndex,
-      truncated: nextIndex !== null || nestedTruncated,
-      maxTotalBytes: totalBudget,
-    };
+    return payloadFor(results, nextIndex, nextIndex !== null || nestedTruncated);
   }
 
+  // One entry per file, multiple exact replacements per entry. Separate from read-only batch.
+  editMany(operations, basePath) {
+    const run = this.editBatchTail.then(() => this.#editMany(operations, basePath));
+    this.editBatchTail = run.catch(() => {});
+    return run;
+  }
+
+  async #editMany(operations, basePath) {
+    if (!Array.isArray(operations) || !operations.length || operations.length > MAX_BATCH_OPERATIONS) {
+      throw new Error("invalid_edit_batch");
+    }
+    if (byteSize({ operations, basePath }) > MAX_BATCH_EDIT_BYTES) throw new Error("edit_batch_too_large");
+    const count = operations.reduce((sum, op) => sum + (Array.isArray(op?.edits) ? op.edits.length : 0), 0);
+    if (count > MAX_BATCH_EDITS) throw new Error("too_many_batch_edits");
+    const base = await this.#resolveBatchBase(basePath);
+    const resolved = [];
+    const targets = new Map();
+    for (const [index, operation] of operations.entries()) {
+      const input = typeof operation?.path === "string" ? operation.path : "";
+      const row = { index, path: input.slice(0, 512), ...(input.length > 512 ? { pathTruncated: true } : {}) };
+      try {
+        if (!["create", "edit"].includes(operation?.op)) throw new Error("invalid_edit_batch_operation");
+        const create = operation.op === "create";
+        const selected = await this.#batchPath(input, base, create);
+        const target = create ? selected : await this.#resolveExisting(selected);
+        const key = process.platform === "win32" ? target.toLowerCase() : target;
+        resolved.push({ row, operation, target, key });
+        targets.set(key, (targets.get(key) || 0) + 1);
+      } catch (error) {
+        resolved.push({ row: { ...row, ok: false, error: editError(error) } });
+      }
+    }
+
+    const results = [];
+    for (const entry of resolved) {
+      if (!entry.target) { results.push(entry.row); continue; }
+      const { row, operation, target, key } = entry;
+      try {
+        if (targets.get(key) > 1) throw new Error("duplicate_batch_target");
+        const create = operation.op === "create";
+        let original = null, mode, updated, replacements = 0;
+        if (create) {
+          updated = utf8Bytes(operation.content, MAX_WRITE_BYTES);
+        } else {
+          const info = await fs.lstat(target);
+          if (!info.isFile() || info.isSymbolicLink()) throw new Error("not_a_file");
+          if (info.size > MAX_WRITE_BYTES * 8) throw new Error("file_too_large");
+          original = await fs.readFile(target);
+          if (original.length > MAX_WRITE_BYTES * 8) throw new Error("file_too_large");
+          if (original.includes(0)) throw new Error("invalid_utf8");
+          let text;
+          try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(original); }
+          catch { throw new Error("invalid_utf8"); }
+          mode = info.mode & 0o777;
+          if (!Array.isArray(operation.edits) || !operation.edits.length || operation.edits.length > 20) throw new Error("invalid_edit");
+          const crlf = text.includes("\r\n") && !text.replace(/\r\n/g, "").includes("\n");
+          const eol = value => crlf ? value.replace(/\r?\n/g, "\r\n") : value;
+          for (const edit of operation.edits) {
+            if (typeof edit?.oldText !== "string" || !edit.oldText || typeof edit.newText !== "string" ||
+                !edit.oldText.isWellFormed() || !edit.newText.isWellFormed()) throw new Error("invalid_edit");
+            const expected = edit.expectedReplacements ?? 1;
+            if (!Number.isInteger(expected) || expected < 1 || expected > 100) throw new Error("invalid_edit");
+            const parts = text.split(eol(edit.oldText));
+            const matches = parts.length - 1;
+            if (matches !== expected) throw new Error("replacement_count_mismatch:" + matches);
+            text = parts.join(eol(edit.newText));
+            replacements += matches;
+          }
+          updated = utf8Bytes(text, MAX_WRITE_BYTES * 8);
+        }
+        await this.#commitBatchFile(target, original, updated, mode, base);
+        results.push({ ...row, ok: true, op: operation.op, bytes: updated.length, ...(create ? {} : { replacements }) });
+      } catch (error) {
+        results.push({ ...row, ok: false, op: operation.op, error: editError(error) });
+      }
+    }
+    const succeeded = results.filter(row => row.ok).length;
+    return { ok: succeeded === results.length, requested: results.length, succeeded, failed: results.length - succeeded,
+      ...(succeeded === results.length ? {} : { error: "batch_edit_partial_failure" }), results };
+  }
+
+  async #commitBatchFile(target, original, updated, mode, base) {
+    const parent = await this.#resolveExisting(path.dirname(target));
+    if (base && !within(base, parent)) throw new Error("path_outside_base");
+    if (path.relative(parent, path.dirname(target)) !== "") throw new Error("target_changed");
+    const temporary = path.join(parent, ".chat-relay-" + randomUUID() + ".tmp");
+    try {
+      await fs.writeFile(temporary, updated, { flag: "wx", ...(mode === undefined ? {} : { mode }) });
+      const currentParent = await this.#resolveExisting(parent);
+      if (path.relative(parent, currentParent) !== "") throw new Error("target_changed");
+      if (original === null) {
+        // Same-directory link is an atomic no-clobber publish, even if another creator wins.
+        await fs.link(temporary, target);
+      } else {
+        const info = await fs.lstat(target);
+        if (!info.isFile() || info.isSymbolicLink() || info.size !== original.length ||
+            !(await fs.readFile(target)).equals(original)) throw new Error("target_changed");
+        // Atomic replacement per file, not a transaction across files or an OS-level CAS.
+        await fs.rename(temporary, target);
+      }
+    } finally {
+      await fs.unlink(temporary).catch(() => {});
+    }
+  }
 
   async exportArtifact(input, maxBytes = MAX_ARTIFACT_BYTES) {
     const target = await this.#resolveExisting(input);

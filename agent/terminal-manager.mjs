@@ -1,3 +1,4 @@
+import { compactTerminalResult, compactTerminalPage, CompactExecOutputStore, outputLimit, validateOutputMode } from "./terminal-output.mjs";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
@@ -535,6 +536,7 @@ export class TerminalManager {
     this.shell = shellForPlatform(this.platform, options.shell);
     this.sessions = new Map();
     this.processEpoch = options.processEpoch ?? randomUUID();
+    this.execOutputs = new CompactExecOutputStore(this.processEpoch);
     this.batches = new Map();
     this.batchQueue = [];
     this.activeBatchJobs = 0;
@@ -590,6 +592,19 @@ export class TerminalManager {
 
     this.fastExecStats.isolated += 1;
     return this.#execIsolated(command, resolvedCwd, timeout);
+  }
+
+  async execCompact(command, cwd, timeoutMs, outputMode = "summary", outputChars) {
+    const mode = validateOutputMode(outputMode);
+    const limit = outputLimit(outputChars);
+    const startedAt = new Date().toISOString();
+    const start = Date.now();
+    const raw = await this.exec(command, cwd, timeoutMs);
+    const endedAt = new Date().toISOString();
+    const result = compactTerminalResult(raw, mode, limit);
+    return { ...result, durationMs: Date.now() - start,
+      ...(result.omittedChars > 0 ? { rawOutputId: this.execOutputs.record(raw, startedAt, endedAt),
+        rawOutputExpiresInMs: 600000 } : {}) };
   }
 
   #execIsolated(command, resolvedCwd, timeout) {
@@ -705,6 +720,8 @@ export class TerminalManager {
   }
 
   read(sessionId, afterSeq = 0, maxChars = MAX_READ_CHARS) {
+    const replay = this.execOutputs.read(sessionId, afterSeq, maxChars);
+    if (replay) return replay;
     this.#cleanup();
     const session = this.#get(sessionId);
     if (!session) return terminalSessionMiss(sessionId, this.processEpoch);
@@ -753,6 +770,14 @@ export class TerminalManager {
       session.waiters.add(finish);
       timer = setTimeout(finish, waitMs);
     });
+  }
+
+  async readCompact(sessionId, afterSeq = 0, maxChars = MAX_READ_CHARS, waitMs = 0,
+    outputMode = "summary", outputChars) {
+    const mode = validateOutputMode(outputMode);
+    const limit = outputLimit(outputChars);
+    const page = await this.readWithWait(sessionId, afterSeq, maxChars, waitMs);
+    return compactTerminalPage(page, mode, limit, afterSeq);
   }
 
   write(sessionId, input, appendNewline = true) {
@@ -863,6 +888,34 @@ export class TerminalManager {
       };
     });
     return { ...this.#batchSummary(batch), jobs, truncated, maxChars: aggregateLimit };
+  }
+
+  batchReadCompact(batchId, maxChars = MAX_BATCH_READ_CHARS, outputMode = "summary", outputChars, jobIndex) {
+    const mode = validateOutputMode(outputMode);
+    const limit = outputLimit(outputChars);
+    this.#cleanup();
+    const batch = this.#getBatch(batchId);
+    if (jobIndex !== undefined && (!Number.isInteger(jobIndex) || jobIndex < 0 || jobIndex >= batch.jobs.length)) {
+      throw new Error("invalid_job_index");
+    }
+    const selected = jobIndex === undefined ? batch.jobs : [batch.jobs[jobIndex]];
+    if (mode === "full" && jobIndex === undefined) return this.batchRead(batchId, maxChars);
+    const aggregateLimit = normalizeInteger(maxChars, MAX_BATCH_READ_CHARS, 1024, MAX_BATCH_READ_CHARS);
+    let remaining = aggregateLimit;
+    let truncated = false;
+    const jobs = selected.map(job => {
+      const budget = Math.min(MAX_JOB_READ_CHARS, remaining, mode === "full" ? MAX_JOB_READ_CHARS : limit);
+      const raw = { ...this.#jobSummary(job), stdout: job.stdout, stderr: job.stderr };
+      const output = mode === "full" ? { ...raw, ...clipJobOutput(job.stdout, job.stderr, budget) }
+        : compactTerminalResult(raw, mode, budget);
+      remaining = Math.max(0, remaining - output.stdout.length - output.stderr.length);
+      const omitted = job.stdout.length + job.stderr.length - output.stdout.length - output.stderr.length;
+      truncated ||= job.outputTruncated || omitted > 0;
+      return { ...output, outputTruncated: job.outputTruncated || omitted > 0,
+        ...(mode === "full" ? {} : { rawJobIndex: job.index }) };
+    });
+    return { ...this.#batchSummary(batch), jobs, truncated, maxChars: aggregateLimit, outputMode: mode,
+      ...(jobIndex === undefined ? {} : { selectedJobIndex: jobIndex }) };
   }
 
   async batchCancel(batchId) {

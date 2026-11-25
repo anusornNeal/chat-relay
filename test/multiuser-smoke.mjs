@@ -262,7 +262,7 @@ const tools = await rpc(ownerToken, 1, "tools/list");
 const names = new Set(tools.result.tools.map((item) => item.name));
 for (const required of [
   "list_agents", "get_config", "stat_path", "list_directory", "read_file", "read_multiple_files", "fs_batch", "create_temp_artifact",
-  "write_file", "edit_block", "create_directory", "move_path", "delete_path", "cleanup_worktree",
+  "write_file", "edit_block", "edit_files", "create_directory", "move_path", "delete_path", "cleanup_worktree",
   "start_search", "get_more_search_results", "list_processes", "kill_process",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_read",
   "terminal_write", "terminal_list", "terminal_kill",

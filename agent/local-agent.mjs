@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { DesktopManager, createDesktopPlatformAdapter } from "./desktop-manager.mjs";
 import { FileManager } from "./file-manager.mjs";
+import { LocalUsageHistory, usageFileForAgent } from "./local-usage.mjs";
 import { GitWorktreeManager } from "./git-worktree-manager.mjs";
 import { ProcessManager } from "./process-manager.mjs";
 import { TerminalManager } from "./terminal-manager.mjs";
@@ -83,7 +84,7 @@ const desktop = new DesktopManager({
   controlMaxQueued: process.env.DESKTOP_CONTROL_MAX_QUEUED,
   controlQueueTimeoutMs: process.env.AGENT_QUEUE_TIMEOUT_MS,
 });
-const recentCalls = [];
+const usage = new LocalUsageHistory({ file: process.env.CHAT_RELAY_USAGE_DISABLED === "1" ? null : usageFileForAgent(agentId) });
 // Correlate asynchronous batch/session output with the project where work began.
 // Local only, bounded and never queried from the Worker.
 const recentToolProjects = new Map();
@@ -195,7 +196,11 @@ async function handlePayload(payload) {
         },
       });
     case "agent.recentCalls":
-      return recentCalls.slice(-(Math.min(Math.max(Number(payload.limit) || 50, 1), 100)));
+      return usage.recent(payload.limit);
+    case "agent.recentCalls.page":
+      return usage.page(payload.limit, payload.cursor);
+    case "agent.usageStats":
+      return usage.stats(payload.days);
     case "agent.lifecycle.status":
       return { ok: true, lifecycle: lifecycle.snapshot() };
     case "agent.lifecycle.drain":
@@ -221,8 +226,16 @@ async function handlePayload(payload) {
       return files.read(payload.path, payload.offset, payload.length, payload.maxBytes);
     case "fs.readMany":
       return files.readMany(payload.paths, payload.maxTotalBytes);
+    case "fs.readMany.relative":
+      return files.readMany(payload.paths, payload.maxTotalBytes, payload.basePath);
     case "fs.batch":
       return files.batch(payload.operations, payload.maxTotalBytes);
+    case "fs.batch.compact":
+      return files.batch(payload.operations, payload.maxTotalBytes, {
+        basePath: payload.basePath, deduplicatePreviews: payload.deduplicatePreviews,
+      });
+    case "fs.editMany":
+      return files.editMany(payload.operations, payload.basePath);
     case "fs.artifact":
       return files.exportArtifact(payload.path, payload.maxBytes);
     case "fs.write":
@@ -270,6 +283,9 @@ async function handlePayload(payload) {
     case "terminal.exec":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.exec(payload.command, payload.cwd, payload.timeoutMs);
+    case "terminal.exec.compact":
+      if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
+      return terminals.execCompact(payload.command, payload.cwd, payload.timeoutMs, payload.outputMode, payload.outputChars);
     case "terminal.batch.start":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.batchStart(payload.jobs, { cwd: payload.cwd, timeoutMs: payload.timeoutMs, concurrency: payload.concurrency, observability: payload.observability });
@@ -279,6 +295,9 @@ async function handlePayload(payload) {
     case "terminal.batch.read":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.batchRead(payload.batchId, payload.maxChars);
+    case "terminal.batch.read.compact":
+      if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
+      return terminals.batchReadCompact(payload.batchId, payload.maxChars, payload.outputMode, payload.outputChars, payload.jobIndex);
     case "terminal.batch.cancel":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.batchCancel(payload.batchId);
@@ -291,6 +310,9 @@ async function handlePayload(payload) {
     case "terminal.read":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.readWithWait(payload.sessionId, payload.afterSeq, payload.maxChars, payload.waitMs ?? 0);
+    case "terminal.read.compact":
+      if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
+      return terminals.readCompact(payload.sessionId, payload.afterSeq, payload.maxChars, payload.waitMs ?? 0, payload.outputMode, payload.outputChars);
     case "terminal.write":
       if (!terminalEnabled) return { ok: false, error: "terminal_disabled" };
       return terminals.write(payload.sessionId, payload.input, payload.appendNewline !== false);
@@ -535,7 +557,7 @@ function connect() {
     let scheduleMeta = { lane: "unknown", queueWaitMs: 0, queueDepthAtStart: 0, activeAtStart: 0 };
     let handlerDurationMs = 0;
     try {
-      const schedulingAction = action === "terminal.read" && Number(message.payload?.waitMs) > 0
+      const schedulingAction = (action === "terminal.read" || action === "terminal.read.compact") && Number(message.payload?.waitMs) > 0
         ? "terminal.read.wait" : action;
       const result = await scheduler.run(schedulingAction, async (meta = {}) => {
         scheduleMeta = { ...scheduleMeta, ...meta };
@@ -553,7 +575,8 @@ function connect() {
           rememberToolProject(result?.sessionId, uiActivity.project);
         }
       }
-      recentCalls.push({
+      if (action === "terminal.exec.compact") rememberToolProject(result?.rawOutputId, uiActivity.project);
+      const recentEntry = {
         at: new Date().toISOString(),
         action,
         summary: callSummary,
@@ -564,14 +587,14 @@ function connect() {
         ...(timing ? { timing } : {}),
         ...(typeof result?.execMode === "string" ? { execMode: result.execMode } : {}),
         ok: !(result && typeof result === "object" && result.ok === false),
-      });
-      if (recentCalls.length > 100) recentCalls.shift();
+      };
       const responseMeta = {
         agentQueueWaitMs: scheduleMeta.queueWaitMs,
         agentHandlerMs: handlerDurationMs,
         lane: scheduleMeta.lane,
       };
       const responseBytes = Buffer.byteLength(serializeResponse(message.requestId, result, responseMeta), "utf8");
+      try { usage.record({ ...recentEntry, requestBytes, responseBytes }, message.payload, result); } catch {}
       emitUi("tool:end", {
         requestId: message.requestId,
         action,
@@ -586,7 +609,7 @@ function connect() {
         : result;
       sendSocketResponse(socket, message.requestId, advised, responseMeta);
     } catch (error) {
-      recentCalls.push({
+      const recentEntry = {
         at: new Date().toISOString(),
         action,
         summary: callSummary,
@@ -596,13 +619,13 @@ function connect() {
         lane: scheduleMeta.lane,
         ok: false,
         error: error instanceof Error ? error.message : "agent_error",
-      });
-      if (recentCalls.length > 100) recentCalls.shift();
+      };
       const errorPayload = {
         ok: false,
         error: error instanceof Error ? error.message : "agent_error",
       };
       const responseBytes = Buffer.byteLength(serializeResponse(message.requestId, errorPayload), "utf8");
+      try { usage.record({ ...recentEntry, requestBytes, responseBytes }, message.payload, errorPayload); } catch {}
       emitUi("tool:end", {
         requestId: message.requestId,
         action,
@@ -700,6 +723,6 @@ function shutdown(reason) {
 
 process.once("SIGINT", () => shutdown("SIGINT"));
 process.once("SIGTERM", () => shutdown("SIGTERM"));
-process.once("exit", () => { terminals.close(); desktop.close(); });
+process.once("exit", () => { usage.close(); terminals.close(); desktop.close(); });
 
 connect();

@@ -1289,7 +1289,7 @@ const OPEN_WORLD_TOOLS = new Set([
 ]);
 
 const DESTRUCTIVE_TOOLS = new Set([
-  "write_file", "edit_block", "move_path", "delete_path", "kill_process", "learn_delete", "learn_merge_projects",
+  "write_file", "edit_block", "edit_files", "move_path", "delete_path", "kill_process", "learn_delete", "learn_merge_projects",
   "mouse_click", "keyboard_input", "desktop_step", "clipboard_write", "focus_window",
   "terminal_exec", "terminal_start", "terminal_start_shell", "terminal_write", "terminal_kill",
   "terminal_batch_start", "terminal_batch_cancel",
@@ -1583,10 +1583,17 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "get_recent_tool_calls",
-    "Get recent calls handled by the local agent.",
+    "Recent calls (legacy array, <=100), view=history for cursor pages of 1000 retained in RAM, view=stats for local 1-30 UTC day aggregates, batch sizes and estimated saved reads.",
     "read",
-    { limit: z.number().int().min(1).max(100).optional() },
-    ({ limit }) => ({ action: "agent.recentCalls", limit }),
+    {
+      limit: z.number().int().min(1).max(100).optional(),
+      view: z.enum(["recent", "history", "stats"]).optional(),
+      cursor: z.string().regex(/^[0-9a-f-]{36}:[1-9][0-9]{0,15}$/i).optional(),
+      days: z.number().int().min(1).max(30).optional(),
+    },
+    ({ limit, view, cursor, days }) => view === "stats" ? { action: "agent.usageStats", days }
+      : view === "history" || cursor ? { action: "agent.recentCalls.page", limit, cursor }
+      : { action: "agent.recentCalls", limit },
   );
 
   register(
@@ -1668,9 +1675,10 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "read_multiple_files",
-    "For 2-20 independent known UTF-8 files prefer one MCP call over repeated read_file or terminal Get-Content; use shell for transformations. 48KiB total; continue via nextIndex/per-file nextOffset.",
+    "For 2-20 independent known UTF-8 files prefer one MCP call over repeated read_file or terminal Get-Content; use shell for transformations. Optional absolute basePath + relative paths inside it. 48KiB total; continue via nextIndex/per-file nextOffset.",
     "read",
     {
+      basePath: z.string().min(1).max(2048).optional(),
       paths: z.array(z.union([
         z.string().min(1).max(2048),
         z.object({
@@ -1682,15 +1690,17 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
       ])).min(1).max(20),
       maxTotalBytes: z.number().int().min(4096).max(49152).optional(),
     },
-    ({ paths, maxTotalBytes }) => ({ action: "fs.readMany", paths, maxTotalBytes }),
+    ({ paths, maxTotalBytes, basePath }) => ({ action: basePath ? "fs.readMany.relative" : "fs.readMany", paths, maxTotalBytes, basePath }),
   );
 
 
   register(
     "fs_batch",
-    "For 2-20 INDEPENDENT mixed stat/read/list/search operations prefer one MCP call over separate calls; never batch dependent steps. Up to eight search patterns. Per-item errors isolated; ordered 48KiB result; continue via nextIndex or search sessionId/nextOffset.",
+    "For 2-20 INDEPENDENT mixed stat/read/list/search operations prefer one MCP call over separate calls; never batch dependent steps. Up to eight search patterns. Per-item errors isolated; ordered 48KiB result; continue via nextIndex or search sessionId/nextOffset. Use basePath + relative paths. deduplicatePreviews=true merges overlapping search previews into sharedPreviews; preview.ref points to its shared content (slice by offset/length).",
     "read",
     {
+      basePath: z.string().min(1).max(2048).optional(),
+      deduplicatePreviews: z.boolean().optional(),
       operations: z.array(z.object({
         id: z.string().min(1).max(128).optional(),
         op: z.enum(["stat", "read", "list", "search"]),
@@ -1707,7 +1717,10 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
       })).min(1).max(20),
       maxTotalBytes: z.number().int().min(4096).max(49152).optional(),
     },
-    ({ operations, maxTotalBytes }) => ({ action: "fs.batch", operations, maxTotalBytes }),
+    ({ operations, maxTotalBytes, basePath, deduplicatePreviews }) => ({
+      action: basePath || deduplicatePreviews ? "fs.batch.compact" : "fs.batch",
+      operations, maxTotalBytes, basePath, deduplicatePreviews,
+    }),
   );
 
   register(
@@ -1743,7 +1756,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "write_file",
-    "Write or append UTF-8 text to a file. New backup files must be necessary and stored inside the owning project's .workspace/backups/, never in a sibling directory.",
+    "Write or append UTF-8 text to a file. Batch independent writes via edit_files. New backup files must be necessary and stored inside the owning project's .workspace/backups/, never in a sibling directory.",
     "write",
     {
       path: z.string().min(1).max(2048),
@@ -1756,7 +1769,7 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "edit_block",
-    "Replace an exact text block in a UTF-8 file. Read current contents first; if replacement_count_mismatch occurs, re-read instead of retrying stale oldText.",
+    "Replace an exact text block in a UTF-8 file. Batch independent edits via edit_files. Read current contents first; if replacement_count_mismatch occurs, re-read instead of retrying stale oldText.",
     "write",
     {
       path: z.string().min(1).max(2048),
@@ -1767,6 +1780,23 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
     ({ path, oldText, newText, expectedReplacements }) => ({
       action: "fs.edit", path, oldText, newText, expectedReplacements,
     }),
+    { destructiveHint: true },
+  );
+
+  register(
+    "edit_files",
+    "Batch independent edits/creates (1-20 files, 48KiB encoded, <=100 exact replacements). Read current text first; creates require missing target/existing parent. Optional basePath + relative paths. UTF-8, reject duplicates/stale text; atomic per file, inspect results, never retry successful entries.",
+    "write",
+    {
+      basePath: z.string().min(1).max(2048).optional(),
+      operations: z.array(z.union([
+        z.object({ op: z.literal("create"), path: z.string().min(1).max(2048), content: z.string().max(49152) }),
+        z.object({ op: z.literal("edit"), path: z.string().min(1).max(2048),
+          edits: z.array(z.object({ oldText: z.string().min(1).max(49152), newText: z.string().max(49152),
+            expectedReplacements: z.number().int().min(1).max(100).optional() })).min(1).max(20) }),
+      ])).min(1).max(20),
+    },
+    ({ basePath, operations }) => ({ action: "fs.editMany", basePath, operations }),
     { destructiveHint: true },
   );
 
@@ -2067,14 +2097,19 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_exec",
-    "Use terminal_exec for Git, transformations, aggregation or one short shell command <=20s. For plain reads of 2+ known files prefer read_multiple_files/fs_batch. For INDEPENDENT test/lint jobs use terminal_batch_start; for long builds use terminal_start + terminal_read. Do not use Start-Sleep just to poll terminal output. Never retry blocked or executionStatus=unknown blindly; keep backups/worktrees under .workspace/.",
+    "Use terminal_exec for Git, transformations, aggregation or one short shell command <=20s. For plain reads of 2+ known files prefer read_multiple_files/fs_batch. For INDEPENDENT test/lint jobs use terminal_batch_start; for long builds use terminal_start + terminal_read. Do not use Start-Sleep just to poll terminal output. Never retry blocked or executionStatus=unknown blindly; keep backups/worktrees under .workspace/. For checks use outputMode=summary/tail/errors (default full); replay captured output with terminal_read(rawOutputId).",
     "terminal",
     {
       command: z.string().min(1).max(4000),
       cwd: z.string().min(1).max(2048).optional(),
       timeoutMs: z.number().int().min(1000).max(20000).optional(),
+      outputMode: z.enum(["full", "tail", "summary", "errors"]).optional(),
+      outputChars: z.number().int().min(256).max(8192).optional(),
     },
-    ({ command, cwd, timeoutMs }) => ({ action: "terminal.exec", command, cwd, timeoutMs }),
+    ({ command, cwd, timeoutMs, outputMode, outputChars }) => ({
+      action: outputMode && outputMode !== "full" ? "terminal.exec.compact" : "terminal.exec",
+      command, cwd, timeoutMs, outputMode, outputChars,
+    }),
     { destructiveHint: true },
   );
 
@@ -2105,10 +2140,16 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_batch_read",
-    "Read bounded batch output, status and exit codes. Prefer this over separate status polling; read again later if still running.",
+    "Read bounded batch output, status and exit codes. Prefer this over separate status polling; read again later if still running. Optional outputMode=summary/tail/errors; replay a specific job with outputMode=full and jobIndex.",
     "terminal",
-    { batchId: z.string().uuid(), maxChars: z.number().int().min(1024).max(24576).optional() },
-    ({ batchId, maxChars }) => ({ action: "terminal.batch.read", batchId, maxChars }),
+    { batchId: z.string().uuid(), maxChars: z.number().int().min(1024).max(24576).optional(),
+      outputMode: z.enum(["full", "tail", "summary", "errors"]).optional(),
+      outputChars: z.number().int().min(256).max(8192).optional(),
+      jobIndex: z.number().int().min(0).max(19).optional() },
+    ({ batchId, maxChars, outputMode, outputChars, jobIndex }) => ({
+      action: (outputMode && outputMode !== "full") || jobIndex !== undefined ? "terminal.batch.read.compact" : "terminal.batch.read",
+      batchId, maxChars, outputMode: outputMode || "full", outputChars, jobIndex,
+    }),
   );
 
   register(
@@ -2143,16 +2184,19 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "terminal_read",
-    "Read output since afterSeq; default is immediate. Optional waitMs (0-15000) waits for NEW output/exit only when none is buffered. Use instead of a separate Start-Sleep + read; do not use by default since an in-flight Durable Object request accrues duration. Older agents may return immediately.",
+    "Read output since afterSeq; default is immediate. Optional waitMs (0-15000) waits for NEW output/exit only when none is buffered. Use instead of a separate Start-Sleep + read; do not use by default since an in-flight Durable Object request accrues duration. Older agents may return immediately. Compact outputMode=summary/tail/errors; full + rawAfterSeq replays. Accepts exec rawOutputId.",
     "terminal",
     {
       sessionId: terminalSessionIdSchema,
       afterSeq: z.number().int().min(0).optional(),
       maxChars: z.number().int().min(1024).max(24576).optional(),
       waitMs: z.number().int().min(0).max(15000).optional(),
+      outputMode: z.enum(["full", "tail", "summary", "errors"]).optional(),
+      outputChars: z.number().int().min(256).max(8192).optional(),
     },
-    ({ sessionId, afterSeq, maxChars, waitMs }) => ({
-      action: "terminal.read", sessionId, afterSeq, maxChars, waitMs,
+    ({ sessionId, afterSeq, maxChars, waitMs, outputMode, outputChars }) => ({
+      action: outputMode && outputMode !== "full" ? "terminal.read.compact" : "terminal.read",
+      sessionId, afterSeq, maxChars, waitMs, outputMode, outputChars,
     }),
   );
 
@@ -2202,16 +2246,19 @@ export function createMcpServer(env: Env, user: AuthUser, requestedTool?: string
 
   register(
     "read_process_output",
-    "Alias for reading session output; same optional bounded waitMs as terminal_read.",
+    "Alias for terminal_read, including compact output modes and raw replay.",
     "terminal",
     {
       sessionId: terminalSessionIdSchema,
       afterSeq: z.number().int().min(0).optional(),
       maxChars: z.number().int().min(1024).max(24576).optional(),
       waitMs: z.number().int().min(0).max(15000).optional(),
+      outputMode: z.enum(["full", "tail", "summary", "errors"]).optional(),
+      outputChars: z.number().int().min(256).max(8192).optional(),
     },
-    ({ sessionId, afterSeq, maxChars, waitMs }) => ({
-      action: "terminal.read", sessionId, afterSeq, maxChars, waitMs,
+    ({ sessionId, afterSeq, maxChars, waitMs, outputMode, outputChars }) => ({
+      action: outputMode && outputMode !== "full" ? "terminal.read.compact" : "terminal.read",
+      sessionId, afterSeq, maxChars, waitMs, outputMode, outputChars,
     }),
   );
 

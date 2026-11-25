@@ -28,6 +28,10 @@ export function getAgentCapabilities(options = {}) {
     "filesystem.read",
     "filesystem.readMany",
     "filesystem.batch",
+    "filesystem.batch.relative",
+    "filesystem.batch.deduplicatePreviews",
+    "filesystem.editMany",
+    "agent.usageStats",
     "filesystem.artifact",
     "filesystem.write",
     "filesystem.edit",
@@ -41,7 +45,7 @@ export function getAgentCapabilities(options = {}) {
   ];
 
   if (terminalEnabled) {
-    capabilities.push("terminal.exec", "terminal.sessions", "terminal.batch", "terminal.read.wait");
+    capabilities.push("terminal.exec", "terminal.sessions", "terminal.batch", "terminal.read.wait", "terminal.output.compact");
   }
 
   if (desktopEnabled && ["win32", "darwin"].includes(platform)) {

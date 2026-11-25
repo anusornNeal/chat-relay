@@ -116,7 +116,7 @@ export class CapabilityScheduler {
     const value = String(action || "unknown");
     if (value.startsWith("fs.")) return this.lanes.get("filesystem");
     if (value.startsWith("process.")) return this.lanes.get("process");
-    if (value === "terminal.exec") return this.lanes.get("terminalExec");
+    if (value === "terminal.exec" || value === "terminal.exec.compact") return this.lanes.get("terminalExec");
     if (value === "terminal.read.wait") return this.lanes.get("terminalWait");
     if (value.startsWith("terminal.")) return this.lanes.get("terminalControl");
     if (["desktop.screenshot", "desktop.clipboard.read", "desktop.window.list"].includes(value)) {

@@ -14,7 +14,7 @@ export function resolveLearnPhase(explicit: LearnPhase | undefined, query: unkno
   const goal = String(query ?? "").slice(0, 1200);
   for (const [phase, pattern] of PHASE_SIGNALS) if (pattern.test(goal)) return phase;
   const tool = String(toolHint ?? "").slice(0, 80);
-  if (/\b(?:edit|write|patch|code|build)\b/i.test(tool) || /(?:edit_block|write_file)/i.test(tool)) return "implement";
+  if (/\b(?:edit|write|patch|code|build)\b/i.test(tool) || /(?:edit_block|edit_files|write_file)/i.test(tool)) return "implement";
   if (/(?:test|verify)/i.test(tool)) return "test";
   return "general";
 }

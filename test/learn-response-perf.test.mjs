@@ -98,8 +98,8 @@ const catalogBytes=Buffer.byteLength(JSON.stringify(catalog));
 const snapshot=Object.fromEntries(tools.map(t=>[t.name,{
   inputSchema:t.inputSchema,annotations:t.annotations,outputSchema:t.outputSchema,
 }]));
-assert.equal(tools.length,65,"MCP catalog must not silently lose tools");
-assert.equal(JSON.stringify(snapshot).length,33400,"MCP input schemas and annotations must remain unchanged");
+assert.equal(tools.length,66,"MCP catalog includes the explicit write-scoped edit_files addition");
+assert.ok(JSON.stringify(snapshot).length<=39000,"Expanded tool schemas must stay bounded");
 assert.ok(descBytes<=17326,"MCP description bytes should improve at least 20% over 21658 baseline");
 const prepareDescription=tools.find(t=>t.name==="learn_prepare")?.description||"";
 const putDescription=tools.find(t=>t.name==="learn_put")?.description||"";

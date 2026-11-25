@@ -65,20 +65,20 @@ function candidatePaths(payload) {
       .map((job) => ({ value: job && typeof job === "object" ? job.cwd || fallbackCwd : fallbackCwd, directory: true }));
   }
   if (action.startsWith("terminal.")) {
-    if (action === "terminal.exec" || action === "terminal.start" || action === "terminal.shell.start") {
+    if (action === "terminal.exec" || action === "terminal.exec.compact" || action === "terminal.start" || action === "terminal.shell.start") {
       return [{ value: payload.cwd, directory: true }];
     }
     return [];
   }
-  if (action === "fs.batch") {
+  if (["fs.batch", "fs.batch.compact", "fs.editMany"].includes(action)) {
     return (Array.isArray(payload.operations) ? payload.operations : [])
       .flatMap((item) => [item?.path, item?.source, item?.destination]
         .filter((value) => typeof value === "string")
-        .map((value) => ({ value, cwd: payload.cwd, directory: item?.op === "list" })));
+        .map((value) => ({ value, cwd: payload.basePath || payload.cwd, directory: item?.op === "list" || item?.op === "search" })));
   }
-  if (action === "fs.readMany") {
+  if (action === "fs.readMany" || action === "fs.readMany.relative") {
     return (Array.isArray(payload.paths) ? payload.paths : [])
-      .map((item) => ({ value: typeof item === "string" ? item : item?.path, cwd: payload.cwd }));
+      .map((item) => ({ value: typeof item === "string" ? item : item?.path, cwd: payload.basePath || payload.cwd }));
   }
   if (action === "fs.move") {
     return [{ value: payload.source, cwd: payload.cwd }, { value: payload.destination, cwd: payload.cwd }];
@@ -183,9 +183,14 @@ export function describeToolActivity(payload = {}, allowedRoots = [], linkedCont
     case "fs.read":
       operation = "Read " + shortName(payload.path);
       break;
+    case "fs.readMany.relative":
     case "fs.readMany":
       operation = "Read " + count(payload.paths) + " files";
       break;
+    case "fs.editMany":
+      operation = "Edit " + count(payload.operations) + " files";
+      break;
+    case "fs.batch.compact":
     case "fs.batch":
       operation = "Inspect " + count(payload.operations) + " filesystem items";
       break;
@@ -195,6 +200,7 @@ export function describeToolActivity(payload = {}, allowedRoots = [], linkedCont
     case "fs.list":
       operation = "Browse " + shortName(payload.path);
       break;
+    case "terminal.exec.compact":
     case "terminal.exec":
     case "terminal.start":
       operation = terminalTitle(payload);
@@ -202,12 +208,14 @@ export function describeToolActivity(payload = {}, allowedRoots = [], linkedCont
     case "terminal.batch.start":
       operation = "Run " + count(payload.jobs) + " terminal tasks";
       break;
+    case "terminal.batch.read.compact":
     case "terminal.batch.read":
       operation = "Review terminal batch results";
       break;
     case "terminal.batch.status":
       operation = "Check terminal batch progress";
       break;
+    case "terminal.read.compact":
     case "terminal.read":
       operation = "Review terminal output";
       break;

@@ -278,3 +278,57 @@ The decision boundary is deliberate:
 Project aliases are account-scoped mappings stored in the Learning Durable Object. Use **My Learn → Merge projects** to join workspace names (for example `buddy-android` → `buddy2`) once, while retaining memory IDs, feedback, and timestamps; the source becomes a permanent alias for future Learn reads/writes across machines. Aliases are never inferred from similar names, and project resolution occurs only during Learn requests—not on ordinary tool calls. Merges run transactionally; conflicting keys with distinct content are renamed instead of discarded.\n\nRouting hints are explicit memories. A global `project_context` memory with key `project-root:<projectKey>` stores the concrete project root. A `preferred-agent` memory may exist in project scope (preferred) or global scope (fallback). `learn_prepare` can also take explicit `projectKey` and `agentId` values when Chat already knows them.
 
 `learn_prepare` is intentionally one-shot and stateless at the Worker level. There is no warm session cache or durable Learn session state to maintain. This prevents Learn from becoming an implicit per-tool CPU/subrequest tax while still allowing relevance-aware context preparation when it is actually useful.
+
+## Efficient tool usage (agent and MCP must support the new capabilities)
+
+- For multiple independent file edits/creates use **edit_files** (write permission).
+  The operation list supports a missing-file create or 1-20 exact replacements per
+  file. At most 20 files, 100 replacements and 48 KiB encoded arguments per batch.
+  Existing parents are required. Each result identifies its original index and
+  success/error; inspect results and retry only failed entries after re-reading.
+  UTF-8 is validated; uniform CRLF and BOM are preserved for existing files.
+  Updates publish atomically per file and recheck the original bytes before
+  replacement; this is not a cross-file transaction or an OS compare-and-swap
+  against other programs writing concurrently. Create uses no-clobber publication
+  on filesystems supporting hard links.
+- **read_multiple_files**, **fs_batch**, and **edit_files** accept an optional
+  absolute basePath. With it, paths must be relative and stay beneath that
+  canonical directory and allowedRoots, including junction/symlink checks.
+  Without it existing path behavior is retained.
+- **fs_batch** with deduplicatePreviews=true packs overlapping identical search
+  context into sharedPreviews. A match's preview.ref refers to sharedPreviews.id;
+  reconstruct the original content by slicing the shared content's lines from
+  preview.offset - shared.offset for preview.length lines. Matches, individual
+  metadata and search sessions/pagination are preserved. This saves response
+  bytes, not repeated search scans.
+- **terminal_exec**, **terminal_read** and **terminal_batch_read** default to
+  full output. Optional outputMode=summary, tail, or errors limits displayed
+  text (outputChars defaults to 2048, range 256-8192). Summary keeps failure
+  diagnostics; errors is a heuristic, not a compiler parser. Compact exec
+  returns rawOutputId if text was omitted; read it with terminal_read and the
+  normal nextSeq cursor. Up to 16 short-command captures for 10 minutes in RAM.
+  For compact session reads replay full mode with rawAfterSeq while the session
+  buffer is retained. For batches replay full mode with jobIndex. Original
+  capture/time/size limits still apply; use terminal_start for verbose/long
+  commands. Neither compact output nor a replay executes the command again.
+- **get_recent_tool_calls** keeps its legacy array response (up to 100 entries).
+  Use view=history with limit and nextCursor to page up to 1000 process-local
+  calls; cursor expires on process restart. Use view=stats with days=1..30 for
+  UTC-day totals, per-tool calls/failures/durations/bytes, batch item counts,
+  observed batch-read share and estimated saved read calls. Saved calls assume
+  one separate read per successful read operation; continuation and missed batch
+  opportunities are not measured. Terminal-based reads are not classified.
+  Only numerical daily aggregates are persisted per agent under the local
+  Chat Relay config directory's usage/ folder. No paths, commands, content,
+  credentials or screenshots are persisted by this feature. A dirty snapshot
+  flushes at most once per 30 seconds and at graceful exit; abrupt termination
+  can lose recent counters. Recent detailed entries and compact raw output
+  are RAM-only. Each agent's statistics start after it upgrades; no historical
+  backfill. Set CHAT_RELAY_USAGE_DISABLED=1 for memory-only aggregates.
+- New optional behaviors use distinct agent actions so older agents fail
+  explicitly rather than interpreting relative paths or compact requests
+  incorrectly. Existing calls remain unchanged. Upgrade the local agent and
+  refresh the MCP catalog before using the new features.
+
+No new Cloudflare storage, dependencies or additional routine relay round trips
+are needed for these improvements.

@@ -164,6 +164,9 @@ export function humanizeToolCall(payload = {}) {
       return "Check agent connection";
     case "agent.config":
       return "Read agent configuration";
+    case "agent.usageStats":
+      return `Read ${number(payload.days, 30)} days of local usage statistics`;
+    case "agent.recentCalls.page":
     case "agent.recentCalls":
       return `Read recent activity · up to ${number(payload.limit, 50)} calls`;
     case "agent.lifecycle.status":
@@ -181,8 +184,12 @@ export function humanizeToolCall(payload = {}) {
       return `Browse ${compactPath(payload.path)} · depth ${number(payload.depth)} · up to ${number(payload.limit, 100)} items`;
     case "fs.read":
       return `Read ${compactPath(payload.path)} · ${lineRange(payload)}`;
+    case "fs.readMany.relative":
     case "fs.readMany":
       return `Read ${Array.isArray(payload.paths) ? payload.paths.length : 0} files`;
+    case "fs.editMany":
+      return `Edit ${Array.isArray(payload.operations) ? payload.operations.length : 0} files`;
+    case "fs.batch.compact":
     case "fs.batch":
       return `Inspect filesystem · ${Array.isArray(payload.operations) ? payload.operations.length : 0} operations`;
     case "fs.artifact":
@@ -212,12 +219,14 @@ export function humanizeToolCall(payload = {}) {
     case "process.kill":
       return `Stop process ${number(payload.pid)}`;
 
+    case "terminal.exec.compact":
     case "terminal.exec":
       return withCwd(humanizeCommand(payload.command), payload.cwd);
     case "terminal.start":
       return withCwd(`Start background task · ${humanizeCommand(payload.command).replace(/^Run /, "")}`, payload.cwd);
     case "terminal.shell.start":
       return withCwd("Open interactive shell", payload.cwd);
+    case "terminal.read.compact":
     case "terminal.read":
       return `Read terminal output · ${cleanText(payload.sessionId, 24)} · after #${number(payload.afterSeq)}${Number(payload.waitMs) > 0 ? ` · wait up to ${number(payload.waitMs)}ms` : ""}`;
     case "terminal.write":
@@ -232,6 +241,7 @@ export function humanizeToolCall(payload = {}) {
       return `Run terminal batch · ${Array.isArray(payload.jobs) ? payload.jobs.length : 0} jobs · ${number(payload.concurrency, 1)} at a time`;
     case "terminal.batch.status":
       return `Check batch progress · ${cleanText(payload.batchId, 24)}`;
+    case "terminal.batch.read.compact":
     case "terminal.batch.read":
       return `Read batch output · ${cleanText(payload.batchId, 24)}`;
     case "terminal.batch.cancel":
